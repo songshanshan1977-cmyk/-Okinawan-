@@ -21,7 +21,20 @@ export default function Step3({ initialData, onNext, onBack }) {
       return;
     }
 
+    // ⭐ 必须回传所有关键字段
     onNext({
+      order_id: initialData.order_id,        // 保持订单 ID
+      car_model_id: initialData.car_model_id, // 保持车型 UUID
+      car_model: initialData.car_model,       // 车型名称
+      driver_lang: initialData.driver_lang,
+      duration: initialData.duration,
+      start_date: initialData.start_date,
+      end_date: initialData.end_date,
+      departure_hotel: initialData.departure_hotel,
+      end_hotel: initialData.end_hotel,
+      total_price: initialData.total_price,
+
+      // Step3 用户填写内容
       name,
       phone,
       email,
