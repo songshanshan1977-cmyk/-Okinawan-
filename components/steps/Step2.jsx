@@ -7,6 +7,13 @@ const BASE_PRICES = {
   car3: 55000, // 海狮 10 座
 };
 
+// ⭐ 车型 UUID（必须与 BookingFlow.jsx 完全一致）
+const CAR_MODEL_IDS = {
+  car1: "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca",
+  car2: "82cf604f-e688-49fe-aecf-69894a01f6cb",
+  car3: "453df662-d350-4ab9-b811-61ffcda40d4b",
+};
+
 export default function Step2({ initialData, onNext, onBack }) {
   const [carModel, setCarModel] = useState(initialData.car_model || "");
   const [driverLang, setDriverLang] = useState(initialData.driver_lang || "zh");
@@ -17,7 +24,6 @@ export default function Step2({ initialData, onNext, onBack }) {
   const calcPrice = (model, hours) => {
     if (!model) return 0;
     const base = BASE_PRICES[model] || 0;
-    // 如果是 10 小时，就在 8 小时基础上 + 20%
     return hours === 10 ? Math.round(base * 1.2) : base;
   };
 
@@ -47,8 +53,11 @@ export default function Step2({ initialData, onNext, onBack }) {
       return;
     }
 
+    // ⭐ 回传关键字段：order_id + car_model_id
     onNext({
+      order_id: initialData.order_id, // ← 必须回传订单号
       car_model: carModel,
+      car_model_id: CAR_MODEL_IDS[carModel], // ← 必须回传车型 UUID
       driver_lang: driverLang,
       duration,
       total_price: totalPrice,
@@ -57,7 +66,9 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   return (
     <div>
-      <h2 style={{ fontSize: "24px", marginBottom: "16px" }}>Step2：选择车型 & 服务</h2>
+      <h2 style={{ fontSize: "24px", marginBottom: "16px" }}>
+        Step2：选择车型 & 服务
+      </h2>
 
       <div style={{ display: "flex", gap: "16px", marginBottom: "16px" }}>
         <button
@@ -146,6 +157,7 @@ export default function Step2({ initialData, onNext, onBack }) {
         >
           返回上一步
         </button>
+
         <button
           onClick={handleNext}
           style={{
