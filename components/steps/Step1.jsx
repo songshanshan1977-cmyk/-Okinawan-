@@ -1,5 +1,6 @@
 // Step1：日期 + 酒店
 // ✅ 当日不能下单：start_date 必须 > 今天
+// ✅ 回传 order_id，确保流程全程不丢失
 
 import { useState } from "react";
 
@@ -25,9 +26,10 @@ export default function Step1({ initialData, onNext }) {
       return;
     }
 
-    // ⭐ 当日不能下单：start_date 必须大于今天
+    // ⭐ 当日不能预约
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+
     const start = new Date(startDate);
 
     if (start <= today) {
@@ -35,9 +37,11 @@ export default function Step1({ initialData, onNext }) {
       return;
     }
 
+    // ⭐ 回传 order_id（非常关键）
     onNext({
+      order_id: initialData.order_id, // ← 保证订单号传回去不丢失
       start_date: startDate,
-      end_date: endDate || startDate, // 你之前是 1 日用车，可以先默认等于开始日期
+      end_date: endDate || startDate,
       departure_hotel: departureHotel,
       end_hotel: endHotel || departureHotel,
     });
@@ -45,9 +49,18 @@ export default function Step1({ initialData, onNext }) {
 
   return (
     <div>
-      <h2 style={{ fontSize: "24px", marginBottom: "16px" }}>Step1：选择日期 & 酒店</h2>
+      <h2 style={{ fontSize: "24px", marginBottom: "16px" }}>
+        Step1：选择日期 & 酒店
+      </h2>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px", maxWidth: "420px" }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "12px",
+          maxWidth: "420px",
+        }}
+      >
         <label>
           用车日期（开始）：
           <input
@@ -90,9 +103,7 @@ export default function Step1({ initialData, onNext }) {
           />
         </label>
 
-        {error && (
-          <div style={{ color: "red", marginTop: "8px" }}>{error}</div>
-        )}
+        {error && <div style={{ color: "red" }}>{error}</div>}
 
         <button
           onClick={handleNext}
