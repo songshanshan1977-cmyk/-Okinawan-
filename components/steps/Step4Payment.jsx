@@ -14,7 +14,7 @@ export default function Step4Payment({ initialData, onNext, onBack }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          orderId: initialData.order_id, // 必须保持一致
+          orderId: initialData.order_id, 
           email: initialData.email,
         }),
       });
@@ -86,3 +86,4 @@ export default function Step4Payment({ initialData, onNext, onBack }) {
     </div>
   );
 }
+
