@@ -5,37 +5,39 @@ export default function Step4Payment({ initialData, onNext, onBack }) {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
+  // ⭐ Supabase Edge Function 正确路径
+  const PAY_URL =
+    "https://xljenmxsmhmgthrlilat.supabase.co/functions/v1/create-payment-intent";
+
   const handlePay = async () => {
     setLoading(true);
     setErrorMsg("");
 
     try {
-      // -------------------------------
-      // ⭐ 调用 Vercel 后端 API（正确路径）
-      // -------------------------------
-      const res = await fetch("/api/create-payment-intent", {
+      // 🔵 调用 Supabase Edge Function（正确）
+      const res = await fetch(PAY_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          orderId: initialData.order_id, // 必须保持不变
-          email: initialData.email, // Stripe 必须用到
+          orderId: initialData.order_id, // ⭐ 一定要保持不变
         }),
       });
 
       const data = await res.json();
-      console.log("🔵 支付返回：", data);
+      console.log("🔵 create-payment-intent 返回：", data);
 
+      // ❌ 没拿到 URL → 错误处理
       if (!data?.url) {
-        setErrorMsg("无法创建支付链接，请稍后再试。");
+        setErrorMsg("无法创建支付链接，请稍后重试。");
         setLoading(false);
         return;
       }
 
-      // ⭐ 跳转 Stripe 收银台
+      // ⭐ 跳转到 Stripe 收银台
       window.location.href = data.url;
     } catch (err) {
-      console.error("🔥 支付错误：", err);
-      setErrorMsg("连接支付系统失败，请稍后重试。");
+      console.error("🔥 调用错误：", err);
+      setErrorMsg("连接支付系统失败，请稍后再试。");
       setLoading(false);
     }
   };
@@ -56,7 +58,7 @@ export default function Step4Payment({ initialData, onNext, onBack }) {
         <p><strong>姓名：</strong> {initialData.name}</p>
         <p><strong>电话：</strong> {initialData.phone}</p>
         <p><strong>邮箱：</strong> {initialData.email}</p>
-        <p><strong>包车总费用：</strong> ¥ {initialData.total_price}</p>
+        <p><strong>包车费用：</strong> ¥ {initialData.total_price}</p>
 
         <p className="text-blue-600 font-bold">
           本次将前往 Stripe 支付押金：¥500
