@@ -23,7 +23,7 @@ function generateOrderId() {
 export default function BookingFlow() {
   const [step, setStep] = useState(1);
 
-  // ⭐ 全局表单数据：完全保持你原来的结构
+  // ⭐ 全局表单数据
   const [formData, setFormData] = useState(() => ({
     order_id: generateOrderId(),
 
@@ -46,14 +46,14 @@ export default function BookingFlow() {
     email: "",
     remark: "",
 
-    // 后面库里需要的
+    // 后端需要的字段
     deposit_amount: 500,
     pax: 1,
     luggage: 0,
     source: "direct",
   }));
 
-  // ⭐ 更新数据并自动填车型 UUID
+  // ⭐ 更新数据 & 自动填充车型 UUID
   const updateFormData = (patch) => {
     setFormData((prev) => {
       const next = { ...prev, ...patch };
@@ -61,15 +61,14 @@ export default function BookingFlow() {
       if (patch.car_model) {
         next.car_model_id = CAR_MODEL_IDS[patch.car_model] || "";
       }
+
       return next;
     });
   };
 
-  // ----------------------------------------------------------------
-  // ⭐ Step1 下一步 —— 加入【当日不能预约】
-  // ----------------------------------------------------------------
+  // ⭐ Step1 → Step2（含当日不能下单）
   const handleStep1Next = (values) => {
-    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const today = new Date().toISOString().slice(0, 10);
 
     if (values.start_date === today) {
       alert("当天无法预约，请选择明天及之后的日期");
@@ -80,21 +79,19 @@ export default function BookingFlow() {
     setStep(2);
   };
 
-  // Step2 → Step3
+  // ⭐ Step2 → Step3
   const handleStep2Next = (values) => {
     updateFormData(values);
     setStep(3);
   };
 
-  // Step3 → Step4
+  // ⭐ Step3 → Step4
   const handleStep3Next = (values) => {
     updateFormData(values);
     setStep(4);
   };
 
-  // ----------------------------------------------------------------
-  // ⭐ Step4 收银台付款成功后：自动扣库存 + 更新订单状态
-  // ----------------------------------------------------------------
+  // ⭐ Step4：支付成功后 → 扣库存 + 更新订单状态
   const handlePaymentSuccess = async () => {
     console.log("Payment success, updating order + inventory");
 
@@ -119,21 +116,25 @@ export default function BookingFlow() {
   const handleStep5Next = () => setStep(6);
   const handleBack = () => setStep((s) => Math.max(1, s - 1));
 
-  // ---------------------------------------------------------------
-  // ⭐ 组件渲染（完全保持你的原始结构）
-  // ---------------------------------------------------------------
+  // ⭐ 渲染组件
   return (
     <div style={{ padding: "24px", maxWidth: "960px", margin: "0 auto" }}>
-      {step === 1 && (
-        <Step1 initialData={formData} onNext={handleStep1Next} />
-      )}
+      {step === 1 && <Step1 initialData={formData} onNext={handleStep1Next} />}
 
       {step === 2 && (
-        <Step2 initialData={formData} onNext={handleStep2Next} onBack={handleBack} />
+        <Step2
+          initialData={formData}
+          onNext={handleStep2Next}
+          onBack={handleBack}
+        />
       )}
 
       {step === 3 && (
-        <Step3 initialData={formData} onNext={handleStep3Next} onBack={handleBack} />
+        <Step3
+          initialData={formData}
+          onNext={handleStep3Next}
+          onBack={handleBack}
+        />
       )}
 
       {step === 4 && (
@@ -145,11 +146,16 @@ export default function BookingFlow() {
       )}
 
       {step === 5 && (
-        <Step5Confirmation initialData={formData} onNext={handleStep5Next} onBack={handleBack} />
+        <Step5Confirmation
+          initialData={formData}
+          onNext={handleStep5Next}
+          onBack={handleBack}
+        />
       )}
 
       {step === 6 && <Step6Final initialData={formData} />}
     </div>
   );
 }
+
 
