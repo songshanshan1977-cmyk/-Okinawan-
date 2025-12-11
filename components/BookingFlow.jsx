@@ -13,11 +13,11 @@ const CAR_MODEL_IDS = {
   car3: "453df662-d350-4ab9-b811-61ffcda40d4b",
 };
 
-// ⭐ 订单编号生成（方案 B）
+// ⭐ 订单编号生成（统一标准：ORD-YYYYMMDD-随机5位）
 function generateOrderId() {
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const rand = Math.floor(100000 + Math.random() * 900000);
-  return `ORD-${date}-${rand}`;
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
+  const random = Math.floor(10000 + Math.random() * 90000); // 五位随机数
+  return `ORD-${date}-${random}`;
 }
 
 export default function BookingFlow() {
@@ -152,3 +152,4 @@ export default function BookingFlow() {
     </div>
   );
 }
+
