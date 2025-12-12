@@ -46,6 +46,68 @@ export default async function handler(req, res) {
     } = body;
 
     // === order_id 只能在这里生成 ===
-    if (!order_id_
+    if (!order_id) {
+      order_id = generateOrderId();
+    }
+
+    if (!deposit_amount) deposit_amount = 500;
+    if (!source) source = "booking-page";
+
+    const orderData = {
+      order_id,
+      car_model_id,
+      driver_lang,
+      duration,
+      start_date,
+      end_date,
+      departure_hotel,
+      end_hotel,
+      pax,
+      luggage,
+      total_price,
+      deposit_amount,
+      name,
+      phone,
+      email,
+      remark,
+      source,
+
+      status: "pending",
+      payment_status: "pending",
+      inventory_status: "pending",
+      email_status: "pending",
+      balance_paid: false,
+    };
+
+    console.log("📝 准备写入 orders:", orderData);
+
+    const { data, error } = await supabase
+      .from("orders")
+      .insert(orderData)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("❌ 写入 orders 失败:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+
+    console.log("✅ 订单写入成功:", data.order_id);
+
+    return res.status(200).json({
+      success: true,
+      data,
+    });
+  } catch (err) {
+    console.error("🔥 /api/create-order 异常:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Server error",
+    });
+  }
+}
 
 
