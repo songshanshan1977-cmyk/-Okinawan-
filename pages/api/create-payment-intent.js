@@ -50,7 +50,7 @@ export default async function handler(req, res) {
 
     console.log("✅ 找到订单 UUID =", order.id);
 
-    // 可选：防止重复支付
+    // 防止重复支付
     if (order.payment_status === "paid") {
       return res.status(400).json({ error: "订单已支付" });
     }
@@ -71,12 +71,25 @@ export default async function handler(req, res) {
           quantity: 1,
         },
       ],
+
       customer_email: order.email || undefined,
+
+      // ⭐⭐⭐ 关键修复点：写进 payment_intent ⭐⭐⭐
+      payment_intent_data: {
+        metadata: {
+          order_id: order.order_id,
+          order_uuid: order.id,
+          type: "deposit",
+        },
+      },
+
+      // session 自己也留一份（备用）
       metadata: {
         order_id: order.order_id,
         order_uuid: order.id,
         type: "deposit",
       },
+
       success_url: `${FRONTEND_URL}/booking?step=5&orderId=${order.order_id}`,
       cancel_url: `${FRONTEND_URL}/booking?step=4&orderId=${order.order_id}&cancel=1`,
     });
@@ -88,4 +101,5 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
+
 
