@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 
-const CREATE_ORDER_URL = "/api/create-order"; // Vercel API（保证先写订单）
+const CREATE_ORDER_URL = "/api/create-order";
 const SUPABASE_FN_URL =
   "https://xljenmxsmhmgthrlilat.supabase.co/functions/v1/create-payment-intent";
 
@@ -16,7 +16,7 @@ export default function Step4Payment({ initialData, onBack }) {
 
     try {
       // ----------------------------
-      // ① 先写入数据库（create-order）
+      // ① 写入 orders（不扣库存）
       // ----------------------------
       const orderRes = await fetch(CREATE_ORDER_URL, {
         method: "POST",
@@ -27,7 +27,7 @@ export default function Step4Payment({ initialData, onBack }) {
       const orderData = await orderRes.json();
       console.log("🔵 create-order 返回：", orderData);
 
-      if (!orderRes.ok || !orderData?.data?.order_id) {
+      if (!orderRes.ok || !orderData?.order?.order_id) {
         setErrorMsg(
           "订单创建失败：" + (orderData?.error || "未返回订单号")
         );
@@ -35,11 +35,11 @@ export default function Step4Payment({ initialData, onBack }) {
         return;
       }
 
-      // ✅ 关键修复：只使用数据库返回的订单号
-      const orderId = orderData.data.order_id;
+      // ✅ 必须以数据库返回的 order_id 为准
+      const orderId = orderData.order.order_id;
 
       // ----------------------------
-      // ② 调用 Supabase create-payment-intent
+      // ② 创建 Stripe 押金支付
       // ----------------------------
       const payRes = await fetch(SUPABASE_FN_URL, {
         method: "POST",
@@ -77,19 +77,43 @@ export default function Step4Payment({ initialData, onBack }) {
 
       <div className="border p-6 rounded-lg space-y-2 text-lg">
         <p><strong>订单编号：</strong> {initialData.order_id}</p>
+
+        <hr />
+
         <p><strong>车型：</strong> {initialData.car_model}</p>
         <p><strong>司机语言：</strong> {initialData.driver_lang}</p>
-        <p><strong>时长：</strong> {initialData.duration} 小时</p>
-        <p><strong>日期：</strong> {initialData.start_date} → {initialData.end_date}</p>
+        <p><strong>包车时长：</strong> {initialData.duration} 小时</p>
+        <p><strong>人数：</strong> {initialData.pax} 人</p>
+        <p><strong>行李：</strong> {initialData.luggage} 件</p>
+
+        <hr />
+
+        <p>
+          <strong>用车日期：</strong>
+          {initialData.start_date} → {initialData.end_date}
+        </p>
         <p><strong>出发酒店：</strong> {initialData.departure_hotel}</p>
         <p><strong>结束酒店：</strong> {initialData.end_hotel}</p>
+
+        <hr />
+
         <p><strong>姓名：</strong> {initialData.name}</p>
         <p><strong>电话：</strong> {initialData.phone}</p>
-        <p><strong>邮箱：</strong> {initialData.email}</p>
-        <p><strong>包车总费用：</strong> ¥ {initialData.total_price}</p>
+        <p><strong>邮箱：</strong> {initialData.email || "—"}</p>
+        {initialData.remark && (
+          <p><strong>备注：</strong> {initialData.remark}</p>
+        )}
+
+        <hr />
+
+        <p><strong>包车总费用：</strong> ¥{initialData.total_price}</p>
 
         <p className="text-blue-600 font-bold mt-4">
           本次将前往 Stripe 支付押金：¥500
+        </p>
+
+        <p className="text-sm text-gray-500">
+          ※ 支付成功后系统将自动扣减库存并确认订单
         </p>
 
         {errorMsg && (
