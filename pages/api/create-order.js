@@ -19,12 +19,26 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing order_id" });
     }
 
-    // 🔴 关键：pax / luggage 必须存在
-    if (data.pax == null || data.luggage == null) {
-      return res.status(400).json({
-        error: "Missing pax or luggage",
-        debug: { pax: data.pax, luggage: data.luggage },
-      });
+    // ✅ 所有 NOT NULL 字段做防御校验
+    const requiredFields = [
+      "car_model_id",
+      "duration",
+      "pax",
+      "luggage",
+      "start_date",
+      "end_date",
+      "departure_hotel",
+      "end_hotel",
+      "total_price",
+    ];
+
+    for (const field of requiredFields) {
+      if (data[field] === null || data[field] === undefined) {
+        return res.status(400).json({
+          error: `Missing required field: ${field}`,
+          debug: data,
+        });
+      }
     }
 
     const { data: order, error } = await supabase
@@ -34,13 +48,15 @@ export default async function handler(req, res) {
           order_id: data.order_id,
           car_model_id: data.car_model_id,
           driver_lang: data.driver_lang,
+
+          duration: data.duration,        // ✅ 关键修复
+          pax: data.pax,                  // ✅
+          luggage: data.luggage,          // ✅
+
           start_date: data.start_date,
           end_date: data.end_date,
           departure_hotel: data.departure_hotel,
           end_hotel: data.end_hotel,
-
-          pax: data.pax,               // ✅ 关键
-          luggage: data.luggage,       // ✅ 关键
 
           total_price: data.total_price,
           deposit_amount: data.deposit_amount ?? 500,
@@ -73,6 +89,5 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
-
 
 
