@@ -15,32 +15,32 @@ const CAR_MODEL_IDS = {
 
 // ⭐ 订单编号生成（统一标准：ORD-YYYYMMDD-随机5位）
 function generateOrderId() {
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
-  const random = Math.floor(10000 + Math.random() * 90000); // 五位随机数
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const random = Math.floor(10000 + Math.random() * 90000);
   return `ORD-${date}-${random}`;
 }
 
 export default function BookingFlow() {
   const [step, setStep] = useState(1);
 
-  // ⭐ 全局表单数据
+  // ⭐ 全局表单数据（与你确认的 orders 表字段对齐）
   const [formData, setFormData] = useState(() => ({
     order_id: generateOrderId(),
 
-    // Step1:
+    // Step1
     start_date: "",
     end_date: "",
     departure_hotel: "",
     end_hotel: "",
 
-    // Step2:
+    // Step2
     car_model: "",
     car_model_id: "",
     driver_lang: "zh",
     duration: 8,
     total_price: 0,
 
-    // Step3:
+    // Step3（客人信息）
     name: "",
     phone: "",
     email: "",
@@ -48,8 +48,8 @@ export default function BookingFlow() {
 
     // 后端需要的字段
     deposit_amount: 500,
-    pax: 1,
-    luggage: 0,
+    pax: 1,        // ✅ 默认值，保证 NOT NULL
+    luggage: 0,    // ✅ 默认值，保证 NOT NULL
     source: "direct",
   }));
 
@@ -66,10 +66,22 @@ export default function BookingFlow() {
     });
   };
 
-  // ⭐ Step1 → Step2（含当日不能下单）
+  // =================================================
+  // ⭐ Step1 → Step2（必填校验 + 当日不能预约）
+  // =================================================
   const handleStep1Next = (values) => {
-    const today = new Date().toISOString().slice(0, 10);
+    // ✅ NEW：必填校验
+    if (
+      !values.start_date ||
+      !values.end_date ||
+      !values.departure_hotel ||
+      !values.end_hotel
+    ) {
+      alert("请填写完整：日期 / 出发酒店 / 回程酒店");
+      return;
+    }
 
+    const today = new Date().toISOString().slice(0, 10);
     if (values.start_date === today) {
       alert("当天无法预约，请选择明天及之后的日期");
       return;
@@ -79,9 +91,24 @@ export default function BookingFlow() {
     setStep(2);
   };
 
-  // ⭐ Step2 → Step3
+  // =================================================
+  // ⭐ Step2 → Step3（确保 pax / luggage 不丢）
+  // =================================================
   const handleStep2Next = (values) => {
-    updateFormData(values);
+    // ✅ NEW：兜底，防止 Step2 没传或被覆盖成 undefined
+    const safeValues = {
+      ...values,
+      pax:
+        values.pax !== undefined && values.pax !== null
+          ? Number(values.pax)
+          : formData.pax,
+      luggage:
+        values.luggage !== undefined && values.luggage !== null
+          ? Number(values.luggage)
+          : formData.luggage,
+    };
+
+    updateFormData(safeValues);
     setStep(3);
   };
 
