@@ -1,14 +1,13 @@
 // pages/api/create-order.js
+
 import { createClient } from "@supabase/supabase-js";
 
-// ⚠️ 必须是 service role
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 export default async function handler(req, res) {
-  // 只允许 POST
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method Not Allowed" });
   }
@@ -16,15 +15,11 @@ export default async function handler(req, res) {
   try {
     const data = req.body;
 
-    // 最低校验
-    if (!data?.order_id || !data?.start_date) {
-      return res.status(400).json({
-        error: "Missing required fields",
-      });
+    if (!data || !data.order_id) {
+      return res.status(400).json({ error: "Missing order_id" });
     }
 
-    // 写入 orders 表
-    const { data: order, error } = await supabase
+    const { error, data: inserted } = await supabase
       .from("orders")
       .insert([
         {
@@ -39,11 +34,9 @@ export default async function handler(req, res) {
           name: data.name,
           phone: data.phone,
           email: data.email,
-          pax: data.pax,
-          luggage: data.luggage,
           total_price: data.total_price,
-          payment_status: "unpaid",
-          status: "pending",
+          payment_status: "pending",
+          status: "created",
         },
       ])
       .select()
@@ -54,13 +47,12 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: error.message });
     }
 
-    // ✅ 返回数据库真实订单
     return res.status(200).json({
       success: true,
-      data: order,
+      order: inserted,
     });
   } catch (err) {
-    console.error("🔥 create-order crash:", err);
+    console.error("❌ create-order exception:", err);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
