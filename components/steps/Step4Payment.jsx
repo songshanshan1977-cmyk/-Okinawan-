@@ -39,11 +39,19 @@ export default function Step4Payment({ initialData, onBack }) {
       const orderId = orderData.order.order_id;
 
       // ----------------------------
-      // ② 创建 Stripe 押金支付
+      // ② 创建 Stripe 押金支付（只改这里：补鉴权头）
       // ----------------------------
+      const anonKey =
+        import.meta.env.VITE_SUPABASE_ANON_KEY ||
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
       const payRes = await fetch(SUPABASE_FN_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          apikey: anonKey,
+          Authorization: `Bearer ${anonKey}`,
+        },
         body: JSON.stringify({ orderId }),
       });
 
@@ -144,5 +152,6 @@ export default function Step4Payment({ initialData, onBack }) {
     </div>
   );
 }
+
 
 
