@@ -31,7 +31,7 @@ export default async function handler(req, res) {
 
     console.log("🔍 create-payment-intent 查询订单：", orderId);
 
-    // 👉 明确用 order_id 查询
+    // 👉 用 order_id 查询
     const { data: order, error } = await supabase
       .from("orders")
       .select("*")
@@ -55,9 +55,22 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "订单已支付" });
     }
 
+    /**
+     * ⭐⭐⭐ 核心：一次性把 webhook 需要的字段全部写进 metadata ⭐⭐⭐
+     */
+    const metadata = {
+      order_id: order.order_id,
+      order_uuid: order.id,
+      car_model_id: order.car_model_id,
+      start_date: order.start_date,
+      end_date: order.end_date,
+      type: "deposit",
+    };
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
+
       line_items: [
         {
           price_data: {
@@ -74,21 +87,13 @@ export default async function handler(req, res) {
 
       customer_email: order.email || undefined,
 
-      // ⭐⭐⭐ 关键修复点：写进 payment_intent ⭐⭐⭐
+      // 👉 payment_intent 里一份
       payment_intent_data: {
-        metadata: {
-          order_id: order.order_id,
-          order_uuid: order.id,
-          type: "deposit",
-        },
+        metadata,
       },
 
-      // session 自己也留一份（备用）
-      metadata: {
-        order_id: order.order_id,
-        order_uuid: order.id,
-        type: "deposit",
-      },
+      // 👉 session 自己也留一份（双保险）
+      metadata,
 
       success_url: `${FRONTEND_URL}/booking?step=5&orderId=${order.order_id}`,
       cancel_url: `${FRONTEND_URL}/booking?step=4&orderId=${order.order_id}&cancel=1`,
