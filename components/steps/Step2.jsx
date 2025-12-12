@@ -2,9 +2,9 @@ import { useState } from "react";
 
 // 简单价格表（你之后可以再和 Supabase 价格表对齐）
 const BASE_PRICES = {
-  car1: 35000, // 经济 5 座
-  car2: 45000, // 阿尔法 7 座
-  car3: 55000, // 海狮 10 座
+  car1: 35000,
+  car2: 45000,
+  car3: 55000,
 };
 
 // ⭐ 车型 UUID（必须与 BookingFlow.jsx 完全一致）
@@ -19,6 +19,15 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [driverLang, setDriverLang] = useState(initialData.driver_lang || "zh");
   const [duration, setDuration] = useState(initialData.duration || 8);
   const [totalPrice, setTotalPrice] = useState(initialData.total_price || 0);
+
+  // ✅ NEW：人数 & 行李（与 orders 表字段名一致）
+  const [pax, setPax] = useState(
+    initialData.pax !== undefined ? initialData.pax : 1
+  );
+  const [luggage, setLuggage] = useState(
+    initialData.luggage !== undefined ? initialData.luggage : 0
+  );
+
   const [error, setError] = useState("");
 
   const calcPrice = (model, hours) => {
@@ -53,14 +62,16 @@ export default function Step2({ initialData, onNext, onBack }) {
       return;
     }
 
-    // ⭐ 回传关键字段：order_id + car_model_id
+    // ⭐ 关键：把 pax / luggage 一并回传
     onNext({
-      order_id: initialData.order_id, // ← 必须回传订单号
+      order_id: initialData.order_id,
       car_model: carModel,
-      car_model_id: CAR_MODEL_IDS[carModel], // ← 必须回传车型 UUID
+      car_model_id: CAR_MODEL_IDS[carModel],
       driver_lang: driverLang,
       duration,
       total_price: totalPrice,
+      pax: Number(pax),
+      luggage: Number(luggage),
     });
   };
 
@@ -70,47 +81,31 @@ export default function Step2({ initialData, onNext, onBack }) {
         Step2：选择车型 & 服务
       </h2>
 
+      {/* 车型选择 */}
       <div style={{ display: "flex", gap: "16px", marginBottom: "16px" }}>
-        <button
-          onClick={() => handleSelectCar("car1")}
-          style={{
-            padding: "12px",
-            borderRadius: "8px",
-            border: carModel === "car1" ? "2px solid #2563eb" : "1px solid #ddd",
-            flex: 1,
-          }}
-        >
-          <div>经济 5 座轿车</div>
-          <div>参考价格：¥{BASE_PRICES.car1}</div>
-        </button>
-
-        <button
-          onClick={() => handleSelectCar("car2")}
-          style={{
-            padding: "12px",
-            borderRadius: "8px",
-            border: carModel === "car2" ? "2px solid #2563eb" : "1px solid #ddd",
-            flex: 1,
-          }}
-        >
-          <div>豪华 7 座阿尔法</div>
-          <div>参考价格：¥{BASE_PRICES.car2}</div>
-        </button>
-
-        <button
-          onClick={() => handleSelectCar("car3")}
-          style={{
-            padding: "12px",
-            borderRadius: "8px",
-            border: carModel === "car3" ? "2px solid #2563eb" : "1px solid #ddd",
-            flex: 1,
-          }}
-        >
-          <div>舒适 10 座海狮</div>
-          <div>参考价格：¥{BASE_PRICES.car3}</div>
-        </button>
+        {["car1", "car2", "car3"].map((m) => (
+          <button
+            key={m}
+            onClick={() => handleSelectCar(m)}
+            style={{
+              padding: "12px",
+              borderRadius: "8px",
+              border:
+                carModel === m ? "2px solid #2563eb" : "1px solid #ddd",
+              flex: 1,
+            }}
+          >
+            <div>
+              {m === "car1" && "经济 5 座轿车"}
+              {m === "car2" && "豪华 7 座阿尔法"}
+              {m === "car3" && "舒适 10 座海狮"}
+            </div>
+            <div>参考价格：¥{BASE_PRICES[m]}</div>
+          </button>
+        ))}
       </div>
 
+      {/* 司机语言 */}
       <div style={{ marginBottom: "12px" }}>
         <label>
           司机语言：
@@ -125,6 +120,7 @@ export default function Step2({ initialData, onNext, onBack }) {
         </label>
       </div>
 
+      {/* 时长 */}
       <div style={{ marginBottom: "12px" }}>
         <label>
           包车时长：
@@ -139,37 +135,48 @@ export default function Step2({ initialData, onNext, onBack }) {
         </label>
       </div>
 
-      <div style={{ marginTop: "8px", marginBottom: "8px" }}>
+      {/* ✅ NEW：人数 & 行李 */}
+      <div style={{ display: "flex", gap: "16px", marginBottom: "12px" }}>
+        <label>
+          人数：
+          <select
+            value={pax}
+            onChange={(e) => setPax(e.target.value)}
+            style={{ marginLeft: "8px", padding: "6px" }}
+          >
+            {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>
+                {n} 人
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          行李：
+          <select
+            value={luggage}
+            onChange={(e) => setLuggage(e.target.value)}
+            style={{ marginLeft: "8px", padding: "6px" }}
+          >
+            {Array.from({ length: 11 }, (_, i) => i).map((n) => (
+              <option key={n} value={n}>
+                {n} 件
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div style={{ marginBottom: "8px" }}>
         当前总价：<strong>¥{totalPrice || 0}</strong>
       </div>
 
       {error && <div style={{ color: "red", marginBottom: "8px" }}>{error}</div>}
 
       <div style={{ display: "flex", gap: "8px" }}>
-        <button
-          onClick={onBack}
-          style={{
-            padding: "8px 16px",
-            borderRadius: "6px",
-            border: "1px solid #ccc",
-            background: "#f3f4f6",
-          }}
-        >
-          返回上一步
-        </button>
-
-        <button
-          onClick={handleNext}
-          style={{
-            padding: "8px 16px",
-            borderRadius: "6px",
-            border: "none",
-            background: "#2563eb",
-            color: "#fff",
-          }}
-        >
-          下一步：填写信息
-        </button>
+        <button onClick={onBack}>返回上一步</button>
+        <button onClick={handleNext}>下一步：填写信息</button>
       </div>
     </div>
   );
