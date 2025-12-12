@@ -27,14 +27,16 @@ export default function Step4Payment({ initialData, onBack }) {
       const orderData = await orderRes.json();
       console.log("🔵 create-order 返回：", orderData);
 
-      if (!orderRes.ok) {
-        setErrorMsg("订单创建失败：" + (orderData.error || "未知错误"));
+      if (!orderRes.ok || !orderData?.data?.order_id) {
+        setErrorMsg(
+          "订单创建失败：" + (orderData?.error || "未返回订单号")
+        );
         setLoading(false);
         return;
       }
 
-      // 从 now 使用数据库订单号（稳定）
-      const orderId = initialData.order_id;
+      // ✅ 关键修复：只使用数据库返回的订单号
+      const orderId = orderData.data.order_id;
 
       // ----------------------------
       // ② 调用 Supabase create-payment-intent
