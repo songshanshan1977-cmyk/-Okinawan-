@@ -28,9 +28,7 @@ export default function Step4Payment({ initialData, onBack }) {
       console.log("🔵 create-order 返回：", orderData);
 
       if (!orderRes.ok || !orderData?.order?.order_id) {
-        setErrorMsg(
-          "订单创建失败：" + (orderData?.error || "未返回订单号")
-        );
+        setErrorMsg("订单创建失败：" + (orderData?.error || "未返回订单号"));
         setLoading(false);
         return;
       }
@@ -39,11 +37,19 @@ export default function Step4Payment({ initialData, onBack }) {
       const orderId = orderData.order.order_id;
 
       // ----------------------------
-      // ② 创建 Stripe 押金支付（只改这里：补鉴权头）
+      // ② 创建 Stripe 押金支付（Supabase Edge Function）
       // ----------------------------
       const anonKey =
-        import.meta.env.VITE_SUPABASE_ANON_KEY ||
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+        import.meta?.env?.VITE_SUPABASE_ANON_KEY ||
+        process?.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+      if (!anonKey) {
+        setErrorMsg(
+          "缺少 Supabase anon key：请在 Vercel 环境变量里设置 NEXT_PUBLIC_SUPABASE_ANON_KEY"
+        );
+        setLoading(false);
+        return;
+      }
 
       const payRes = await fetch(SUPABASE_FN_URL, {
         method: "POST",
@@ -84,15 +90,27 @@ export default function Step4Payment({ initialData, onBack }) {
       <h2 className="text-2xl font-bold mb-4">Step4：确认并支付押金</h2>
 
       <div className="border p-6 rounded-lg space-y-2 text-lg">
-        <p><strong>订单编号：</strong> {initialData.order_id}</p>
+        <p>
+          <strong>订单编号：</strong> {initialData.order_id}
+        </p>
 
         <hr />
 
-        <p><strong>车型：</strong> {initialData.car_model}</p>
-        <p><strong>司机语言：</strong> {initialData.driver_lang}</p>
-        <p><strong>包车时长：</strong> {initialData.duration} 小时</p>
-        <p><strong>人数：</strong> {initialData.pax} 人</p>
-        <p><strong>行李：</strong> {initialData.luggage} 件</p>
+        <p>
+          <strong>车型：</strong> {initialData.car_model}
+        </p>
+        <p>
+          <strong>司机语言：</strong> {initialData.driver_lang}
+        </p>
+        <p>
+          <strong>包车时长：</strong> {initialData.duration} 小时
+        </p>
+        <p>
+          <strong>人数：</strong> {initialData.pax} 人
+        </p>
+        <p>
+          <strong>行李：</strong> {initialData.luggage} 件
+        </p>
 
         <hr />
 
@@ -100,21 +118,35 @@ export default function Step4Payment({ initialData, onBack }) {
           <strong>用车日期：</strong>
           {initialData.start_date} → {initialData.end_date}
         </p>
-        <p><strong>出发酒店：</strong> {initialData.departure_hotel}</p>
-        <p><strong>结束酒店：</strong> {initialData.end_hotel}</p>
+        <p>
+          <strong>出发酒店：</strong> {initialData.departure_hotel}
+        </p>
+        <p>
+          <strong>结束酒店：</strong> {initialData.end_hotel}
+        </p>
 
         <hr />
 
-        <p><strong>姓名：</strong> {initialData.name}</p>
-        <p><strong>电话：</strong> {initialData.phone}</p>
-        <p><strong>邮箱：</strong> {initialData.email || "—"}</p>
+        <p>
+          <strong>姓名：</strong> {initialData.name}
+        </p>
+        <p>
+          <strong>电话：</strong> {initialData.phone}
+        </p>
+        <p>
+          <strong>邮箱：</strong> {initialData.email || "—"}
+        </p>
         {initialData.remark && (
-          <p><strong>备注：</strong> {initialData.remark}</p>
+          <p>
+            <strong>备注：</strong> {initialData.remark}
+          </p>
         )}
 
         <hr />
 
-        <p><strong>包车总费用：</strong> ¥{initialData.total_price}</p>
+        <p>
+          <strong>包车总费用：</strong> ¥{initialData.total_price}
+        </p>
 
         <p className="text-blue-600 font-bold mt-4">
           本次将前往 Stripe 支付押金：¥500
@@ -152,6 +184,5 @@ export default function Step4Payment({ initialData, onBack }) {
     </div>
   );
 }
-
 
 
