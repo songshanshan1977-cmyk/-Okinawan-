@@ -21,11 +21,11 @@ export default function Step3({ initialData, onNext, onBack }) {
       return;
     }
 
-    // ⭐ 必须回传所有关键字段
+    // ⭐ 原样回传所有字段（含 pax / luggage）
     onNext({
-      order_id: initialData.order_id,        // 保持订单 ID
-      car_model_id: initialData.car_model_id, // 保持车型 UUID
-      car_model: initialData.car_model,       // 车型名称
+      order_id: initialData.order_id,
+      car_model_id: initialData.car_model_id,
+      car_model: initialData.car_model,
       driver_lang: initialData.driver_lang,
       duration: initialData.duration,
       start_date: initialData.start_date,
@@ -34,7 +34,11 @@ export default function Step3({ initialData, onNext, onBack }) {
       end_hotel: initialData.end_hotel,
       total_price: initialData.total_price,
 
-      // Step3 用户填写内容
+      // ✅ NEW：人数 & 行李（只传，不改）
+      pax: initialData.pax,
+      luggage: initialData.luggage,
+
+      // 用户信息
       name,
       phone,
       email,
@@ -52,18 +56,25 @@ export default function Step3({ initialData, onNext, onBack }) {
     driver_lang,
     duration,
     total_price,
+    pax,       // ✅ NEW
+    luggage,   // ✅ NEW
   } = initialData;
 
   return (
     <div>
-      <h2 style={{ fontSize: "24px", marginBottom: "8px" }}>Step3：订单预览</h2>
+      <h2 style={{ fontSize: "24px", marginBottom: "8px" }}>
+        Step3：订单预览
+      </h2>
+
       <p style={{ color: "#6b7280", marginBottom: "16px" }}>
         请确认以下信息后，填写联系方式。
       </p>
+
       <p style={{ color: "#4b5563", marginBottom: "16px", fontSize: "14px" }}>
         订单编号：{order_id}
       </p>
 
+      {/* 用车信息 */}
       <div
         style={{
           background: "#fff",
@@ -85,12 +96,18 @@ export default function Step3({ initialData, onNext, onBack }) {
         <p>车型：{carNameMap[car_model] || "未选择"}</p>
         <p>司机语言：{driver_lang === "zh" ? "中文司机" : "日文司机"}</p>
         <p>包车时长：{duration} 小时</p>
+
+        {/* ✅ NEW：人数 & 行李展示 */}
+        <p>人数：{pax} 人</p>
+        <p>行李：{luggage} 件</p>
+
         <p>包车费用：¥{total_price}</p>
         <p style={{ color: "#2563eb", fontWeight: 600, marginTop: "4px" }}>
           需支付押金：¥500（固定）
         </p>
       </div>
 
+      {/* 客户信息 */}
       <div
         style={{
           background: "#fff",
@@ -148,30 +165,10 @@ export default function Step3({ initialData, onNext, onBack }) {
       {error && <div style={{ color: "red", marginBottom: "8px" }}>{error}</div>}
 
       <div style={{ display: "flex", gap: "8px" }}>
-        <button
-          onClick={onBack}
-          style={{
-            padding: "8px 16px",
-            borderRadius: "6px",
-            border: "1px solid #ccc",
-            background: "#f3f4f6",
-          }}
-        >
-          返回修改
-        </button>
-        <button
-          onClick={handleNext}
-          style={{
-            padding: "8px 16px",
-            borderRadius: "6px",
-            border: "none",
-            background: "#2563eb",
-            color: "#fff",
-          }}
-        >
-          确认并前往支付
-        </button>
+        <button onClick={onBack}>返回修改</button>
+        <button onClick={handleNext}>确认并前往支付</button>
       </div>
     </div>
   );
 }
+
