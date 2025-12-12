@@ -1,57 +1,117 @@
-// /api/create-order.js
+// pages/api/create-order.ts
 
-export default async function handler(req, res) {
+import type { NextApiRequest, NextApiResponse } from "next";
+import { createClient } from "@supabase/supabase-js";
+
+// ===== Supabase service role（必须）=====
+const supabaseUrl = process.env.SUPABASE_URL!;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+
+const supabase = createClient(supabaseUrl, serviceRoleKey);
+
+// ===== 生成订单号（唯一可信来源）=====
+function generateOrderId() {
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const rand = Math.floor(10000 + Math.random() * 90000);
+  return `ORD-${date}-${rand}`;
+}
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse
+) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    const data = req.body;
+    const body = req.body;
 
-    // 连接 Supabase（使用服务端 Key）
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    console.log("📥 /api/create-order 收到 body:", body);
 
-    const { createClient } = await import("@supabase/supabase-js");
-    const supabase = createClient(supabaseUrl, supabaseKey);
+    let {
+      order_id,
+      car_model_id,
+      driver_lang,
+      duration,
+      start_date,
+      end_date,
+      departure_hotel,
+      end_hotel,
+      pax,
+      luggage,
+      total_price,
+      deposit_amount,
+      name,
+      phone,
+      email,
+      remark,
+      source,
+    } = body;
 
-    // 插入订单
-    const { error } = await supabase
-      .from("orders")
-      .insert({
-        order_id: data.order_id,
-        car_model: data.car_model,
-        car_model_id: data.car_model_id,
-        driver_lang: data.driver_lang,
-        duration: data.duration,
-
-        start_date: data.start_date,
-        end_date: data.end_date,
-        departure_hotel: data.departure_hotel,
-        end_hotel: data.end_hotel,
-
-        name: data.name,
-        phone: data.phone,
-        email: data.email,
-        remark: data.remark,
-
-        pax: data.pax,
-        luggage: data.luggage,
-
-        deposit_amount: data.deposit_amount,
-        total_price: data.total_price,
-        source: data.source,
-      });
-
-    if (error) {
-      console.error("插入订单失败：", error);
-      return res.status(500).json({ error: error.message });
+    // === order_id 只能在这里生成 ===
+    if (!order_id) {
+      order_id = generateOrderId();
     }
 
-    return res.status(200).json({ success: true });
-  } catch (err) {
-    console.error("服务器错误：", err);
-    return res.status(500).json({ error: "Server error" });
+    if (!deposit_amount) deposit_amount = 500;
+    if (!source) source = "booking-page";
+
+    const orderData = {
+      order_id,
+      car_model_id,
+      driver_lang,
+      duration,
+      start_date,
+      end_date,
+      departure_hotel,
+      end_hotel,
+      pax,
+      luggage,
+      total_price,
+      deposit_amount,
+      name,
+      phone,
+      email,
+      remark,
+      source,
+
+      status: "pending",
+      payment_status: "pending",
+      inventory_status: "pending",
+      email_status: "pending",
+      balance_paid: false,
+    };
+
+    console.log("📝 准备写入 orders:", orderData);
+
+    const { data, error } = await supabase
+      .from("orders")
+      .insert(orderData)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("❌ 写入 orders 失败:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+
+    console.log("✅ 订单写入成功:", data.order_id);
+
+    return res.status(200).json({
+      success: true,
+      data,
+    });
+  } catch (err: any) {
+    console.error("🔥 /api/create-order 异常:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Server error",
+    });
   }
 }
+
 
