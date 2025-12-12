@@ -19,24 +19,29 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing order_id" });
     }
 
-    const { error, data: inserted } = await supabase
+    const { data: inserted, error } = await supabase
       .from("orders")
       .insert([
         {
           order_id: data.order_id,
-          car_model: data.car_model,
+          car_model_id: data.car_model,   // ✅ 对齐表字段
           driver_lang: data.driver_lang,
           duration: data.duration,
           start_date: data.start_date,
           end_date: data.end_date,
           departure_hotel: data.departure_hotel,
           end_hotel: data.end_hotel,
+          total_price: data.total_price,
+          deposit_amount: 500,            // ✅ 押金固定
           name: data.name,
           phone: data.phone,
           email: data.email,
-          total_price: data.total_price,
-          payment_status: "pending",
+          remark: data.remark || null,
           status: "created",
+          payment_status: "pending",
+          inventory_status: "pending",
+          email_status: "pending",
+          balance_paid: false,
         },
       ])
       .select()
@@ -56,5 +61,6 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
+
 
 
