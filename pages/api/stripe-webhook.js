@@ -88,6 +88,48 @@ export default async function handler(req, res) {
             paid: true,
           },
         ]);
+
+        // ==================================================
+        // 3️⃣ ✅【新增】库存自动扣减（只在首次写入 payment 后）
+        // ==================================================
+        const startDate = intent.metadata?.start_date;
+        const endDate = intent.metadata?.end_date;
+
+        if (carModelId && startDate && endDate) {
+          const dates = [];
+          let current = new Date(startDate);
+          const end = new Date(endDate);
+
+          while (current <= end) {
+            dates.push(current.toISOString().slice(0, 10));
+            current.setDate(current.getDate() + 1);
+          }
+
+          for (const date of dates) {
+            const { data: row } = await supabase
+              .from("inventory")
+              .select("id, stock")
+              .eq("car_model_id", carModelId)
+              .eq("date", date)
+              .maybeSingle();
+
+            if (row) {
+              await supabase
+                .from("inventory")
+                .update({ stock: row.stock - 1 })
+                .eq("id", row.id);
+            } else {
+              await supabase.from("inventory").insert([
+                {
+                  car_model_id: carModelId,
+                  date,
+                  stock: 0,
+                },
+              ]);
+            }
+          }
+        }
+        // ========= 库存扣减结束 =========
       }
     }
 
@@ -101,5 +143,4 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
-
 
