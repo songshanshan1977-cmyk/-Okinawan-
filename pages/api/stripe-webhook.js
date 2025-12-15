@@ -57,26 +57,36 @@ export default async function handler(req, res) {
 
       console.log("💰 支付成功，写入数据库:", orderId);
 
-      // 1️⃣ 更新订单
-      await supabase
+      // 1️⃣ 更新订单（⚠️ 改字段名）
+      const { error: orderErr } = await supabase
         .from("orders")
         .update({
-          payment_status: "paid",
+          status: "paid", // ✅ 原来是 payment_status
           paid_at: new Date().toISOString(),
         })
         .eq("order_id", orderId);
 
-      // 2️⃣ 写 payments 表
-      await supabase.from("payments").insert([
+      if (orderErr) {
+        console.error("❌ orders 更新失败:", orderErr);
+        throw orderErr;
+      }
+
+      // 2️⃣ 写 payments 表（⚠️ 改金额字段 + 加错误检查）
+      const { error: payErr } = await supabase.from("payments").insert([
         {
           order_id: orderId,
           stripe_session: intent.id,
-          amount: intent.amount_received,
+          amount: intent.amount, // ✅ 原来是 amount_received
           currency: intent.currency,
           car_model_id: carModelId,
           paid: true,
         },
       ]);
+
+      if (payErr) {
+        console.error("❌ payments 写入失败:", payErr);
+        throw payErr;
+      }
     }
 
     /**
@@ -93,3 +103,4 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
+
