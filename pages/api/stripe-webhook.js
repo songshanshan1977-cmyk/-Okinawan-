@@ -46,13 +46,15 @@ export default async function handler(req, res) {
 
       let orderId = intent.metadata?.order_id || null;
       let carModelId = intent.metadata?.car_model_id || null;
+      let startDate = intent.metadata?.start_date || null;
 
-      // ✅ 兼容 metadata 在 charge 上的情况（你原本就写对了）
+      // ✅ 兼容 metadata 在 charge 上的情况
       if (!orderId && intent.latest_charge) {
         const charge = await stripe.charges.retrieve(intent.latest_charge);
         if (charge?.metadata) {
           orderId = charge.metadata.order_id || orderId;
           carModelId = charge.metadata.car_model_id || carModelId;
+          startDate = charge.metadata.start_date || startDate;
         }
       }
 
@@ -61,7 +63,14 @@ export default async function handler(req, res) {
         return res.json({ received: true });
       }
 
-      // 1️⃣ 更新 orders（保持你原逻辑）
+      // 🔍 读取订单（用于库存锁判断）
+      const { data: order } = await supabase
+        .from("orders")
+        .select("inventory_locked")
+        .eq("order_id", orderId)
+        .maybeSingle();
+
+      // 1️⃣ 更新订单支付状态（保持你原逻辑）
       await supabase
         .from("orders")
         .update({
@@ -70,66 +79,47 @@ export default async function handler(req, res) {
         })
         .eq("order_id", orderId);
 
-      // 2️⃣ ✅ 防重复：先查 payments
-      const { data: existing } = await supabase
+      // 2️⃣ 防重复写 payments
+      const { data: existingPayment } = await supabase
         .from("payments")
         .select("id")
         .eq("stripe_session_id", intent.id)
         .maybeSingle();
 
-      if (!existing) {
+      if (!existingPayment) {
         await supabase.from("payments").insert([
           {
             order_id: orderId,
-            stripe_session_id: intent.id, // ✅ 正确字段名
+            stripe_session_id: intent.id,
             amount: intent.amount_received,
             currency: intent.currency,
             car_model_id: carModelId,
             paid: true,
           },
         ]);
+      }
 
-        // ==================================================
-        // 3️⃣ ✅【新增】库存自动扣减（只在首次写入 payment 后）
-        // ==================================================
-        const startDate = intent.metadata?.start_date;
-        const endDate = intent.metadata?.end_date;
+      // 🔒 3️⃣ 库存扣减（只执行一次）
+      if (!order?.inventory_locked && carModelId && startDate) {
+        const { error: inventoryError } = await supabase
+          .from("inventory")
+          .update({ stock: supabase.rpc("decrement", { x: 1 }) })
+          .eq("car_model_id", carModelId)
+          .eq("date", startDate)
+          .gt("stock", 0);
 
-        if (carModelId && startDate && endDate) {
-          const dates = [];
-          let current = new Date(startDate);
-          const end = new Date(endDate);
-
-          while (current <= end) {
-            dates.push(current.toISOString().slice(0, 10));
-            current.setDate(current.getDate() + 1);
-          }
-
-          for (const date of dates) {
-            const { data: row } = await supabase
-              .from("inventory")
-              .select("id, stock")
-              .eq("car_model_id", carModelId)
-              .eq("date", date)
-              .maybeSingle();
-
-            if (row) {
-              await supabase
-                .from("inventory")
-                .update({ stock: row.stock - 1 })
-                .eq("id", row.id);
-            } else {
-              await supabase.from("inventory").insert([
-                {
-                  car_model_id: carModelId,
-                  date,
-                  stock: 0,
-                },
-              ]);
-            }
-          }
+        if (inventoryError) {
+          console.error("❌ 库存扣减失败:", inventoryError);
+          throw inventoryError;
         }
-        // ========= 库存扣减结束 =========
+
+        // 🔐 上锁：防止二次扣库存
+        await supabase
+          .from("orders")
+          .update({ inventory_locked: true })
+          .eq("order_id", orderId);
+
+        console.log("🔒 库存已扣减并锁定订单:", orderId);
       }
     }
 
@@ -143,4 +133,5 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
+
 
