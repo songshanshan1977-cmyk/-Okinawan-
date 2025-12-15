@@ -1,11 +1,7 @@
-// pages/api/stripe-webhook.js
-
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 
-export const config = {
-  api: { bodyParser: false },
-};
+export const config = { api: { bodyParser: false } };
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2022-11-15",
@@ -18,7 +14,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// 读取 raw body
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -44,41 +39,22 @@ export default async function handler(req, res) {
   }
 
   try {
-    /**
-     * ✅ 核心：支付成功 → 写 payments → 更新 orders → 扣库存
-     */
     if (event.type === "payment_intent.succeeded") {
       const intent = event.data.object;
       const metadata = intent.metadata || {};
 
       const orderId = metadata.order_id;
       const carModelId = metadata.car_model_id;
-      const serviceDate = metadata.service_date; // ⚠️ 必须是 YYYY-MM-DD
+      const startDate = metadata.start_date;
 
-      if (!orderId || !carModelId || !serviceDate) {
-        console.warn("⚠️ 缺少必要 metadata，跳过处理", {
-          orderId,
-          carModelId,
-          serviceDate,
-        });
+      if (!orderId || !carModelId || !startDate) {
+        console.warn("⚠️ 缺少库存扣减必要字段", metadata);
         return res.json({ received: true });
       }
 
-      // 🚧 防止 webhook 重复执行：先查 payments
-      const { data: existingPayment } = await supabase
-        .from("payments")
-        .select("id")
-        .eq("stripe_session_id", intent.id)
-        .maybeSingle();
+      console.log("💰 支付成功，订单：", orderId);
 
-      if (existingPayment) {
-        console.log("🔁 已处理过该支付，跳过:", intent.id);
-        return res.json({ received: true });
-      }
-
-      console.log("💰 支付成功，开始处理订单 & 库存:", orderId);
-
-      // 1️⃣ 更新 orders
+      // 1️⃣ 更新订单状态
       await supabase
         .from("orders")
         .update({
@@ -87,11 +63,11 @@ export default async function handler(req, res) {
         })
         .eq("order_id", orderId);
 
-      // 2️⃣ 写 payments
+      // 2️⃣ 写入 payments 表
       await supabase.from("payments").insert([
         {
           order_id: orderId,
-          stripe_session_id: intent.id,
+          stripe_session: intent.id,
           amount: intent.amount_received,
           currency: intent.currency,
           car_model_id: carModelId,
@@ -99,20 +75,22 @@ export default async function handler(req, res) {
         },
       ]);
 
-      // 3️⃣ 扣库存（inventory）
-      const { data: inventoryRow, error: inventoryError } = await supabase
+      // 3️⃣ ⭐ 库存扣减（只改这里）
+      const { data: inventoryRow, error: invErr } = await supabase
         .from("inventory")
         .select("id, stock")
         .eq("car_model_id", carModelId)
-        .eq("date", serviceDate)
+        .eq("date", startDate)
         .single();
 
-      if (inventoryError || !inventoryRow) {
-        throw new Error("❌ 未找到对应库存记录");
+      if (invErr || !inventoryRow) {
+        console.error("❌ 未找到库存记录", carModelId, startDate);
+        throw new Error("Inventory not found");
       }
 
       if (inventoryRow.stock <= 0) {
-        throw new Error("❌ 库存不足，无法扣减");
+        console.error("❌ 库存不足，拒绝扣减");
+        throw new Error("Out of stock");
       }
 
       await supabase
@@ -120,19 +98,7 @@ export default async function handler(req, res) {
         .update({ stock: inventoryRow.stock - 1 })
         .eq("id", inventoryRow.id);
 
-      console.log("📉 库存已扣减:", {
-        carModelId,
-        serviceDate,
-        before: inventoryRow.stock,
-        after: inventoryRow.stock - 1,
-      });
-    }
-
-    /**
-     * （可选）仅日志
-     */
-    if (event.type === "checkout.session.completed") {
-      console.log("📦 Checkout 完成:", event.data.object.id);
+      console.log("📉 库存已扣减", carModelId, startDate);
     }
 
     return res.json({ received: true });
