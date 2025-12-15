@@ -1,5 +1,7 @@
-import { createClient } from "@supabase/supabase-js";
+// pages/api/send-confirmation-email.js
+
 import { Resend } from "resend";
+import { createClient } from "@supabase/supabase-js";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -20,7 +22,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "order_id missing" });
     }
 
-    // 1️⃣ 查询订单
+    // 1️⃣ 获取订单
     const { data: order, error } = await supabase
       .from("orders")
       .select("*")
@@ -32,43 +34,40 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    const balance =
-      Math.max((order.total_price || 0) - (order.deposit_amount || 0), 0);
+    const balance = Math.max(
+      (order.total_price || 0) - (order.deposit_amount || 0),
+      0
+    );
 
     // 2️⃣ 邮件内容
     const html = `
-      <div style="font-family:Arial,sans-serif;max-width:600px;line-height:1.6">
+      <div style="font-family: Arial; line-height: 1.6; max-width: 600px;">
         <h2>冲绳包车服务确认书</h2>
-
         <p>尊敬的 ${order.name} 您好，</p>
-        <p>感谢您预订 <strong>华人Okinawa · HonestOki</strong> 包车服务。</p>
+        <p>您已成功预订冲绳包车服务，订单详情如下：</p>
 
-        <h3>📌 订单信息</h3>
+        <h3>订单信息</h3>
         <ul>
-          <li>订单编号：${order.order_id}</li>
-          <li>用车日期：${order.start_date}</li>
-          <li>用车时长：${order.duration} 小时</li>
-          <li>出发酒店：${order.departure_hotel}</li>
-          <li>结束酒店：${order.end_hotel}</li>
+          <li><strong>订单编号：</strong> ${order.order_id}</li>
+          <li><strong>用车日期：</strong> ${order.start_date}</li>
+          <li><strong>出发酒店：</strong> ${order.departure_hotel}</li>
+          <li><strong>结束酒店：</strong> ${order.end_hotel}</li>
         </ul>
 
-        <h3>💰 费用明细</h3>
+        <h3>费用明细</h3>
         <ul>
-          <li>订单总额：¥${order.total_price}</li>
-          <li>已付押金：¥${order.deposit_amount}</li>
-          <li>尾款（当日支付）：¥${balance}</li>
+          <li><strong>总费用：</strong> ¥${order.total_price}</li>
+          <li><strong>已付押金：</strong> ¥${order.deposit_amount}</li>
+          <li><strong>尾款（当日支付）：</strong> ¥${balance}</li>
         </ul>
-
-        <h3>📲 售后支持</h3>
-        <p>请添加客服微信：</p>
-        <img src="https://your-cdn.com/wechat-qrcode.png" width="180"/>
-
-        <p style="color:#666;font-size:13px">
-          本邮件为系统自动发送，请勿回复。
-        </p>
 
         <p>
-          —— 华人Okinawa · HonestOki
+          📩 本邮件为系统自动发送，请勿直接回复。<br/>
+          📞 客服 WhatsApp / 微信：请扫描下方二维码
+        </p>
+
+        <p style="margin-top:20px;">
+          —— 华人Okinawa 包车服务团队
         </p>
       </div>
     `;
@@ -77,20 +76,21 @@ export default async function handler(req, res) {
     await resend.emails.send({
       from: "HonestOki <service@honestoki.com>",
       to: order.email,
-      subject: `【订单确认】冲绳包车服务（${order.order_id}）`,
+      subject: `您的冲绳包车订单确认（${order.order_id}）`,
       html,
-      reply_to: "noreply@honestoki.com",
     });
 
-    // 4️⃣ 标记邮件已发送
+    // 4️⃣ 更新订单状态
     await supabase
       .from("orders")
       .update({ email_status: "sent" })
       .eq("order_id", order_id);
 
-    return res.json({ success: true });
+    return res.status(200).json({ ok: true });
+
   } catch (err) {
-    console.error(err);
+    console.error("Send email error:", err);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
+
