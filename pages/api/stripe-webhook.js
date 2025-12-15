@@ -63,14 +63,14 @@ export default async function handler(req, res) {
         return res.json({ received: true });
       }
 
-      // 🔍 读取订单（用于库存锁判断）
+      // 🔍 读取订单（判断是否已锁库存）
       const { data: order } = await supabase
         .from("orders")
         .select("inventory_locked")
         .eq("order_id", orderId)
         .maybeSingle();
 
-      // 1️⃣ 更新订单支付状态（保持你原逻辑）
+      // 1️⃣ 更新订单支付状态
       await supabase
         .from("orders")
         .update({
@@ -113,13 +113,29 @@ export default async function handler(req, res) {
           throw inventoryError;
         }
 
-        // 🔐 上锁：防止二次扣库存
+        // 🔐 上锁，防止二次扣库存
         await supabase
           .from("orders")
           .update({ inventory_locked: true })
           .eq("order_id", orderId);
 
         console.log("🔒 库存已扣减并锁定订单:", orderId);
+
+        // 📩 4️⃣ 触发确认邮件（只在库存成功后）
+        try {
+          await fetch(
+            `${process.env.NEXT_PUBLIC_SITE_URL}/api/send-confirmation-email`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ order_id: orderId }),
+            }
+          );
+          console.log("📧 已触发确认邮件:", orderId);
+        } catch (mailErr) {
+          console.error("⚠️ 触发确认邮件失败:", mailErr);
+          // ❗不 throw，避免 webhook 回滚
+        }
       }
     }
 
@@ -133,5 +149,4 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
-
 
