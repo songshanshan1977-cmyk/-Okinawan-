@@ -42,7 +42,7 @@ export default async function handler(req, res) {
 
   try {
     /**
-     * ✅ 核心 1：支付真正成功（必须处理）
+     * ✅ 核心：支付真正成功
      */
     if (event.type === "payment_intent.succeeded") {
       const intent = event.data.object;
@@ -57,11 +57,11 @@ export default async function handler(req, res) {
 
       console.log("💰 支付成功，写入数据库:", orderId);
 
-      // 1️⃣ 更新订单（⚠️ 改字段名）
+      // 1️⃣ 更新 orders（字段名与你表一致）
       const { error: orderErr } = await supabase
         .from("orders")
         .update({
-          status: "paid", // ✅ 原来是 payment_status
+          status: "paid",
           paid_at: new Date().toISOString(),
         })
         .eq("order_id", orderId);
@@ -71,12 +71,12 @@ export default async function handler(req, res) {
         throw orderErr;
       }
 
-      // 2️⃣ 写 payments 表（⚠️ 改金额字段 + 加错误检查）
+      // 2️⃣ 写 payments 表（关键修复点）
       const { error: payErr } = await supabase.from("payments").insert([
         {
           order_id: orderId,
-          stripe_session: intent.id,
-          amount: intent.amount, // ✅ 原来是 amount_received
+          stripe_session_id: intent.id,          // ✅ 修正字段名
+          amount: intent.amount_received,        // ✅ 支付成功金额
           currency: intent.currency,
           car_model_id: carModelId,
           paid: true,
@@ -90,7 +90,7 @@ export default async function handler(req, res) {
     }
 
     /**
-     * （可选）checkout.session.completed 只用于日志
+     * checkout.session.completed 仅日志
      */
     if (event.type === "checkout.session.completed") {
       console.log("📦 Checkout 完成:", event.data.object.id);
@@ -103,4 +103,3 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
-
