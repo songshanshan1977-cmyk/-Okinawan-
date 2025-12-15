@@ -3,26 +3,19 @@
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 
-// ❗必须关闭 bodyParser（Stripe 原始签名校验）
-export const config = {
-  api: { bodyParser: false },
-};
+export const config = { api: { bodyParser: false } };
 
-// Stripe 初始化
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2022-11-15",
 });
 
-// Webhook Secret
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-// Supabase（service role）
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// 读取原始 body
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -48,29 +41,27 @@ export default async function handler(req, res) {
   }
 
   try {
-    /**
-     * ✅ 核心：支付真正成功
-     */
     if (event.type === "payment_intent.succeeded") {
       const intent = event.data.object;
-      const metadata = intent.metadata || {};
 
-      const orderId = metadata.order_id;
-      const carModelId = metadata.car_model_id || null;
+      let orderId = intent.metadata?.order_id || null;
+      let carModelId = intent.metadata?.car_model_id || null;
+
+      // ✅ 兼容 metadata 在 charge 上的情况（你原本就写对了）
+      if (!orderId && intent.latest_charge) {
+        const charge = await stripe.charges.retrieve(intent.latest_charge);
+        if (charge?.metadata) {
+          orderId = charge.metadata.order_id || orderId;
+          carModelId = charge.metadata.car_model_id || carModelId;
+        }
+      }
 
       if (!orderId) {
         console.warn("⚠️ payment_intent.succeeded 但没有 order_id");
         return res.json({ received: true });
       }
 
-      console.log("💰 支付成功:", {
-        orderId,
-        intentId: intent.id,
-      });
-
-      /**
-       * 1️⃣ 更新 orders（保持你原来的逻辑）
-       */
+      // 1️⃣ 更新 orders（保持你原逻辑）
       await supabase
         .from("orders")
         .update({
@@ -79,50 +70,36 @@ export default async function handler(req, res) {
         })
         .eq("order_id", orderId);
 
-      /**
-       * 2️⃣ 写 payments（✅ 幂等防重复，关键修复点）
-       */
-      const { data: existingPayment, error: selectError } = await supabase
+      // 2️⃣ ✅ 防重复：先查 payments
+      const { data: existing } = await supabase
         .from("payments")
         .select("id")
-        .eq("stripe_session", intent.id)
+        .eq("stripe_session_id", intent.id)
         .maybeSingle();
 
-      if (selectError) {
-        console.error("❌ 查询 payments 失败:", selectError);
-        throw selectError;
-      }
-
-      if (!existingPayment) {
+      if (!existing) {
         await supabase.from("payments").insert([
           {
             order_id: orderId,
-            stripe_session: intent.id,
+            stripe_session_id: intent.id, // ✅ 正确字段名
             amount: intent.amount_received,
             currency: intent.currency,
             car_model_id: carModelId,
             paid: true,
           },
         ]);
-
-        console.log("✅ payments 写入成功:", intent.id);
-      } else {
-        console.log("⚠️ payments 已存在，跳过写入:", intent.id);
       }
     }
 
-    /**
-     * （可选）checkout.session.completed —— 只记录日志
-     */
     if (event.type === "checkout.session.completed") {
-      console.log("📦 Checkout 完成:", event.data.object.id);
+      console.log("📦 checkout 完成:", event.data.object.id);
     }
 
     return res.json({ received: true });
-
   } catch (err) {
     console.error("❌ Webhook 处理异常:", err);
     return res.status(500).send("Internal Server Error");
   }
 }
+
 
