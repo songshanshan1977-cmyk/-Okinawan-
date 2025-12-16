@@ -1,13 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
-// 简单价格表（你之后可以再和 Supabase 价格表对齐）
-const BASE_PRICES = {
-  car1: 35000,
-  car2: 45000,
-  car3: 55000,
-};
-
-// ⭐ 车型 UUID（必须与 BookingFlow.jsx 完全一致）
+// ⭐ 车型 UUID（保持不变）
 const CAR_MODEL_IDS = {
   car1: "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca",
   car2: "82cf604f-e688-49fe-aecf-69894a01f6cb",
@@ -20,36 +13,40 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [duration, setDuration] = useState(initialData.duration || 8);
   const [totalPrice, setTotalPrice] = useState(initialData.total_price || 0);
 
-  // 人数 & 行李
-  const [pax, setPax] = useState(
-    initialData.pax !== undefined ? initialData.pax : 1
-  );
-  const [luggage, setLuggage] = useState(
-    initialData.luggage !== undefined ? initialData.luggage : 0
-  );
-
+  const [pax, setPax] = useState(initialData.pax ?? 1);
+  const [luggage, setLuggage] = useState(initialData.luggage ?? 0);
   const [error, setError] = useState("");
 
-  const calcPrice = (model, hours) => {
-    if (!model) return 0;
-    const base = BASE_PRICES[model] || 0;
-    return hours === 10 ? Math.round(base * 1.2) : base;
+  // 🔵 从后端读取价格
+  const fetchPrice = async (modelKey, lang, hours) => {
+    if (!modelKey) return 0;
+
+    const res = await fetch("/api/get-car-price", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        car_model_id: CAR_MODEL_IDS[modelKey],
+        driver_lang: lang,
+        duration: hours,
+      }),
+    });
+
+    if (!res.ok) return 0;
+    const data = await res.json();
+    return data.price || 0;
   };
 
-  const handleSelectCar = (model) => {
-    const price = calcPrice(model, duration);
-    setCarModel(model);
-    setTotalPrice(price);
-  };
+  // ⭐ 车型 / 语言 / 时长 任一变化 → 重算价格
+  useEffect(() => {
+    const run = async () => {
+      if (!carModel) return;
+      const price = await fetchPrice(carModel, driverLang, duration);
+      setTotalPrice(price);
+    };
+    run();
+  }, [carModel, driverLang, duration]);
 
-  const handleDurationChange = (hours) => {
-    const h = Number(hours);
-    setDuration(h);
-    const price = calcPrice(carModel, h);
-    setTotalPrice(price);
-  };
-
-  // 🔒 库存检查（唯一关键点）
+  // 🔴 库存检查（你现在这个是对的）
   const checkInventory = async () => {
     const res = await fetch("/api/check-inventory", {
       method: "POST",
@@ -61,9 +58,8 @@ export default function Step2({ initialData, onNext, onBack }) {
     });
 
     if (!res.ok) return false;
-
     const data = await res.json();
-    return data?.available === true; // ✅ 关键修正点
+    return data?.ok === true;
   };
 
   const handleNext = async () => {
@@ -75,11 +71,10 @@ export default function Step2({ initialData, onNext, onBack }) {
     }
 
     if (!totalPrice || totalPrice <= 0) {
-      setError("价格计算异常，请重新选择车型或时长。");
+      setError("价格读取失败，请稍后重试。");
       return;
     }
 
-    // 🔒 真正拦库存
     const ok = await checkInventory();
     if (!ok) {
       setError("该日期该车型已无库存，请选择其他车型或日期。");
@@ -100,107 +95,68 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   return (
     <div>
-      <h2 style={{ fontSize: "24px", marginBottom: "16px" }}>
+      <h2 style={{ fontSize: 24, marginBottom: 16 }}>
         Step2：选择车型 & 服务
       </h2>
 
-      {/* 车型选择 */}
-      <div style={{ display: "flex", gap: "16px", marginBottom: "16px" }}>
+      <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
         {["car1", "car2", "car3"].map((m) => (
           <button
             key={m}
-            onClick={() => handleSelectCar(m)}
+            onClick={() => setCarModel(m)}
             style={{
-              padding: "12px",
-              borderRadius: "8px",
-              border:
-                carModel === m ? "2px solid #2563eb" : "1px solid #ddd",
+              padding: 12,
+              borderRadius: 8,
+              border: carModel === m ? "2px solid #2563eb" : "1px solid #ddd",
               flex: 1,
             }}
           >
-            <div>
-              {m === "car1" && "经济 5 座轿车"}
-              {m === "car2" && "豪华 7 座阿尔法"}
-              {m === "car3" && "舒适 10 座海狮"}
-            </div>
-            <div>参考价格：¥{BASE_PRICES[m]}</div>
+            {m === "car1" && "经济 5 座轿车"}
+            {m === "car2" && "豪华 7 座阿尔法"}
+            {m === "car3" && "舒适 10 座海狮"}
           </button>
         ))}
       </div>
 
-      {/* 司机语言 */}
-      <div style={{ marginBottom: "12px" }}>
-        <label>
-          司机语言：
-          <select
-            value={driverLang}
-            onChange={(e) => setDriverLang(e.target.value)}
-            style={{ marginLeft: "8px", padding: "6px" }}
-          >
-            <option value="zh">中文司机</option>
-            <option value="jp">日文司机</option>
-          </select>
-        </label>
+      <div>
+        司机语言：
+        <select value={driverLang} onChange={(e) => setDriverLang(e.target.value)}>
+          <option value="zh">中文司机</option>
+          <option value="jp">日文司机</option>
+        </select>
       </div>
 
-      {/* 时长 */}
-      <div style={{ marginBottom: "12px" }}>
-        <label>
-          包车时长：
-          <select
-            value={duration}
-            onChange={(e) => handleDurationChange(e.target.value)}
-            style={{ marginLeft: "8px", padding: "6px" }}
-          >
-            <option value={8}>8 小时</option>
-            <option value={10}>10 小时</option>
-          </select>
-        </label>
+      <div>
+        包车时长：
+        <select value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
+          <option value={8}>8 小时</option>
+          <option value={10}>10 小时</option>
+        </select>
       </div>
 
-      {/* 人数 & 行李 */}
-      <div style={{ display: "flex", gap: "16px", marginBottom: "12px" }}>
-        <label>
-          人数：
-          <select
-            value={pax}
-            onChange={(e) => setPax(e.target.value)}
-            style={{ marginLeft: "8px", padding: "6px" }}
-          >
-            {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
-              <option key={n} value={n}>
-                {n} 人
-              </option>
-            ))}
-          </select>
-        </label>
+      <div>
+        人数：
+        <select value={pax} onChange={(e) => setPax(e.target.value)}>
+          {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+            <option key={n} value={n}>{n}</option>
+          ))}
+        </select>
 
-        <label>
-          行李：
-          <select
-            value={luggage}
-            onChange={(e) => setLuggage(e.target.value)}
-            style={{ marginLeft: "8px", padding: "6px" }}
-          >
-            {Array.from({ length: 11 }, (_, i) => i).map((n) => (
-              <option key={n} value={n}>
-                {n} 件
-              </option>
-            ))}
-          </select>
-        </label>
+        行李：
+        <select value={luggage} onChange={(e) => setLuggage(e.target.value)}>
+          {Array.from({ length: 11 }, (_, i) => i).map((n) => (
+            <option key={n} value={n}>{n}</option>
+          ))}
+        </select>
       </div>
 
-      <div style={{ marginBottom: "8px" }}>
-        当前总价：<strong>¥{totalPrice || 0}</strong>
-      </div>
+      <div>当前总价：<strong>¥{totalPrice}</strong></div>
 
-      {error && <div style={{ color: "red", marginBottom: "8px" }}>{error}</div>}
+      {error && <div style={{ color: "red" }}>{error}</div>}
 
-      <div style={{ display: "flex", gap: "8px" }}>
-        <button onClick={onBack}>返回上一步</button>
-        <button onClick={handleNext}>下一步：填写信息</button>
-      </div>
+      <button onClick={onBack}>返回上一步</button>
+      <button onClick={handleNext}>下一步：填写信息</button>
     </div>
   );
 }
+
