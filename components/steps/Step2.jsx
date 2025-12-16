@@ -17,7 +17,12 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [luggage, setLuggage] = useState(initialData.luggage ?? 0);
   const [error, setError] = useState("");
 
-  // 🔵 从后端读取价格
+  /**
+   * 🔵 从后端 car_prices 表读取价格
+   * ❗注意字段名：
+   * - duration_hours
+   * - price_rmb
+   */
   const fetchPrice = async (modelKey, lang, hours) => {
     if (!modelKey) return 0;
 
@@ -27,16 +32,18 @@ export default function Step2({ initialData, onNext, onBack }) {
       body: JSON.stringify({
         car_model_id: CAR_MODEL_IDS[modelKey],
         driver_lang: lang,
-        duration: hours,
+        duration_hours: hours,
+        date: initialData.start_date, // 为未来节假日价预留
       }),
     });
 
     if (!res.ok) return 0;
+
     const data = await res.json();
-    return data.price || 0;
+    return data?.price_rmb || 0;
   };
 
-  // ⭐ 车型 / 语言 / 时长 任一变化 → 重算价格
+  // ⭐ 任一变化 → 重新拉价格
   useEffect(() => {
     const run = async () => {
       if (!carModel) return;
@@ -46,7 +53,7 @@ export default function Step2({ initialData, onNext, onBack }) {
     run();
   }, [carModel, driverLang, duration]);
 
-  // 🔴 库存检查（你现在这个是对的）
+  // 🔴 库存检查（保持你现在已验证 OK 的逻辑）
   const checkInventory = async () => {
     const res = await fetch("/api/check-inventory", {
       method: "POST",
@@ -120,7 +127,10 @@ export default function Step2({ initialData, onNext, onBack }) {
 
       <div>
         司机语言：
-        <select value={driverLang} onChange={(e) => setDriverLang(e.target.value)}>
+        <select
+          value={driverLang}
+          onChange={(e) => setDriverLang(e.target.value)}
+        >
           <option value="zh">中文司机</option>
           <option value="jp">日文司机</option>
         </select>
@@ -128,7 +138,10 @@ export default function Step2({ initialData, onNext, onBack }) {
 
       <div>
         包车时长：
-        <select value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
+        <select
+          value={duration}
+          onChange={(e) => setDuration(Number(e.target.value))}
+        >
           <option value={8}>8 小时</option>
           <option value={10}>10 小时</option>
         </select>
@@ -150,7 +163,9 @@ export default function Step2({ initialData, onNext, onBack }) {
         </select>
       </div>
 
-      <div>当前总价：<strong>¥{totalPrice}</strong></div>
+      <div>
+        当前总价：<strong>¥{totalPrice}</strong>
+      </div>
 
       {error && <div style={{ color: "red" }}>{error}</div>}
 
@@ -159,4 +174,3 @@ export default function Step2({ initialData, onNext, onBack }) {
     </div>
   );
 }
-
