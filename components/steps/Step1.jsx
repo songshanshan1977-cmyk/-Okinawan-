@@ -1,5 +1,6 @@
 // Step1：日期 + 酒店
-// ✅ 当日不能下单：start_date 必须 > 今天
+// ✅ 当日不能下单
+// ✅ 校验日期是否存在库存（不看车型）
 // ✅ 回传 order_id，确保流程全程不丢失
 
 import { useState } from "react";
@@ -12,8 +13,24 @@ export default function Step1({ initialData, onNext }) {
   );
   const [endHotel, setEndHotel] = useState(initialData.end_hotel || "");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const handleNext = () => {
+  // ⭐ 只按日期检查是否“存在库存记录”
+  async function checkInventoryByDate(date) {
+    const res = await fetch("/api/check-inventory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date }),
+    });
+
+    if (!res.ok) {
+      throw new Error("库存检查失败");
+    }
+
+    return await res.json();
+  }
+
+  const handleNext = async () => {
     setError("");
 
     if (!startDate) {
@@ -29,7 +46,6 @@ export default function Step1({ initialData, onNext }) {
     // ⭐ 当日不能预约
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-
     const start = new Date(startDate);
 
     if (start <= today) {
@@ -37,14 +53,31 @@ export default function Step1({ initialData, onNext }) {
       return;
     }
 
-    // ⭐ 回传 order_id（非常关键）
-    onNext({
-      order_id: initialData.order_id, // ← 保证订单号传回去不丢失
-      start_date: startDate,
-      end_date: endDate || startDate,
-      departure_hotel: departureHotel,
-      end_hotel: endHotel || departureHotel,
-    });
+    // ⭐ 库存校验（日期级）
+    try {
+      setLoading(true);
+
+      const result = await checkInventoryByDate(startDate);
+
+      if (!result.ok) {
+        setError("该日期暂无可用车辆，请选择其他日期。");
+        return;
+      }
+
+      // ✅ 通过，进入 Step2
+      onNext({
+        order_id: initialData.order_id, // 保证订单号不丢
+        start_date: startDate,
+        end_date: endDate || startDate,
+        departure_hotel: departureHotel,
+        end_hotel: endHotel || departureHotel,
+      });
+    } catch (err) {
+      console.error(err);
+      setError("库存检查失败，请稍后再试。");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -107,19 +140,21 @@ export default function Step1({ initialData, onNext }) {
 
         <button
           onClick={handleNext}
+          disabled={loading}
           style={{
             marginTop: "16px",
             padding: "10px 20px",
-            background: "#2563eb",
+            background: loading ? "#94a3b8" : "#2563eb",
             color: "#fff",
             borderRadius: "6px",
             border: "none",
-            cursor: "pointer",
+            cursor: loading ? "not-allowed" : "pointer",
           }}
         >
-          下一步：选择车型
+          {loading ? "检查库存中..." : "下一步：选择车型"}
         </button>
       </div>
     </div>
   );
 }
+
