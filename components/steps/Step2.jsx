@@ -20,7 +20,7 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [duration, setDuration] = useState(initialData.duration || 8);
   const [totalPrice, setTotalPrice] = useState(initialData.total_price || 0);
 
-  // ✅ NEW：人数 & 行李（与 orders 表字段名一致）
+  // 人数 & 行李
   const [pax, setPax] = useState(
     initialData.pax !== undefined ? initialData.pax : 1
   );
@@ -49,7 +49,7 @@ export default function Step2({ initialData, onNext, onBack }) {
     setTotalPrice(price);
   };
 
-  // 🔴 NEW：库存检查函数（只在 Step2 用）
+  // 🔒 库存检查（唯一关键点）
   const checkInventory = async () => {
     const res = await fetch("/api/check-inventory", {
       method: "POST",
@@ -63,7 +63,7 @@ export default function Step2({ initialData, onNext, onBack }) {
     if (!res.ok) return false;
 
     const data = await res.json();
-    return data?.ok === true;
+    return data?.available === true; // ✅ 关键修正点
   };
 
   const handleNext = async () => {
@@ -79,14 +79,13 @@ export default function Step2({ initialData, onNext, onBack }) {
       return;
     }
 
-    // 🔴 NEW：库存校验（关键）
+    // 🔒 真正拦库存
     const ok = await checkInventory();
     if (!ok) {
       setError("该日期该车型已无库存，请选择其他车型或日期。");
       return;
     }
 
-    // ⭐ 关键：把 pax / luggage 一并回传
     onNext({
       order_id: initialData.order_id,
       car_model: carModel,
