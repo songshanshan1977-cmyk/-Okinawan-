@@ -1,49 +1,43 @@
 import { createClient } from "@supabase/supabase-js";
 
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
 export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false });
+  }
+
   try {
-    if (req.method !== "POST") {
-      return res.status(200).json({ ok: false });
-    }
+    const { date, car_model_id } = req.body;
 
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-    if (!supabaseUrl || !serviceKey) {
-      return res.status(200).json({ ok: false });
-    }
-
-    const supabase = createClient(supabaseUrl, serviceKey);
-
-    const { date, car_model_id } = req.body || {};
+    // ⭐ 参数校验
     if (!date || !car_model_id) {
-      return res.status(200).json({ ok: false });
+      return res.json({ ok: false });
     }
 
-    const pureDate = String(date).slice(0, 10);
+    // ⭐ 强制把日期变成 YYYY-MM-DD（非常关键）
+    const pureDate = date.slice(0, 10);
 
     const { data, error } = await supabase
-      .from("库存") // 中文表名
-      .select("stock")
+      .from("库存")
+      .select("id")
       .eq("date", pureDate)
-      .eq("car_model_id", car_model_id);
+      .eq("car_model_id", car_model_id)
+      .gt("stock", 0)
+      .limit(1);
 
-    if (error || !data || data.length === 0) {
-      return res.status(200).json({ ok: false });
+    if (error) {
+      console.error("check-inventory error:", error);
+      return res.json({ ok: false });
     }
 
-    // ✅ 关键：把同一天同车型的库存全部加起来
-    const totalStock = data.reduce(
-      (sum, row) => sum + Number(row.stock || 0),
-      0
-    );
-
-    return res.status(200).json({
-      ok: totalStock > 0,
-      total_stock: totalStock, // 调试用
-    });
-  } catch (e) {
-    return res.status(200).json({ ok: false });
+    return res.json({ ok: data && data.length > 0 });
+  } catch (err) {
+    console.error("check-inventory exception:", err);
+    return res.json({ ok: false });
   }
 }
 
