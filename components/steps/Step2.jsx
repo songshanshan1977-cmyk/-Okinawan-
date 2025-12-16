@@ -49,7 +49,24 @@ export default function Step2({ initialData, onNext, onBack }) {
     setTotalPrice(price);
   };
 
-  const handleNext = () => {
+  // 🔴 NEW：库存检查函数（只在 Step2 用）
+  const checkInventory = async () => {
+    const res = await fetch("/api/check-inventory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: initialData.start_date,
+        car_model_id: CAR_MODEL_IDS[carModel],
+      }),
+    });
+
+    if (!res.ok) return false;
+
+    const data = await res.json();
+    return data?.ok === true;
+  };
+
+  const handleNext = async () => {
     setError("");
 
     if (!carModel) {
@@ -59,6 +76,13 @@ export default function Step2({ initialData, onNext, onBack }) {
 
     if (!totalPrice || totalPrice <= 0) {
       setError("价格计算异常，请重新选择车型或时长。");
+      return;
+    }
+
+    // 🔴 NEW：库存校验（关键）
+    const ok = await checkInventory();
+    if (!ok) {
+      setError("该日期该车型已无库存，请选择其他车型或日期。");
       return;
     }
 
@@ -135,7 +159,7 @@ export default function Step2({ initialData, onNext, onBack }) {
         </label>
       </div>
 
-      {/* ✅ NEW：人数 & 行李 */}
+      {/* 人数 & 行李 */}
       <div style={{ display: "flex", gap: "16px", marginBottom: "12px" }}>
         <label>
           人数：
