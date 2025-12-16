@@ -1,40 +1,51 @@
 import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
   try {
-    const { date: rawDate, car_model_id } = req.body;
-
-    if (!rawDate || !car_model_id) {
-      return res.status(400).json({ ok: false });
+    if (req.method !== "POST") {
+      return res.status(200).json({ ok: false });
     }
 
-    // ✅ 关键修复：统一日期格式
-    const date = rawDate.slice(0, 10);
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!supabaseUrl || !serviceKey) {
+      console.error("❌ missing env");
+      return res.status(200).json({ ok: false });
+    }
+
+    const supabase = createClient(supabaseUrl, serviceKey);
+
+    const { date, car_model_id } = req.body || {};
+
+    if (!date || !car_model_id) {
+      return res.status(200).json({ ok: false });
+    }
+
+    const pureDate = String(date).slice(0, 10);
 
     const { data, error } = await supabase
-      .from("库存")
+      .from("库存") // ⚠️ 必须是中文
       .select("stock")
-      .eq("date", date)
+      .eq("date", pureDate)
       .eq("car_model_id", car_model_id)
-      .single();
+      .limit(1);
 
-    if (error || !data) {
+    if (error) {
+      console.error("❌ supabase error", error);
+      return res.status(200).json({ ok: false });
+    }
+
+    if (!data || data.length === 0) {
       return res.status(200).json({ ok: false });
     }
 
     return res.status(200).json({
-      ok: data.stock > 0,
+      ok: Number(data[0].stock) > 0,
     });
   } catch (e) {
-    return res.status(500).json({ ok: false });
+    console.error("❌ fatal error", e);
+    return res.status(200).json({ ok: false });
   }
 }
+
