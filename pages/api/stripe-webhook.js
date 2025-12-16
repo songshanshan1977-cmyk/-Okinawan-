@@ -16,6 +16,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// 读取 raw body
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -63,14 +64,19 @@ export default async function handler(req, res) {
         return res.json({ received: true });
       }
 
-      // 🔍 读取订单（判断是否已锁库存）
-      const { data: order } = await supabase
+      // ① 读取订单（判断是否已锁库存）
+      const { data: order, error: orderError } = await supabase
         .from("orders")
         .select("inventory_locked")
         .eq("order_id", orderId)
         .maybeSingle();
 
-      // 1️⃣ 更新订单支付状态
+      if (orderError) {
+        console.error("❌ 读取订单失败:", orderError);
+        throw orderError;
+      }
+
+      // ② 更新订单支付状态
       await supabase
         .from("orders")
         .update({
@@ -79,7 +85,7 @@ export default async function handler(req, res) {
         })
         .eq("order_id", orderId);
 
-      // 2️⃣ 防重复写 payments
+      // ③ 防重复写 payments
       const { data: existingPayment } = await supabase
         .from("payments")
         .select("id")
@@ -99,29 +105,51 @@ export default async function handler(req, res) {
         ]);
       }
 
-      // 🔒 3️⃣ 库存扣减（只执行一次）
+      // ④ 库存扣减（只执行一次）
       if (!order?.inventory_locked && carModelId && startDate) {
-        const { error: inventoryError } = await supabase
+        // 先查库存
+        const { data: inventory, error: inventoryError } = await supabase
           .from("inventory")
-          .update({ stock: supabase.rpc("decrement", { x: 1 }) })
+          .select("id, stock")
           .eq("car_model_id", carModelId)
           .eq("date", startDate)
-          .gt("stock", 0);
+          .single();
 
-        if (inventoryError) {
-          console.error("❌ 库存扣减失败:", inventoryError);
+        if (inventoryError || !inventory) {
+          console.error("❌ 找不到库存记录:", inventoryError);
           throw inventoryError;
         }
 
-        // 🔐 上锁，防止二次扣库存
+        if (inventory.stock <= 0) {
+          console.error("❌ 库存不足，阻止扣减");
+          return res.json({ received: true });
+        }
+
+        // 扣库存（明确 -1）
+        const { error: updateError } = await supabase
+          .from("inventory")
+          .update({ stock: inventory.stock - 1 })
+          .eq("id", inventory.id);
+
+        if (updateError) {
+          console.error("❌ 扣库存失败:", updateError);
+          throw updateError;
+        }
+
+        // 锁定订单，防止重复扣
         await supabase
           .from("orders")
           .update({ inventory_locked: true })
           .eq("order_id", orderId);
 
-        console.log("🔒 库存已扣减并锁定订单:", orderId);
+        console.log(
+          "🔒 库存已扣减并锁定订单:",
+          orderId,
+          "剩余 stock:",
+          inventory.stock - 1
+        );
 
-        // 📩 4️⃣ 触发确认邮件（只在库存成功后）
+        // 📩 邮件暂时保留（不作为 webhook 成功条件）
         try {
           await fetch(
             `${process.env.NEXT_PUBLIC_SITE_URL}/api/send-confirmation-email`,
@@ -134,7 +162,6 @@ export default async function handler(req, res) {
           console.log("📧 已触发确认邮件:", orderId);
         } catch (mailErr) {
           console.error("⚠️ 触发确认邮件失败:", mailErr);
-          // ❗不 throw，避免 webhook 回滚
         }
       }
     }
