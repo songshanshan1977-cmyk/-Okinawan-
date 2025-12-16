@@ -10,14 +10,12 @@ export default async function handler(req, res) {
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
     if (!supabaseUrl || !serviceKey) {
-      console.error("❌ missing env");
       return res.status(200).json({ ok: false });
     }
 
     const supabase = createClient(supabaseUrl, serviceKey);
 
     const { date, car_model_id } = req.body || {};
-
     if (!date || !car_model_id) {
       return res.status(200).json({ ok: false });
     }
@@ -25,26 +23,26 @@ export default async function handler(req, res) {
     const pureDate = String(date).slice(0, 10);
 
     const { data, error } = await supabase
-      .from("库存") // ⚠️ 必须是中文
+      .from("库存") // 中文表名
       .select("stock")
       .eq("date", pureDate)
-      .eq("car_model_id", car_model_id)
-      .limit(1);
+      .eq("car_model_id", car_model_id);
 
-    if (error) {
-      console.error("❌ supabase error", error);
+    if (error || !data || data.length === 0) {
       return res.status(200).json({ ok: false });
     }
 
-    if (!data || data.length === 0) {
-      return res.status(200).json({ ok: false });
-    }
+    // ✅ 关键：把同一天同车型的库存全部加起来
+    const totalStock = data.reduce(
+      (sum, row) => sum + Number(row.stock || 0),
+      0
+    );
 
     return res.status(200).json({
-      ok: Number(data[0].stock) > 0,
+      ok: totalStock > 0,
+      total_stock: totalStock, // 调试用
     });
   } catch (e) {
-    console.error("❌ fatal error", e);
     return res.status(200).json({ ok: false });
   }
 }
