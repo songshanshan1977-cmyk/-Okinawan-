@@ -1,4 +1,3 @@
-console.log("🔥🔥🔥 get-car-price DEPLOY CHECK v2025-12-17");
 // pages/api/get-car-price.js
 import { createClient } from "@supabase/supabase-js";
 
@@ -9,13 +8,27 @@ const supabase = createClient(
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ price: 0 });
+    return res.status(405).json({ price: 0, error: "POST only" });
   }
 
-  const { car_model_id, driver_lang, duration_hours } = req.body;
+  let { car_model_id, driver_lang, duration_hours } = req.body;
+
+  // 🔥 强制修正类型
+  duration_hours = Number(duration_hours);
+
+  // 🔥 强制修正司机语言
+  if (driver_lang === "中文司机") driver_lang = "ZH";
+  if (driver_lang === "日文司机") driver_lang = "JP";
+
+  console.log("🔍 PRICE QUERY PARAMS", {
+    car_model_id,
+    driver_lang,
+    duration_hours,
+    typeof_duration: typeof duration_hours,
+  });
 
   if (!car_model_id || !driver_lang || !duration_hours) {
-    return res.status(400).json({ price: 0 });
+    return res.json({ price: 0, error: "missing params" });
   }
 
   const { data, error } = await supabase
@@ -23,20 +36,18 @@ export default async function handler(req, res) {
     .select("price_rmb")
     .eq("car_model_id", car_model_id)
     .eq("driver_lang", driver_lang)
-    // ✅ 关键修复在这里 ↓↓↓↓↓↓↓↓↓↓↓↓↓
-    .eq("duration_hour", Number(duration_hours))
-    // ✅ 数据库字段是 duration_hour（单数）
+    .eq("duration_hours", duration_hours)
     .limit(1)
-    .maybeSingle();
+    .single();
 
   if (error || !data) {
-    console.error("get-car-price error:", error);
-    return res.json({ price: 0, error: "no matched price row" });
+    console.error("❌ NO MATCHED ROW", error);
+    return res.json({
+      price: 0,
+      error: "no matched price row",
+      debug: { car_model_id, driver_lang, duration_hours },
+    });
   }
 
-  return res.json({
-    price: Number(data.price_rmb) || 0,
-  });
+  return res.json({ price: Number(data.price_rmb) });
 }
-
-
