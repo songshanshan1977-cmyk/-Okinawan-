@@ -15,13 +15,17 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   const [pax, setPax] = useState(initialData.pax ?? 1);
   const [luggage, setLuggage] = useState(initialData.luggage ?? 0);
+
+  // ✅ 客人信息（新增）
+  const [customerName, setCustomerName] = useState(initialData.name || "");
+  const [customerPhone, setCustomerPhone] = useState(initialData.phone || "");
+  const [customerEmail, setCustomerEmail] = useState(initialData.email || "");
+  const [remark, setRemark] = useState(initialData.remark || "");
+
   const [error, setError] = useState("");
 
   /**
    * 🔵 从后端 car_prices 表读取价格
-   * ❗注意字段名：
-   * - duration_hours
-   * - price_rmb
    */
   const fetchPrice = async (modelKey, lang, hours) => {
     if (!modelKey) return 0;
@@ -33,12 +37,11 @@ export default function Step2({ initialData, onNext, onBack }) {
         car_model_id: CAR_MODEL_IDS[modelKey],
         driver_lang: lang,
         duration_hours: hours,
-        date: initialData.start_date, // 为未来节假日价预留
+        date: initialData.start_date,
       }),
     });
 
     if (!res.ok) return 0;
-
     const data = await res.json();
     return data?.price_rmb || 0;
   };
@@ -53,7 +56,7 @@ export default function Step2({ initialData, onNext, onBack }) {
     run();
   }, [carModel, driverLang, duration]);
 
-  // 🔴 库存检查（保持你现在已验证 OK 的逻辑）
+  // 🔴 库存检查（保持不动）
   const checkInventory = async () => {
     const res = await fetch("/api/check-inventory", {
       method: "POST",
@@ -71,6 +74,20 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   const handleNext = async () => {
     setError("");
+
+    // ✅ 新增：客人信息校验
+    if (!customerName.trim()) {
+      setError("请填写姓名");
+      return;
+    }
+    if (!customerPhone.trim()) {
+      setError("请填写联系电话");
+      return;
+    }
+    if (!customerEmail.trim()) {
+      setError("请填写邮箱（用于发送确认邮件）");
+      return;
+    }
 
     if (!carModel) {
       setError("请选择车型");
@@ -90,13 +107,21 @@ export default function Step2({ initialData, onNext, onBack }) {
 
     onNext({
       order_id: initialData.order_id,
+
       car_model: carModel,
       car_model_id: CAR_MODEL_IDS[carModel],
       driver_lang: driverLang,
       duration,
       total_price: totalPrice,
+
       pax: Number(pax),
       luggage: Number(luggage),
+
+      // 👤 客人信息（现在 Step2 已经收齐）
+      name: customerName,
+      phone: customerPhone,
+      email: customerEmail,
+      remark,
     });
   };
 
@@ -127,10 +152,7 @@ export default function Step2({ initialData, onNext, onBack }) {
 
       <div>
         司机语言：
-        <select
-          value={driverLang}
-          onChange={(e) => setDriverLang(e.target.value)}
-        >
+        <select value={driverLang} onChange={(e) => setDriverLang(e.target.value)}>
           <option value="zh">中文司机</option>
           <option value="jp">日文司机</option>
         </select>
@@ -138,10 +160,7 @@ export default function Step2({ initialData, onNext, onBack }) {
 
       <div>
         包车时长：
-        <select
-          value={duration}
-          onChange={(e) => setDuration(Number(e.target.value))}
-        >
+        <select value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
           <option value={8}>8 小时</option>
           <option value={10}>10 小时</option>
         </select>
@@ -163,6 +182,33 @@ export default function Step2({ initialData, onNext, onBack }) {
         </select>
       </div>
 
+      {/* 👤 客人信息 */}
+      <h3 style={{ marginTop: 16 }}>客户信息</h3>
+
+      <div>
+        姓名（必填）：
+        <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
+      </div>
+
+      <div>
+        电话（必填）：
+        <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} />
+      </div>
+
+      <div>
+        邮箱（必填）：
+        <input
+          type="email"
+          value={customerEmail}
+          onChange={(e) => setCustomerEmail(e.target.value)}
+        />
+      </div>
+
+      <div>
+        备注（可选）：
+        <textarea value={remark} onChange={(e) => setRemark(e.target.value)} />
+      </div>
+
       <div>
         当前总价：<strong>¥{totalPrice}</strong>
       </div>
@@ -174,3 +220,4 @@ export default function Step2({ initialData, onNext, onBack }) {
     </div>
   );
 }
+
