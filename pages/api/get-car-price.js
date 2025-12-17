@@ -1,3 +1,4 @@
+console.log("🔥🔥🔥 get-car-price DEPLOY CHECK v2025-12-17");
 // pages/api/get-car-price.js
 import { createClient } from "@supabase/supabase-js";
 
