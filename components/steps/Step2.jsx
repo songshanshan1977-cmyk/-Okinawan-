@@ -7,7 +7,7 @@ const CAR_MODEL_IDS = {
   car3: "453df662-d350-4ab9-b811-61ffcda40d4b",
 };
 
-// 统一 driver_lang：前端用 zh/jp，但后端表里你现在是 ZH/JP（从截图看到）
+// 统一 driver_lang：前端用 zh/jp，但后端表里是 ZH/JP
 const normalizeLangForAPI = (lang) => {
   if (lang === "zh") return "ZH";
   if (lang === "jp") return "JP";
@@ -31,19 +31,17 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [pax, setPax] = useState(initialData.pax ?? 1);
   const [luggage, setLuggage] = useState(initialData.luggage ?? 0);
 
-  // ✅ 客户信息移到 Step2（邮箱必填）
+  // 客户信息（邮箱必填）
   const [name, setName] = useState(initialData.name ?? "");
   const [phone, setPhone] = useState(initialData.phone ?? "");
   const [email, setEmail] = useState(initialData.email ?? "");
   const [remark, setRemark] = useState(initialData.remark ?? "");
 
   const [error, setError] = useState("");
-  const [stockHint, setStockHint] = useState(null); // 用来显示 total_stock，方便你验证
+  const [stockHint, setStockHint] = useState(null);
 
   /**
    * 🔵 从后端 car_prices 表读取价格
-   * - 兼容后端返回 { price: 2600 } 或 { price_rmb: 2600 }
-   * - 字段名用 duration_hours（你确认的真实字段名）
    */
   const fetchPrice = async (modelKey, lang, hours) => {
     if (!modelKey) return 0;
@@ -55,7 +53,7 @@ export default function Step2({ initialData, onNext, onBack }) {
         car_model_id: CAR_MODEL_IDS[modelKey],
         driver_lang: normalizeLangForAPI(lang),
         duration_hours: Number(hours),
-        date: initialData.start_date, // 预留将来节假日价/区间价用
+        date: initialData.start_date,
       }),
     });
 
@@ -63,12 +61,11 @@ export default function Step2({ initialData, onNext, onBack }) {
 
     const data = await res.json();
 
-    // ✅ 关键修复：你的接口响应里现在是 { "price": 2600 }
-    const p = Number(data?.price ?? data?.price_rmb ?? 0);
-    return Number.isFinite(p) ? p : 0;
+    // ✅【唯一修改的这一句】
+    return Number(data?.price ?? data?.price_rmb ?? 0);
   };
 
-  // ⭐ 车型 / 语言 / 时长 任一变化 → 重新拉价格
+  // 任一变化 → 重新拉价格
   useEffect(() => {
     const run = async () => {
       setError("");
@@ -77,15 +74,15 @@ export default function Step2({ initialData, onNext, onBack }) {
 
       const price = await fetchPrice(carModel, driverLang, duration);
       setTotalPrice(price);
+
       if (!price) {
         setError("价格读取失败，请稍后重试。");
       }
     };
     run();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [carModel, driverLang, duration]);
 
-  // 🔴 库存检查（保持走 /api/check-inventory）
+  // 库存检查
   const checkInventory = async () => {
     const res = await fetch("/api/check-inventory", {
       method: "POST",
@@ -109,7 +106,6 @@ export default function Step2({ initialData, onNext, onBack }) {
     setError("");
     setStockHint(null);
 
-    // ✅ 兜底：当日不能预约（防止 Step1 失效）
     const today = formatDate(new Date());
     if (initialData.start_date === today) {
       setError("当日不能预约，请选择明天或之后的日期。");
@@ -121,7 +117,6 @@ export default function Step2({ initialData, onNext, onBack }) {
       return;
     }
 
-    // 客户信息（邮箱必填）
     if (!name.trim()) {
       setError("请输入姓名（必填）");
       return;
@@ -157,8 +152,6 @@ export default function Step2({ initialData, onNext, onBack }) {
       total_price: totalPrice,
       pax: Number(pax),
       luggage: Number(luggage),
-
-      // ✅ 客户信息放到 Step2 里往后传
       name: name.trim(),
       phone: phone.trim(),
       email: email.trim(),
@@ -196,79 +189,66 @@ export default function Step2({ initialData, onNext, onBack }) {
 
       {/* 司机语言 / 时长 / 人数行李 */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ width: 80 }}>司机语言：</span>
+        <label>
+          司机语言：
           <select value={driverLang} onChange={(e) => setDriverLang(e.target.value)}>
             <option value="zh">中文司机</option>
             <option value="jp">日文司机</option>
           </select>
         </label>
 
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ width: 80 }}>包车时长：</span>
+        <label>
+          包车时长：
           <select value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
             <option value={8}>8 小时</option>
             <option value={10}>10 小时</option>
           </select>
         </label>
 
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ width: 80 }}>人数：</span>
+        <label>
+          人数：
           <select value={pax} onChange={(e) => setPax(e.target.value)}>
             {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
+              <option key={n} value={n}>{n}</option>
             ))}
           </select>
         </label>
 
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ width: 80 }}>行李：</span>
+        <label>
+          行李：
           <select value={luggage} onChange={(e) => setLuggage(e.target.value)}>
             {Array.from({ length: 11 }, (_, i) => i).map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
+              <option key={n} value={n}>{n}</option>
             ))}
           </select>
         </label>
       </div>
 
       {/* 客户信息 */}
-      <div style={{ marginTop: 8, marginBottom: 12, padding: 12, border: "1px solid #eee", borderRadius: 10 }}>
-        <div style={{ fontWeight: 800, marginBottom: 10 }}>客户信息</div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 10, alignItems: "center" }}>
-          <div>姓名（必填）：</div>
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-
-          <div>电话（必填）：</div>
-          <input value={phone} onChange={(e) => setPhone(e.target.value)} />
-
-          <div>邮箱（必填）：</div>
-          <input value={email} onChange={(e) => setEmail(e.target.value)} />
-
-          <div>备注（可选）：</div>
-          <input value={remark} onChange={(e) => setRemark(e.target.value)} />
-        </div>
+      <div style={{ border: "1px solid #eee", padding: 12, borderRadius: 10 }}>
+        <strong>客户信息</strong>
+        <div>姓名（必填）：<input value={name} onChange={(e) => setName(e.target.value)} /></div>
+        <div>电话（必填）：<input value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
+        <div>邮箱（必填）：<input value={email} onChange={(e) => setEmail(e.target.value)} /></div>
+        <div>备注（可选）：<input value={remark} onChange={(e) => setRemark(e.target.value)} /></div>
       </div>
 
-      <div style={{ marginBottom: 8 }}>
+      <div style={{ marginTop: 10 }}>
         当前总价：<strong>¥{totalPrice}</strong>
         {typeof stockHint === "number" && (
-          <span style={{ marginLeft: 12, color: "#666" }}>（库存汇总：{stockHint}）</span>
+          <span style={{ marginLeft: 12, color: "#666" }}>（库存：{stockHint}）</span>
         )}
       </div>
 
-      {error && <div style={{ color: "red", marginBottom: 10 }}>{error}</div>}
+      {error && <div style={{ color: "red" }}>{error}</div>}
 
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ marginTop: 10 }}>
         <button onClick={onBack}>返回上一步</button>
         <button onClick={handleNext}>下一步：填写信息</button>
       </div>
     </div>
   );
 }
+
 
 
