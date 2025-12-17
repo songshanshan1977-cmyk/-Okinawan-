@@ -7,49 +7,42 @@ const supabase = createClient(
 
 export default async function handler(req, res) {
   try {
-    const { car_model_id, driver_lang, duration_hours } = req.query;
+    // ⭐ 同时兼容 query 和 body
+    const source = req.method === "POST" ? req.body : req.query;
 
-    // 参数检查
+    const car_model_id = source?.car_model_id;
+    const driver_lang = source?.driver_lang;
+    const duration_hours = source?.duration_hours;
+
     if (!car_model_id || !driver_lang || !duration_hours) {
       return res.status(400).json({
         error: "missing params",
-        debug: req.query,
+        debug: source,
       });
     }
 
-    // ⭐ 强制转 int（关键中的关键）
     const hours = parseInt(duration_hours, 10);
 
-    // ⭐ 查询（一次性写清楚）
     const { data, error } = await supabase
       .from("car_prices")
-      .select("price_rmb, driver_lang, duration_hours")
+      .select("price_rmb")
       .eq("car_model_id", car_model_id)
       .eq("driver_lang", driver_lang)
       .eq("duration_hours", hours)
       .limit(1);
 
     if (error) {
-      return res.status(500).json({
-        error: error.message,
-        debug: { car_model_id, driver_lang, hours },
-      });
+      return res.status(500).json({ error: error.message });
     }
 
-    return res.status(200).json({
+    return res.json({
       price: data?.[0]?.price_rmb ?? 0,
-      count: data?.length ?? 0,
       rows: data ?? [],
-      debug: {
-        car_model_id,
-        driver_lang,
-        duration_hours: hours,
-      },
+      debug: { car_model_id, driver_lang, duration_hours: hours },
     });
   } catch (e) {
-    return res.status(500).json({
-      error: e.message,
-    });
+    return res.status(500).json({ error: e.message });
   }
 }
+
 
