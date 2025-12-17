@@ -1,3 +1,4 @@
+// pages/api/get-car-price.js
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(
@@ -16,12 +17,13 @@ export default async function handler(req, res) {
     return res.status(400).json({ price: 0 });
   }
 
+  // ✅ 关键修复点：【不要用 date 参与价格查询】
   const { data, error } = await supabase
     .from("car_prices")
     .select("price_rmb")
     .eq("car_model_id", car_model_id)
-    .eq("driver_lang", driver_lang)
-    .eq("duration_hours", duration_hours)
+    .eq("driver_lang", driver_lang)       // ZH / JP
+    .eq("duration_hours", duration_hours) // 8 / 10
     .limit(1)
     .single();
 
@@ -30,5 +32,7 @@ export default async function handler(req, res) {
     return res.json({ price: 0 });
   }
 
-  return res.json({ price: data.price_rmb });
+  return res.json({
+    price: Number(data.price_rmb) || 0,
+  });
 }
