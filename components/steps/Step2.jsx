@@ -7,7 +7,7 @@ const CAR_MODEL_IDS = {
   car3: "453df662-d350-4ab9-b811-61ffcda40d4b",
 };
 
-// 统一 driver_lang：前端用 zh/jp，但后端表里是 ZH/JP
+// 前端 zh/jp → 后端 ZH/JP
 const normalizeLangForAPI = (lang) => {
   if (lang === "zh") return "ZH";
   if (lang === "jp") return "JP";
@@ -31,7 +31,7 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [pax, setPax] = useState(initialData.pax ?? 1);
   const [luggage, setLuggage] = useState(initialData.luggage ?? 0);
 
-  // 客户信息（邮箱必填）
+  // 客户信息
   const [name, setName] = useState(initialData.name ?? "");
   const [phone, setPhone] = useState(initialData.phone ?? "");
   const [email, setEmail] = useState(initialData.email ?? "");
@@ -41,10 +41,11 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [stockHint, setStockHint] = useState(null);
 
   /**
-   * 🔵 从后端 car_prices 表读取价格
+   * 🔵 从 car_prices 表读取价格
+   * ❗不参与 date
    */
   const fetchPrice = async (modelKey, lang, hours) => {
-    if (!modelKey) return 0;
+    if (!modelKey) return null;
 
     const res = await fetch("/api/get-car-price", {
       method: "POST",
@@ -53,36 +54,49 @@ export default function Step2({ initialData, onNext, onBack }) {
         car_model_id: CAR_MODEL_IDS[modelKey],
         driver_lang: normalizeLangForAPI(lang),
         duration_hours: Number(hours),
-        date: initialData.start_date,
       }),
     });
 
-    if (!res.ok) return 0;
+    if (!res.ok) return null;
 
     const data = await res.json();
-
-    // ✅【唯一修改的这一句】
-    return Number(data?.price ?? data?.price_rmb ?? 0);
+    return Number(data?.price ?? 0);
   };
 
-  // 任一变化 → 重新拉价格
+  /**
+   * ✅ 只有车型 / 语言 / 时长变化才拉价格
+   * ❌ 不提前清零
+   * ✅ 防止异步覆盖
+   */
   useEffect(() => {
+    let cancelled = false;
+
     const run = async () => {
       setError("");
-      setTotalPrice(0);
       if (!carModel) return;
 
       const price = await fetchPrice(carModel, driverLang, duration);
-      setTotalPrice(price);
 
-      if (!price) {
+      if (cancelled) return;
+
+      if (price && price > 0) {
+        setTotalPrice(price);
+      } else {
+        setTotalPrice(0);
         setError("价格读取失败，请稍后重试。");
       }
     };
+
     run();
+
+    return () => {
+      cancelled = true;
+    };
   }, [carModel, driverLang, duration]);
 
-  // 库存检查
+  /**
+   * 库存检查
+   */
   const checkInventory = async () => {
     const res = await fetch("/api/check-inventory", {
       method: "POST",
@@ -102,6 +116,9 @@ export default function Step2({ initialData, onNext, onBack }) {
     };
   };
 
+  /**
+   * 下一步
+   */
   const handleNext = async () => {
     setError("");
     setStockHint(null);
@@ -112,23 +129,10 @@ export default function Step2({ initialData, onNext, onBack }) {
       return;
     }
 
-    if (!carModel) {
-      setError("请选择车型");
-      return;
-    }
-
-    if (!name.trim()) {
-      setError("请输入姓名（必填）");
-      return;
-    }
-    if (!phone.trim()) {
-      setError("请输入电话（必填）");
-      return;
-    }
-    if (!email.trim()) {
-      setError("请输入邮箱（必填）");
-      return;
-    }
+    if (!carModel) return setError("请选择车型");
+    if (!name.trim()) return setError("请输入姓名（必填）");
+    if (!phone.trim()) return setError("请输入电话（必填）");
+    if (!email.trim()) return setError("请输入邮箱（必填）");
 
     if (!totalPrice || totalPrice <= 0) {
       setError("价格读取失败，请稍后重试。");
@@ -161,7 +165,9 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   return (
     <div style={{ maxWidth: 760, margin: "0 auto", padding: 16 }}>
-      <h2 style={{ fontSize: 24, marginBottom: 16 }}>Step2：选择车型 & 服务</h2>
+      <h2 style={{ fontSize: 24, marginBottom: 16 }}>
+        Step2：选择车型 & 服务
+      </h2>
 
       {/* 车型 */}
       <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
@@ -187,8 +193,8 @@ export default function Step2({ initialData, onNext, onBack }) {
         ))}
       </div>
 
-      {/* 司机语言 / 时长 / 人数行李 */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+      {/* 参数 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <label>
           司机语言：
           <select value={driverLang} onChange={(e) => setDriverLang(e.target.value)}>
@@ -225,7 +231,7 @@ export default function Step2({ initialData, onNext, onBack }) {
       </div>
 
       {/* 客户信息 */}
-      <div style={{ border: "1px solid #eee", padding: 12, borderRadius: 10 }}>
+      <div style={{ marginTop: 16, border: "1px solid #eee", padding: 12, borderRadius: 10 }}>
         <strong>客户信息</strong>
         <div>姓名（必填）：<input value={name} onChange={(e) => setName(e.target.value)} /></div>
         <div>电话（必填）：<input value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
@@ -233,22 +239,25 @@ export default function Step2({ initialData, onNext, onBack }) {
         <div>备注（可选）：<input value={remark} onChange={(e) => setRemark(e.target.value)} /></div>
       </div>
 
-      <div style={{ marginTop: 10 }}>
+      <div style={{ marginTop: 12 }}>
         当前总价：<strong>¥{totalPrice}</strong>
         {typeof stockHint === "number" && (
-          <span style={{ marginLeft: 12, color: "#666" }}>（库存：{stockHint}）</span>
+          <span style={{ marginLeft: 12, color: "#666" }}>
+            （库存：{stockHint}）
+          </span>
         )}
       </div>
 
       {error && <div style={{ color: "red" }}>{error}</div>}
 
-      <div style={{ marginTop: 10 }}>
+      <div style={{ marginTop: 12 }}>
         <button onClick={onBack}>返回上一步</button>
         <button onClick={handleNext}>下一步：填写信息</button>
       </div>
     </div>
   );
 }
+
 
 
 
