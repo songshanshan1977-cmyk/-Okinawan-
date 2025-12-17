@@ -8,19 +8,17 @@ const supabase = createClient(
 
 export default async function handler(req, res) {
   try {
-    const {
-      car_model_id,
-      driver_lang,
-      duration_hours,
-    } = req.query;
+    // ⭐ 同时兼容 GET / POST
+    const source = req.method === "POST" ? req.body : req.query;
 
-    // 🔴 关键修复点：把字符串转成数字
-    const duration = Number(duration_hours);
+    const car_model_id = source.car_model_id;
+    const driver_lang = source.driver_lang;
+    const duration = Number(source.duration_hours);
 
     if (!car_model_id || !driver_lang || !duration) {
       return res.status(400).json({
         error: "missing params",
-        debug: { car_model_id, driver_lang, duration_hours },
+        debug: { car_model_id, driver_lang, duration },
       });
     }
 
@@ -39,14 +37,9 @@ export default async function handler(req, res) {
       price: data?.[0]?.price_rmb ?? 0,
       count: data.length,
       rows: data,
-      debug: {
-        car_model_id,
-        driver_lang,
-        duration_hours: duration,
-      },
+      debug: { car_model_id, driver_lang, duration },
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 }
-
