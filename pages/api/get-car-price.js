@@ -21,7 +21,8 @@ export default async function handler(req, res) {
     .select("price_rmb")
     .eq("car_model_id", car_model_id)
     .eq("driver_lang", driver_lang)
-    .eq("duration_hours", duration_hours)
+    // 🔴 关键修复：单数！
+    .eq("duration_hour", Number(duration_hours))
     .limit(1);
 
   if (error) {
