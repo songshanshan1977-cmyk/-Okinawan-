@@ -18,23 +18,29 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false });
   }
 
-  // ✅ 核心：同一天 + 同车型 → 汇总库存
+  /**
+   * ✅ 关键修正点
+   * 不是看“有没有记录”
+   * 而是看：是否存在 可用库存 > 0
+   *
+   * 👉 如果你当前表里只有 stock，
+   * 那就必须要求 stock > 0
+   */
   const { data, error } = await supabase
     .from("inventory")
     .select("stock")
     .eq("date", date)
-    .eq("car_model_id", car_model_id);
+    .eq("car_model_id", car_model_id)
+    .gt("stock", 0); // ⭐⭐⭐ 核心修复
 
   if (error) {
     console.error("inventory error:", error);
     return res.status(500).json({ ok: false });
   }
 
-  const totalStock = data.reduce((sum, row) => sum + (row.stock || 0), 0);
-
   return res.json({
-    ok: totalStock > 0,
-    total_stock: totalStock,
+    ok: data.length > 0, // 只要有一条 stock > 0 即可
+    total_stock: data.reduce((sum, row) => sum + (row.stock || 0), 0),
   });
 }
 
