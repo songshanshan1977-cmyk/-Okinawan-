@@ -17,26 +17,25 @@ export default async function handler(req, res) {
     return res.status(400).json({ price: 0 });
   }
 
-  // ✅【关键修复】：字段名必须是 duration_hour（无 s）
   const { data, error } = await supabase
     .from("car_prices")
     .select("price_rmb")
     .eq("car_model_id", car_model_id)
     .eq("driver_lang", driver_lang)
-    .eq("duration_hour", Number(duration_hours)) // ⭐这里！
+    // ✅ 关键修复在这里 ↓↓↓↓↓↓↓↓↓↓↓↓↓
+    .eq("duration_hour", Number(duration_hours))
+    // ✅ 数据库字段是 duration_hour（单数）
     .limit(1)
-    .single();
+    .maybeSingle();
 
   if (error || !data) {
     console.error("get-car-price error:", error);
-    return res.json({
-      price: 0,
-      error: "no matched price row",
-    });
+    return res.json({ price: 0, error: "no matched price row" });
   }
 
   return res.json({
-    price: Number(data.price_rmb),
+    price: Number(data.price_rmb) || 0,
   });
 }
+
 
