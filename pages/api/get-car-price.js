@@ -1,3 +1,4 @@
+// pages/api/get-car-price.js
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(
@@ -12,42 +13,30 @@ export default async function handler(req, res) {
 
   const { car_model_id, driver_lang, duration_hours } = req.body;
 
-  // 基础校验
   if (!car_model_id || !driver_lang || !duration_hours) {
-    return res.json({
-      price: 0,
-      error: "missing params",
-      received: req.body,
-    });
+    return res.status(400).json({ price: 0 });
   }
 
-  // 🔴 核心：查 car_prices
+  // ✅【关键修复】：字段名必须是 duration_hour（无 s）
   const { data, error } = await supabase
     .from("car_prices")
     .select("price_rmb")
     .eq("car_model_id", car_model_id)
     .eq("driver_lang", driver_lang)
-    .eq("duration_hours", Number(duration_hours))
+    .eq("duration_hour", Number(duration_hours)) // ⭐这里！
     .limit(1)
-    .maybeSingle(); // ⚠️ 不要用 single，避免 406
+    .single();
 
-  if (error) {
-    console.error("❌ get-car-price error:", error);
-    return res.json({
-      price: 0,
-      error: error.message,
-    });
-  }
-
-  if (!data) {
+  if (error || !data) {
+    console.error("get-car-price error:", error);
     return res.json({
       price: 0,
       error: "no matched price row",
     });
   }
 
-  // ✅ 成功
   return res.json({
     price: Number(data.price_rmb),
   });
 }
+
