@@ -85,6 +85,17 @@ export default async function handler(req, res) {
         })
         .eq("order_id", orderId);
 
+      // ⭐⭐⭐ NEW：读取完整订单（给 Step5 / 邮件用）⭐⭐⭐
+      const { data: fullOrder, error: fullOrderError } = await supabase
+        .from("orders")
+        .select("*")
+        .eq("order_id", orderId)
+        .maybeSingle();
+
+      if (fullOrderError || !fullOrder) {
+        console.error("❌ 读取完整订单失败:", fullOrderError);
+      }
+
       // ③ 防重复写 payments
       const { data: existingPayment } = await supabase
         .from("payments")
@@ -107,7 +118,6 @@ export default async function handler(req, res) {
 
       // ④ 库存扣减（只执行一次）
       if (!order?.inventory_locked && carModelId && startDate) {
-        // 先查库存
         const { data: inventory, error: inventoryError } = await supabase
           .from("inventory")
           .select("id, stock")
@@ -125,7 +135,7 @@ export default async function handler(req, res) {
           return res.json({ received: true });
         }
 
-        // 扣库存（明确 -1）
+        // 扣库存
         const { error: updateError } = await supabase
           .from("inventory")
           .update({ stock: inventory.stock - 1 })
@@ -136,7 +146,7 @@ export default async function handler(req, res) {
           throw updateError;
         }
 
-        // 锁定订单，防止重复扣
+        // 锁定订单
         await supabase
           .from("orders")
           .update({ inventory_locked: true })
@@ -149,14 +159,17 @@ export default async function handler(req, res) {
           inventory.stock - 1
         );
 
-        // 📩 邮件暂时保留（不作为 webhook 成功条件）
+        // 📩 触发确认邮件（不影响 webhook 成功）
         try {
           await fetch(
             `${process.env.NEXT_PUBLIC_SITE_URL}/api/send-confirmation-email`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ order_id: orderId }),
+              body: JSON.stringify({
+                order_id: orderId,
+                order: fullOrder, // ⭐ NEW：完整订单直接给邮件 & Step5
+              }),
             }
           );
           console.log("📧 已触发确认邮件:", orderId);
@@ -176,4 +189,5 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
+
 
