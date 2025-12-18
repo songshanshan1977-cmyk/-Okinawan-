@@ -41,26 +41,22 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [stockHint, setStockHint] = useState(null);
 
   /**
-   * 🔵 从 car_prices 表读取价格（✅带日期联动）
-   * ✅ use_date = initialData.start_date
+   * 🔵 拉价格（✅ GET + query，对齐后端）
    */
   const fetchPrice = async (modelKey, lang, hours) => {
     if (!modelKey) return null;
 
-    // ✅ 关键：把 Step1 选的日期带过去，用于匹配 start_date/end_date 价目
-    const use_date = initialData.start_date || null;
+    const use_date = initialData.start_date;
+    if (!use_date) return null;
 
-    const res = await fetch("/api/get-car-price", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        car_model_id: CAR_MODEL_IDS[modelKey],
-        driver_lang: normalizeLangForAPI(lang),
-        duration_hours: Number(hours),
-        use_date, // ✅ 新增：日期
-      }),
+    const params = new URLSearchParams({
+      car_model_id: CAR_MODEL_IDS[modelKey],
+      driver_lang: normalizeLangForAPI(lang),
+      duration_hours: String(hours),
+      use_date,
     });
 
+    const res = await fetch(`/api/get-car-price?${params.toString()}`);
     if (!res.ok) return null;
 
     const data = await res.json();
@@ -68,9 +64,7 @@ export default function Step2({ initialData, onNext, onBack }) {
   };
 
   /**
-   * ✅ 只有车型 / 语言 / 时长变化才拉价格
-   * ❌ 不提前清零
-   * ✅ 防止异步覆盖
+   * ✅ 车型 / 语言 / 时长 / 日期变化 → 拉价格
    */
   useEffect(() => {
     let cancelled = false;
@@ -80,10 +74,9 @@ export default function Step2({ initialData, onNext, onBack }) {
       if (!carModel) return;
 
       const price = await fetchPrice(carModel, driverLang, duration);
-
       if (cancelled) return;
 
-      if (price && price > 0) {
+      if (price > 0) {
         setTotalPrice(price);
       } else {
         setTotalPrice(0);
@@ -92,7 +85,6 @@ export default function Step2({ initialData, onNext, onBack }) {
     };
 
     run();
-
     return () => {
       cancelled = true;
     };
