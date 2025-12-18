@@ -8,22 +8,29 @@ const supabase = createClient(
 
 export default async function handler(req, res) {
   try {
+    // ✅ 同时支持 GET / POST（方便你浏览器直接测试）
+    const params = req.method === "GET" ? req.query : req.body;
+
     const {
       car_model_id,
       driver_lang,
       duration_hours,
       use_date,
-    } = req.query;
+    } = params;
 
-    // ---------- 1️⃣ 参数校验 ----------
+    // ----------------------------
+    // 1️⃣ 参数校验（缺一个直接报错）
+    // ----------------------------
     if (!car_model_id || !driver_lang || !duration_hours || !use_date) {
       return res.status(400).json({
         error: "missing params",
-        debug: { car_model_id, driver_lang, duration_hours, use_date },
+        debug: params,
       });
     }
 
-    // ---------- 2️⃣ 查价格（按日期区间） ----------
+    // ----------------------------
+    // 2️⃣ 查询 car_prices（核心）
+    // ----------------------------
     const { data, error } = await supabase
       .from("car_prices")
       .select("*")
@@ -32,31 +39,43 @@ export default async function handler(req, res) {
       .eq("duration_hours", Number(duration_hours))
       .lte("start_date", use_date)
       .gte("end_date", use_date)
-      .order("created_at", { ascending: false });
+      .order("start_date", { ascending: false })
+      .limit(1);
 
     if (error) {
       return res.status(500).json({
-        error: error.message,
-        debug: { car_model_id, driver_lang, duration_hours, use_date },
+        error: "db error",
+        message: error.message,
+        debug: params,
       });
     }
 
-    // ---------- 3️⃣ 返回 ----------
+    // ----------------------------
+    // 3️⃣ 没匹配到价格
+    // ----------------------------
+    if (!data || data.length === 0) {
+      return res.json({
+        price: 0,
+        count: 0,
+        rows: [],
+        debug: params,
+      });
+    }
+
+    // ----------------------------
+    // 4️⃣ 成功返回价格
+    // ----------------------------
     return res.json({
-      price: data?.[0]?.price_rmb ?? 0,
+      price: Number(data[0].price_rmb),
       count: data.length,
       rows: data,
-      debug: {
-        car_model_id,
-        driver_lang,
-        duration_hours,
-        use_date,
-      },
+      debug: params,
     });
   } catch (e) {
     return res.status(500).json({
-      error: "server_error",
+      error: "server crash",
       message: e.message,
     });
   }
 }
+
