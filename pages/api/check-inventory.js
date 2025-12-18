@@ -19,7 +19,7 @@ export default async function handler(req, res) {
 
   const { data, error } = await supabase
     .from("inventory")
-    .select("库存")          // ✅ 正确字段
+    .select("stock")              // ✅ 正确字段名
     .eq("date", date)
     .eq("car_model_id", car_model_id);
 
@@ -29,7 +29,7 @@ export default async function handler(req, res) {
   }
 
   const totalStock = data.reduce(
-    (sum, row) => sum + (row.库存 || 0),
+    (sum, row) => sum + (row.stock || 0),  // ✅ 正确字段
     0
   );
 
