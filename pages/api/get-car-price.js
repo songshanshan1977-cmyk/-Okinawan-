@@ -1,74 +1,91 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 export default async function handler(req, res) {
-  try {
-    const {
-      car_model_id,
-      driver_lang,
-      duration_hours,
-      use_date,
-    } = req.query;
+  const {
+    car_model_id,
+    driver_lang,
+    duration_hours,
+    use_date,
+  } = req.query;
 
-    if (!car_model_id || !driver_lang || !duration_hours) {
-      return res.status(400).json({
-        error: 'missing params',
-        debug: { car_model_id, driver_lang, duration_hours, use_date },
-      });
-    }
+  // 基础校验
+  if (!car_model_id || !driver_lang || !duration_hours) {
+    return res.status(400).json({
+      error: "missing params",
+      debug: { car_model_id, driver_lang, duration_hours, use_date },
+    });
+  }
 
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const hours = Number(duration_hours);
+  const date = use_date || null;
 
-    const supabase = createClient(supabaseUrl, serviceKey);
+  /**
+   * Step A：优先查「有日期命中的价格规则」
+   */
+  let pricedRow = null;
 
-    /**
-     * 核心规则：
-     * 1️⃣ 车型 / 司机 / 时长 必须匹配
-     * 2️⃣ 日期命中其一即可：
-     *    - 在 start_date ~ end_date 范围内
-     *    - 或 start_date / end_date 都为 NULL（长期价）
-     */
-    const { data, error } = await supabase
-      .from('car_prices')
-      .select('*')
-      .eq('car_model_id', car_model_id)
-      .eq('driver_lang', driver_lang)
-      .eq('duration_hours', Number(duration_hours))
-      .or(
-        use_date
-          ? `and(start_date.lte.${use_date},end_date.gte.${use_date}),and(start_date.is.null,end_date.is.null)`
-          : `and(start_date.is.null,end_date.is.null)`
-      )
-      .order('start_date', { ascending: false }) // 有日期的优先
-      .order('created_at', { ascending: false }) // 新规则优先
+  if (date) {
+    const { data: datedRows, error } = await supabase
+      .from("car_prices")
+      .select("*")
+      .eq("car_model_id", car_model_id)
+      .eq("driver_lang", driver_lang)
+      .eq("duration_hours", hours)
+      .lte("start_date", date)
+      .gte("end_date", date)
+      .order("created_at", { ascending: false })
       .limit(1);
 
     if (error) {
-      return res.status(500).json({
-        error: error.message,
-        debug: { car_model_id, driver_lang, duration_hours, use_date },
-      });
+      return res.status(500).json({ error: error.message });
     }
 
-    if (!data || data.length === 0) {
-      return res.json({
-        price: 0,
-        picked: null,
-        debug: { car_model_id, driver_lang, duration_hours, use_date },
-      });
+    if (datedRows && datedRows.length > 0) {
+      pricedRow = datedRows[0];
     }
-
-    return res.json({
-      price: data[0].price_rmb,
-      picked: data[0],
-      debug: { car_model_id, driver_lang, duration_hours, use_date },
-    });
-  } catch (e) {
-    return res.status(500).json({
-      error: e.message,
-      stack: e.stack,
-    });
   }
+
+  /**
+   * Step B：如果没有日期规则，fallback 到「基础价格（start_date IS NULL）」
+   */
+  if (!pricedRow) {
+    const { data: baseRows, error } = await supabase
+      .from("car_prices")
+      .select("*")
+      .eq("car_model_id", car_model_id)
+      .eq("driver_lang", driver_lang)
+      .eq("duration_hours", hours)
+      .is("start_date", null)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    if (baseRows && baseRows.length > 0) {
+      pricedRow = baseRows[0];
+    }
+  }
+
+  /**
+   * Step C：统一返回
+   */
+  return res.status(200).json({
+    price: pricedRow ? pricedRow.price_rmb : 0,
+    picked: pricedRow || null,
+    debug: {
+      car_model_id,
+      driver_lang,
+      duration_hours: hours,
+      use_date: date,
+    },
+  });
 }
 
 
