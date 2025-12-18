@@ -1,13 +1,5 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from '@supabase/supabase-js';
 
-/**
- * GET /api/get-car-price
- * params:
- *  - car_model_id (uuid)
- *  - driver_lang (ZH | JP)
- *  - duration_hours (8 | 10)
- *  - use_date (YYYY-MM-DD)
- */
 export default async function handler(req, res) {
   try {
     const {
@@ -18,20 +10,19 @@ export default async function handler(req, res) {
     } = req.query;
 
     // ---------- 参数校验 ----------
-    if (!car_model_id || !driver_lang || !duration_hours || !use_date) {
+    if (!car_model_id || !driver_lang || !duration_hours) {
       return res.status(400).json({
-        error: "missing params",
+        error: 'missing params',
         debug: { car_model_id, driver_lang, duration_hours, use_date },
       });
     }
 
-    // ---------- Supabase Client ----------
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
     if (!supabaseUrl || !serviceKey) {
       return res.status(500).json({
-        error: "missing env",
+        error: 'env missing',
         debug: {
           hasUrl: !!supabaseUrl,
           hasServiceKey: !!serviceKey,
@@ -41,63 +32,50 @@ export default async function handler(req, res) {
 
     const supabase = createClient(supabaseUrl, serviceKey);
 
-    // ---------- 1️⃣ 查「带日期规则」 ----------
-    const { data: datedRows, error: datedError } = await supabase
-      .from("car_prices")
-      .select("*")
-      .eq("car_model_id", car_model_id)
-      .eq("driver_lang", driver_lang)
-      .eq("duration_hours", Number(duration_hours))
-      .lte("start_date", use_date)
-      .gte("end_date", use_date)
-      .order("start_date", { ascending: false })
-      .limit(1);
+    // ---------- 基础条件 ----------
+    let query = supabase
+      .from('car_prices')
+      .select('*')
+      .eq('car_model_id', car_model_id)
+      .eq('driver_lang', driver_lang)
+      .eq('duration_hours', Number(duration_hours));
 
-    if (datedError) {
+    // ---------- 日期逻辑 ----------
+    if (use_date) {
+      query = query
+        .lte('start_date', use_date)
+        .gte('end_date', use_date);
+    } else {
+      // 没传日期：只用“长期价”（start_date / end_date 都是 null）
+      query = query
+        .is('start_date', null)
+        .is('end_date', null);
+    }
+
+    // ---------- 执行 ----------
+    const { data, error } = await query.order('created_at', { ascending: false });
+
+    if (error) {
       return res.status(500).json({
-        error: "dated query failed",
-        detail: datedError.message,
+        error: error.message,
+        debug: { car_model_id, driver_lang, duration_hours, use_date },
       });
     }
 
-    if (datedRows && datedRows.length > 0) {
-      return res.status(200).json({
-        price: datedRows[0].price,
-        picked: "dated",
-        row: datedRows[0],
+    if (!data || data.length === 0) {
+      return res.json({
+        price: 0,
+        picked: null,
+        debug: { car_model_id, driver_lang, duration_hours, use_date },
       });
     }
 
-    // ---------- 2️⃣ 查「基础价（无日期）」 ----------
-    const { data: baseRows, error: baseError } = await supabase
-      .from("car_prices")
-      .select("*")
-      .eq("car_model_id", car_model_id)
-      .eq("driver_lang", driver_lang)
-      .eq("duration_hours", Number(duration_hours))
-      .is("start_date", null)
-      .is("end_date", null)
-      .limit(1);
+    // ---------- 命中价格 ----------
+    const picked = data[0];
 
-    if (baseError) {
-      return res.status(500).json({
-        error: "base query failed",
-        detail: baseError.message,
-      });
-    }
-
-    if (baseRows && baseRows.length > 0) {
-      return res.status(200).json({
-        price: baseRows[0].price,
-        picked: "base",
-        row: baseRows[0],
-      });
-    }
-
-    // ---------- 3️⃣ 都没命中 ----------
-    return res.status(200).json({
-      price: 0,
-      picked: null,
+    return res.json({
+      price: picked.price_rmb,
+      picked,
       debug: {
         car_model_id,
         driver_lang,
@@ -105,10 +83,11 @@ export default async function handler(req, res) {
         use_date,
       },
     });
-  } catch (err) {
+
+  } catch (e) {
     return res.status(500).json({
-      error: "unexpected error",
-      detail: err.message,
+      error: e.message,
+      stack: e.stack,
     });
   }
 }
