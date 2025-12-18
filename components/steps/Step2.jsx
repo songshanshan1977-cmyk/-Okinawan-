@@ -42,7 +42,7 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   /**
    * 🔵 从 car_prices 表读取价格
-   * ❗不参与 date
+   * ✅ 使用 use_date（关键）
    */
   const fetchPrice = async (modelKey, lang, hours) => {
     if (!modelKey) return null;
@@ -54,6 +54,7 @@ export default function Step2({ initialData, onNext, onBack }) {
         car_model_id: CAR_MODEL_IDS[modelKey],
         driver_lang: normalizeLangForAPI(lang),
         duration_hours: Number(hours),
+        use_date: initialData.start_date, // ⭐⭐⭐ 唯一新增点
       }),
     });
 
@@ -65,8 +66,6 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   /**
    * ✅ 只有车型 / 语言 / 时长变化才拉价格
-   * ❌ 不提前清零
-   * ✅ 防止异步覆盖
    */
   useEffect(() => {
     let cancelled = false;
@@ -76,7 +75,6 @@ export default function Step2({ initialData, onNext, onBack }) {
       if (!carModel) return;
 
       const price = await fetchPrice(carModel, driverLang, duration);
-
       if (cancelled) return;
 
       if (price && price > 0) {
@@ -88,7 +86,6 @@ export default function Step2({ initialData, onNext, onBack }) {
     };
 
     run();
-
     return () => {
       cancelled = true;
     };
@@ -257,6 +254,7 @@ export default function Step2({ initialData, onNext, onBack }) {
     </div>
   );
 }
+
 
 
 
