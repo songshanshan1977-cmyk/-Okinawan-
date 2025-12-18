@@ -9,7 +9,6 @@ export default async function handler(req, res) {
       use_date,
     } = req.query;
 
-    // ---------- 参数校验 ----------
     if (!car_model_id || !driver_lang || !duration_hours) {
       return res.status(400).json({
         error: 'missing params',
@@ -20,40 +19,29 @@ export default async function handler(req, res) {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-    if (!supabaseUrl || !serviceKey) {
-      return res.status(500).json({
-        error: 'env missing',
-        debug: {
-          hasUrl: !!supabaseUrl,
-          hasServiceKey: !!serviceKey,
-        },
-      });
-    }
-
     const supabase = createClient(supabaseUrl, serviceKey);
 
-    // ---------- 基础条件 ----------
-    let query = supabase
+    /**
+     * 核心规则：
+     * 1️⃣ 车型 / 司机 / 时长 必须匹配
+     * 2️⃣ 日期命中其一即可：
+     *    - 在 start_date ~ end_date 范围内
+     *    - 或 start_date / end_date 都为 NULL（长期价）
+     */
+    const { data, error } = await supabase
       .from('car_prices')
       .select('*')
       .eq('car_model_id', car_model_id)
       .eq('driver_lang', driver_lang)
-      .eq('duration_hours', Number(duration_hours));
-
-    // ---------- 日期逻辑 ----------
-    if (use_date) {
-      query = query
-        .lte('start_date', use_date)
-        .gte('end_date', use_date);
-    } else {
-      // 没传日期：只用“长期价”（start_date / end_date 都是 null）
-      query = query
-        .is('start_date', null)
-        .is('end_date', null);
-    }
-
-    // ---------- 执行 ----------
-    const { data, error } = await query.order('created_at', { ascending: false });
+      .eq('duration_hours', Number(duration_hours))
+      .or(
+        use_date
+          ? `and(start_date.lte.${use_date},end_date.gte.${use_date}),and(start_date.is.null,end_date.is.null)`
+          : `and(start_date.is.null,end_date.is.null)`
+      )
+      .order('start_date', { ascending: false }) // 有日期的优先
+      .order('created_at', { ascending: false }) // 新规则优先
+      .limit(1);
 
     if (error) {
       return res.status(500).json({
@@ -70,20 +58,11 @@ export default async function handler(req, res) {
       });
     }
 
-    // ---------- 命中价格 ----------
-    const picked = data[0];
-
     return res.json({
-      price: picked.price_rmb,
-      picked,
-      debug: {
-        car_model_id,
-        driver_lang,
-        duration_hours,
-        use_date,
-      },
+      price: data[0].price_rmb,
+      picked: data[0],
+      debug: { car_model_id, driver_lang, duration_hours, use_date },
     });
-
   } catch (e) {
     return res.status(500).json({
       error: e.message,
