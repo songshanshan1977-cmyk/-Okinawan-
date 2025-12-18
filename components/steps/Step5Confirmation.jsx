@@ -1,125 +1,88 @@
-// components/steps/Step5Confirmation.jsx
+import { useEffect, useState } from "react";
 
-import React from "react";
+export default function Step5Confirmation({ onNext }) {
+  const [loading, setLoading] = useState(true);
+  const [order, setOrder] = useState(null);
+  const [error, setError] = useState("");
 
-// ✅ 与 Step3 / Step4 完全一致的映射
-const carNameMap = {
-  car1: "经济 5 座轿车",
-  car2: "豪华 7 座阿尔法",
-  car3: "舒适 10 座海狮",
-};
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const orderId = params.get("order_id");
 
-const driverLangMap = {
-  zh: "中文司机",
-  jp: "日文司机",
-};
+    if (!orderId) {
+      setError("缺少订单编号");
+      setLoading(false);
+      return;
+    }
 
-export default function Step5Confirmation({ initialData, onNext, onBack }) {
-  const {
-    order_id,
-    start_date,
-    end_date,
-    departure_hotel,
-    end_hotel,
-    car_model,
-    driver_lang,
-    duration,
-    pax,
-    luggage,
-    total_price,
-    name,
-    phone,
-    email,
-    remark,
-  } = initialData;
+    fetch(`/api/get-order?order_id=${orderId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data || data.error) {
+          setError(data?.error || "订单不存在");
+        } else {
+          setOrder(data);
+        }
+        setLoading(false);
+      })
+      .catch(() => {
+        setError("加载订单失败");
+        setLoading(false);
+      });
+  }, []);
 
-  const deposit = 500;
-  const balance = Math.max((total_price || 0) - deposit, 0);
+  if (loading) {
+    return <p>正在加载订单信息...</p>;
+  }
+
+  if (error) {
+    return <p className="text-red-600">{error}</p>;
+  }
 
   return (
-    <div className="max-w-3xl mx-auto space-y-8 py-8">
-      {/* 标题 */}
-      <div className="space-y-2">
-        <h2 className="text-2xl font-bold text-green-600">
-          ✅ 押金支付成功
-        </h2>
-        <p className="text-gray-600">
-          您的订单已确认，我们已为您锁定车辆，请核对以下信息。
-        </p>
-      </div>
+    <div className="max-w-3xl mx-auto space-y-6 py-8">
+      <h2 className="text-2xl font-bold">✅ 押金支付成功</h2>
 
-      {/* 订单编号 */}
-      <div className="p-4 bg-blue-50 rounded border border-blue-200 text-lg font-semibold">
-        订单编号：{order_id}
-      </div>
+      <p>您的订单已确认，我们已为您锁定车辆，请核对以下信息：</p>
 
-      {/* 用车信息 */}
-      <div className="border p-6 rounded-lg space-y-4 text-base">
-        <h3 className="text-xl font-semibold">📅 用车信息</h3>
-        <p>用车日期：{start_date} → {end_date}</p>
-        <p>出发酒店：{departure_hotel}</p>
-        <p>回程酒店：{end_hotel}</p>
+      <div className="border rounded-lg p-6 space-y-3">
+        <p><strong>订单编号：</strong>{order.order_id}</p>
 
         <hr />
 
-        <h3 className="text-xl font-semibold">🚗 车型 & 服务</h3>
-        <p>
-          车型：
-          {carNameMap[car_model] || car_model || "—"}
-        </p>
-        <p>
-          司机语言：
-          {driverLangMap[driver_lang] || driver_lang || "—"}
-        </p>
-        <p>包车时长：{duration} 小时</p>
-        <p>人数：{pax} 人</p>
-        <p>行李：{luggage} 件</p>
+        <p><strong>用车日期：</strong>{order.start_date} → {order.end_date}</p>
+        <p><strong>出发酒店：</strong>{order.departure_hotel}</p>
+        <p><strong>回程酒店：</strong>{order.end_hotel}</p>
 
         <hr />
 
-        <h3 className="text-xl font-semibold">💰 费用信息</h3>
-        <p>包车总费用：¥{total_price || 0}</p>
-
-        <p className="text-green-600 font-bold mt-2">
-          ✔ 已支付押金：¥{deposit}
-        </p>
-
-        <p className="text-orange-600 font-bold mt-1">
-          ⭐ 尾款需在用车当日支付给司机：¥{balance}
-        </p>
-
-        <div className="mt-3 text-sm text-gray-600 bg-green-50 border border-green-200 rounded p-3">
-          押金支付成功后，车辆已为您锁定。如需修改订单，请提前联系客服。
-        </div>
+        <p><strong>车型：</strong>{order.car_model}</p>
+        <p><strong>司机语言：</strong>{order.driver_lang === "jp" ? "日文司机" : "中文司机"}</p>
+        <p><strong>包车时长：</strong>{order.duration} 小时</p>
+        <p><strong>人数：</strong>{order.pax} 人</p>
+        <p><strong>行李：</strong>{order.luggage} 件</p>
 
         <hr />
 
-        <h3 className="text-xl font-semibold">👤 联系人信息</h3>
-        <p>姓名：{name || "—"}</p>
-        <p>电话：{phone || "—"}</p>
-        <p>邮箱：{email || "—"}</p>
-        <p>备注：{remark || "无"}</p>
+        <p><strong>包车总费用：</strong>¥{order.total_price}</p>
+        <p className="text-green-600 font-bold">✔ 已支付押金：¥500</p>
+        <p className="text-orange-600">
+          ⭐ 尾款需在用车当日支付给司机：¥{order.total_price - 500}
+        </p>
+
+        <hr />
+
+        <p><strong>联系人：</strong>{order.name}</p>
+        <p><strong>电话：</strong>{order.phone}</p>
+        <p><strong>邮箱：</strong>{order.email || "—"}</p>
       </div>
 
-      {/* 按钮 */}
-      <div className="flex gap-4">
-        <button
-          type="button"
-          onClick={onBack}
-          className="px-4 py-2 border rounded text-gray-700"
-        >
-          返回
-        </button>
-
-        <button
-          type="button"
-          onClick={onNext}
-          className="px-4 py-2 rounded bg-black text-white"
-        >
-          下一步
-        </button>
-      </div>
+      <button
+        onClick={onNext}
+        className="px-6 py-2 bg-black text-white rounded-md"
+      >
+        下一步
+      </button>
     </div>
   );
 }
-
