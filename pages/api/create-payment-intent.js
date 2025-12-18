@@ -1,5 +1,3 @@
-// pages/api/create-payment-intent.js
-
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 
@@ -12,8 +10,8 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ⭐ 你的 booking 页面所在域名（保持不变）
-const FRONTEND_URL = "https://xn--okinawa-n14kh45a.com";
+// ⭐⭐⭐ 关键：Stripe 支付完成后回到【Vercel 下单系统】⭐⭐⭐
+const FRONTEND_URL = "https://okinawan.vercel.app";
 
 // 押金：人民币 500 元（Stripe 用“分”）
 const DEPOSIT_AMOUNT = 50000;
@@ -32,7 +30,7 @@ export default async function handler(req, res) {
 
     console.log("🔍 create-payment-intent 查询订单：", orderId);
 
-    // 👉 用 order_id 查询
+    // 👉 用 order_id 查询订单
     const { data: order, error } = await supabase
       .from("orders")
       .select("*")
@@ -49,16 +47,12 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "订单不存在" });
     }
 
-    console.log("✅ 找到订单 UUID =", order.id);
-
     // 防止重复支付
     if (order.payment_status === "paid") {
       return res.status(400).json({ error: "订单已支付" });
     }
 
-    /**
-     * ⭐⭐⭐ webhook / 回跳 / 后续逻辑统一使用 order_id ⭐⭐⭐
-     */
+    // ⭐ webhook / 回跳 / 后续逻辑统一使用 order_id
     const metadata = {
       order_id: order.order_id,
       order_uuid: order.id,
@@ -88,15 +82,13 @@ export default async function handler(req, res) {
 
       customer_email: order.email || undefined,
 
-      // 👉 写入 payment_intent
       payment_intent_data: {
         metadata,
       },
 
-      // 👉 session 也留一份（双保险）
       metadata,
 
-      // ⭐⭐⭐ 关键修复点：URL 参数统一为 order_id ⭐⭐⭐
+      // ⭐⭐⭐ 正确的回跳地址 ⭐⭐⭐
       success_url: `${FRONTEND_URL}/booking?step=5&order_id=${order.order_id}`,
       cancel_url: `${FRONTEND_URL}/booking?step=4&order_id=${order.order_id}&cancel=1`,
     });
