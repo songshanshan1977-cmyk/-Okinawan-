@@ -1,5 +1,3 @@
-import { useState } from "react";
-
 const carNameMap = {
   car1: "经济 5 座轿车",
   car2: "豪华 7 座阿尔法",
@@ -7,45 +5,6 @@ const carNameMap = {
 };
 
 export default function Step3({ initialData, onNext, onBack }) {
-  const [name, setName] = useState(initialData.name || "");
-  const [phone, setPhone] = useState(initialData.phone || "");
-  const [email, setEmail] = useState(initialData.email || "");
-  const [remark, setRemark] = useState(initialData.remark || "");
-  const [error, setError] = useState("");
-
-  const handleNext = () => {
-    setError("");
-
-    if (!name || !phone) {
-      setError("姓名和电话为必填项");
-      return;
-    }
-
-    // ⭐ 原样回传所有字段（含 pax / luggage）
-    onNext({
-      order_id: initialData.order_id,
-      car_model_id: initialData.car_model_id,
-      car_model: initialData.car_model,
-      driver_lang: initialData.driver_lang,
-      duration: initialData.duration,
-      start_date: initialData.start_date,
-      end_date: initialData.end_date,
-      departure_hotel: initialData.departure_hotel,
-      end_hotel: initialData.end_hotel,
-      total_price: initialData.total_price,
-
-      // ✅ NEW：人数 & 行李（只传，不改）
-      pax: initialData.pax,
-      luggage: initialData.luggage,
-
-      // 用户信息
-      name,
-      phone,
-      email,
-      remark,
-    });
-  };
-
   const {
     order_id,
     start_date,
@@ -56,18 +15,27 @@ export default function Step3({ initialData, onNext, onBack }) {
     driver_lang,
     duration,
     total_price,
-    pax,       // ✅ NEW
-    luggage,   // ✅ NEW
+    pax,
+    luggage,
+    name,
+    phone,
+    email,
+    remark,
   } = initialData;
+
+  const handleNext = () => {
+    // ✅ 不改任何数据，原样进入 Step4
+    onNext(initialData);
+  };
 
   return (
     <div>
       <h2 style={{ fontSize: "24px", marginBottom: "8px" }}>
-        Step3：订单预览
+        Step3：订单确认
       </h2>
 
       <p style={{ color: "#6b7280", marginBottom: "16px" }}>
-        请确认以下信息后，填写联系方式。
+        请确认以下信息无误后再进行支付。
       </p>
 
       <p style={{ color: "#4b5563", marginBottom: "16px", fontSize: "14px" }}>
@@ -96,8 +64,6 @@ export default function Step3({ initialData, onNext, onBack }) {
         <p>车型：{carNameMap[car_model] || "未选择"}</p>
         <p>司机语言：{driver_lang === "zh" ? "中文司机" : "日文司机"}</p>
         <p>包车时长：{duration} 小时</p>
-
-        {/* ✅ NEW：人数 & 行李展示 */}
         <p>人数：{pax} 人</p>
         <p>行李：{luggage} 件</p>
 
@@ -107,7 +73,7 @@ export default function Step3({ initialData, onNext, onBack }) {
         </p>
       </div>
 
-      {/* 客户信息 */}
+      {/* 客户信息（只读） */}
       <div
         style={{
           background: "#fff",
@@ -119,50 +85,11 @@ export default function Step3({ initialData, onNext, onBack }) {
       >
         <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>👤 客户信息</h3>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-          <label>
-            姓名（必填）：
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              style={{ width: "100%", padding: "8px", marginTop: "4px" }}
-            />
-          </label>
-
-          <label>
-            电话（必填）：
-            <input
-              type="text"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              style={{ width: "100%", padding: "8px", marginTop: "4px" }}
-            />
-          </label>
-
-          <label>
-            邮箱（选填）：
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              style={{ width: "100%", padding: "8px", marginTop: "4px" }}
-            />
-          </label>
-
-          <label>
-            备注（选填）：
-            <textarea
-              value={remark}
-              onChange={(e) => setRemark(e.target.value)}
-              rows={3}
-              style={{ width: "100%", padding: "8px", marginTop: "4px" }}
-            />
-          </label>
-        </div>
+        <p>姓名：{name || "-"}</p>
+        <p>电话：{phone || "-"}</p>
+        <p>邮箱：{email || "-"}</p>
+        {remark && <p>备注：{remark}</p>}
       </div>
-
-      {error && <div style={{ color: "red", marginBottom: "8px" }}>{error}</div>}
 
       <div style={{ display: "flex", gap: "8px" }}>
         <button onClick={onBack}>返回修改</button>
@@ -171,4 +98,5 @@ export default function Step3({ initialData, onNext, onBack }) {
     </div>
   );
 }
+
 
