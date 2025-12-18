@@ -6,75 +6,115 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+function pickFirstDefined(obj, keys) {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
+  }
+  return undefined;
+}
+
+function toInt(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+
 export default async function handler(req, res) {
   try {
-    // ✅ 同时支持 GET / POST（方便你浏览器直接测试）
-    const params = req.method === "GET" ? req.query : req.body;
+    // ✅ 同时支持 GET(querystring) & POST(json)
+    const src = req.method === "GET" ? (req.query || {}) : (req.body || {});
 
-    const {
-      car_model_id,
-      driver_lang,
-      duration_hours,
-      use_date,
-    } = params;
+    const car_model_id = pickFirstDefined(src, ["car_model_id", "carModelId"]);
+    const driver_lang = pickFirstDefined(src, ["driver_lang", "driverLang"]);
+    const durationRaw = pickFirstDefined(src, ["duration_hours", "duration_hour", "duration"]);
+    const use_date = pickFirstDefined(src, ["use_date", "date", "start_date"]);
 
-    // ----------------------------
-    // 1️⃣ 参数校验（缺一个直接报错）
-    // ----------------------------
-    if (!car_model_id || !driver_lang || !duration_hours || !use_date) {
+    const duration_hours = toInt(durationRaw);
+
+    // 参数校验
+    if (!car_model_id || !driver_lang || !Number.isFinite(duration_hours)) {
       return res.status(400).json({
         error: "missing params",
-        debug: params,
+        debug: { car_model_id, driver_lang, duration_hours },
       });
     }
 
-    // ----------------------------
-    // 2️⃣ 查询 car_prices（核心）
-    // ----------------------------
-    const { data, error } = await supabase
-      .from("car_prices")
-      .select("*")
-      .eq("car_model_id", car_model_id)
-      .eq("driver_lang", driver_lang)
-      .eq("duration_hours", Number(duration_hours))
-      .lte("start_date", use_date)
-      .gte("end_date", use_date)
-      .order("start_date", { ascending: false })
-      .limit(1);
+    // 统一语言值（保险）
+    const lang = String(driver_lang).toUpperCase(); // "ZH" / "JP"
+    const useDate = use_date ? String(use_date) : null; // "YYYY-MM-DD" or null
 
-    if (error) {
-      return res.status(500).json({
-        error: "db error",
-        message: error.message,
-        debug: params,
-      });
+    // -----------------------------
+    // ✅ 查询策略（非常关键）
+    // 1) 如果传了 use_date：优先找【start_date <= use_date <= end_date】的价格行
+    // 2) 找不到，再回退到【start_date is null AND end_date is null】的基础价
+    //
+    // ✅ 同时兼容两种字段命名：duration_hours / duration_hour
+    // -----------------------------
+
+    async function queryWithDurationColumn(durationColumnName, mode) {
+      // mode: "dated" | "base"
+      let q = supabase
+        .from("car_prices")
+        .select("id,car_model_id,start_date,end_date,created_at,driver_lang,duration_hours,duration_hour,price_rmb")
+        .eq("car_model_id", car_model_id)
+        .eq("driver_lang", lang)
+        .eq(durationColumnName, duration_hours);
+
+      if (mode === "dated") {
+        q = q.not("start_date", "is", null).not("end_date", "is", null)
+             .lte("start_date", useDate)
+             .gte("end_date", useDate);
+      } else {
+        q = q.is("start_date", null).is("end_date", null);
+      }
+
+      // 取最新的一条（防止重复行）
+      const { data, error } = await q.order("created_at", { ascending: false }).limit(1);
+
+      if (error) return { rows: [], error };
+      return { rows: data || [], error: null };
     }
 
-    // ----------------------------
-    // 3️⃣ 没匹配到价格
-    // ----------------------------
-    if (!data || data.length === 0) {
-      return res.json({
-        price: 0,
-        count: 0,
-        rows: [],
-        debug: params,
-      });
+    async function queryPrice(mode) {
+      // 先试 duration_hours
+      let r = await queryWithDurationColumn("duration_hours", mode);
+      if (r.rows.length > 0) return r;
+
+      // 再试 duration_hour（兼容你 UI/历史字段名）
+      r = await queryWithDurationColumn("duration_hour", mode);
+      return r;
     }
 
-    // ----------------------------
-    // 4️⃣ 成功返回价格
-    // ----------------------------
-    return res.json({
-      price: Number(data[0].price_rmb),
-      count: data.length,
-      rows: data,
-      debug: params,
+    let result = { rows: [], error: null };
+
+    // ① 有日期：先找 dated
+    if (useDate) {
+      result = await queryPrice("dated");
+    }
+
+    // ② 没找到：回退 base
+    if (!result.rows || result.rows.length === 0) {
+      result = await queryPrice("base");
+    }
+
+    const row = (result.rows && result.rows[0]) ? result.rows[0] : null;
+    const price = row ? Number(row.price_rmb || 0) : 0;
+
+    return res.status(200).json({
+      price,
+      count: result.rows ? result.rows.length : 0,
+      rows: result.rows || [],
+      debug: {
+        car_model_id,
+        driver_lang: lang,
+        duration_hours,
+        use_date: useDate,
+        picked: row ? row.id : null,
+      },
     });
   } catch (e) {
     return res.status(500).json({
-      error: "server crash",
-      message: e.message,
+      error: "server error",
+      message: String(e?.message || e),
     });
   }
 }
