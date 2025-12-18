@@ -5,6 +5,18 @@ import React, { useState } from "react";
 const CREATE_ORDER_URL = "/api/create-order";
 const CREATE_PAYMENT_URL = "/api/create-payment-intent"; // ✅ 统一走 Vercel
 
+// ✅ 与 Step3 保持一致的展示映射
+const carNameMap = {
+  car1: "经济 5 座轿车",
+  car2: "豪华 7 座阿尔法",
+  car3: "舒适 10 座海狮",
+};
+
+const driverLangMap = {
+  zh: "中文司机",
+  jp: "日文司机",
+};
+
 export default function Step4Payment({ initialData, onBack }) {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
@@ -38,7 +50,7 @@ export default function Step4Payment({ initialData, onBack }) {
       const orderId = orderData.order.order_id;
 
       // ----------------------------
-      // ② 创建 Stripe 押金支付（同样走 Vercel）
+      // ② 创建 Stripe 押金支付
       // ----------------------------
       const payRes = await fetch(CREATE_PAYMENT_URL, {
         method: "POST",
@@ -79,8 +91,17 @@ export default function Step4Payment({ initialData, onBack }) {
 
         <hr />
 
-        <p><strong>车型：</strong> {initialData.car_model}</p>
-        <p><strong>司机语言：</strong> {initialData.driver_lang}</p>
+        {/* ✅ 车型 & 司机语言：统一“人话” */}
+        <p>
+          <strong>车型：</strong>
+          {carNameMap[initialData.car_model] || initialData.car_model}
+        </p>
+
+        <p>
+          <strong>司机语言：</strong>
+          {driverLangMap[initialData.driver_lang] || initialData.driver_lang}
+        </p>
+
         <p><strong>包车时长：</strong> {initialData.duration} 小时</p>
         <p><strong>人数：</strong> {initialData.pax} 人</p>
         <p><strong>行李：</strong> {initialData.luggage} 件</p>
@@ -105,7 +126,10 @@ export default function Step4Payment({ initialData, onBack }) {
 
         <hr />
 
-        <p><strong>包车总费用：</strong> ¥{initialData.total_price}</p>
+        <p>
+          <strong>包车总费用：</strong>
+          ¥{initialData.total_price}
+        </p>
 
         <p className="text-blue-600 font-bold mt-4">
           本次将前往 Stripe 支付押金：¥500
