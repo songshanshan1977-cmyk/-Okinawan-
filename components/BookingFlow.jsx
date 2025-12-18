@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react"; // ⭐ NEW：引入 useEffect
 import Step1 from "./steps/Step1";
 import Step2 from "./steps/Step2";
 import Step3 from "./steps/Step3";
@@ -48,10 +48,28 @@ export default function BookingFlow() {
 
     // 后端需要的字段
     deposit_amount: 500,
-    pax: 1,        // ✅ 默认值，保证 NOT NULL
-    luggage: 0,    // ✅ 默认值，保证 NOT NULL
+    pax: 1,
+    luggage: 0,
     source: "direct",
   }));
+
+  // =================================================
+  // ⭐⭐⭐ NEW：从 Stripe success_url 恢复 step（关键补丁）
+  // =================================================
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const stepFromUrl = params.get("step");
+    const orderIdFromUrl = params.get("order_id");
+
+    if (stepFromUrl === "5" && orderIdFromUrl) {
+      console.log("🔁 Stripe 回跳，显示 Step5", orderIdFromUrl);
+      setStep(5);
+    }
+
+    if (stepFromUrl === "4") {
+      setStep(4);
+    }
+  }, []);
 
   // ⭐ 更新数据 & 自动填充车型 UUID
   const updateFormData = (patch) => {
@@ -67,10 +85,9 @@ export default function BookingFlow() {
   };
 
   // =================================================
-  // ⭐ Step1 → Step2（必填校验 + 当日不能预约）
+  // ⭐ Step1 → Step2
   // =================================================
   const handleStep1Next = (values) => {
-    // ✅ NEW：必填校验
     if (
       !values.start_date ||
       !values.end_date ||
@@ -92,10 +109,9 @@ export default function BookingFlow() {
   };
 
   // =================================================
-  // ⭐ Step2 → Step3（确保 pax / luggage 不丢）
+  // ⭐ Step2 → Step3
   // =================================================
   const handleStep2Next = (values) => {
-    // ✅ NEW：兜底，防止 Step2 没传或被覆盖成 undefined
     const safeValues = {
       ...values,
       pax:
@@ -118,10 +134,8 @@ export default function BookingFlow() {
     setStep(4);
   };
 
-  // ⭐ Step4：支付成功后 → 扣库存 + 更新订单状态
+  // ⭐ Step4 支付成功（仅供非 Stripe 回跳场景兜底）
   const handlePaymentSuccess = async () => {
-    console.log("Payment success, updating order + inventory");
-
     try {
       await fetch("/api/update-order-status", {
         method: "POST",
