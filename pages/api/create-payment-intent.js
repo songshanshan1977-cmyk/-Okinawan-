@@ -12,9 +12,10 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// ⭐ 你的 booking 页面所在域名（保持不变）
 const FRONTEND_URL = "https://xn--okinawa-n14kh45a.com";
 
-// 押金：人民币 500 元（Stripe 用分）
+// 押金：人民币 500 元（Stripe 用“分”）
 const DEPOSIT_AMOUNT = 50000;
 
 export default async function handler(req, res) {
@@ -56,7 +57,7 @@ export default async function handler(req, res) {
     }
 
     /**
-     * ⭐⭐⭐ 核心：一次性把 webhook 需要的字段全部写进 metadata ⭐⭐⭐
+     * ⭐⭐⭐ webhook / 回跳 / 后续逻辑统一使用 order_id ⭐⭐⭐
      */
     const metadata = {
       order_id: order.order_id,
@@ -87,16 +88,17 @@ export default async function handler(req, res) {
 
       customer_email: order.email || undefined,
 
-      // 👉 payment_intent 里一份
+      // 👉 写入 payment_intent
       payment_intent_data: {
         metadata,
       },
 
-      // 👉 session 自己也留一份（双保险）
+      // 👉 session 也留一份（双保险）
       metadata,
 
-      success_url: `${FRONTEND_URL}/booking?step=5&orderId=${order.order_id}`,
-      cancel_url: `${FRONTEND_URL}/booking?step=4&orderId=${order.order_id}&cancel=1`,
+      // ⭐⭐⭐ 关键修复点：URL 参数统一为 order_id ⭐⭐⭐
+      success_url: `${FRONTEND_URL}/booking?step=5&order_id=${order.order_id}`,
+      cancel_url: `${FRONTEND_URL}/booking?step=4&order_id=${order.order_id}&cancel=1`,
     });
 
     return res.status(200).json({ url: session.url });
