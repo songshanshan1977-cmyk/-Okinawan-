@@ -1,7 +1,7 @@
 // Step1：日期 + 酒店（不做库存检查）
 // 规则：
-// 1️⃣ 当日不能下单（静默校验）
-// 2️⃣ 结束日期不能早于开始日期（允许等于，表示 1 天）
+// 1️⃣ 当日不能下单（稳定版，不受时区影响）
+// 2️⃣ 结束日期不能早于开始日期（允许等于，表示 1 天游）
 // 3️⃣ 页面不显示任何规则提示文字
 
 import { useState } from "react";
@@ -28,12 +28,16 @@ export default function Step1({ initialData, onNext }) {
       return;
     }
 
+    // ✅ 计算“明天”（稳定，不吃时区）
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(today.getDate() + 1);
+
     const start = new Date(startDate);
 
     // ❌ 当日不能下单
-    if (start <= today) {
+    if (start < tomorrow) {
       setError("请选择明天或之后的日期");
       return;
     }
