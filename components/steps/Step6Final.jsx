@@ -8,7 +8,6 @@ export default function Step6Final({ initialData }) {
     total_price,
   } = initialData;
 
-  // ⭐ 固定规则（锁死）
   const deposit = 500;
   const balance = Math.max((total_price || 0) - deposit, 0);
 
@@ -19,24 +18,28 @@ export default function Step6Final({ initialData }) {
         🎉 预订成功！（押金已支付）
       </h2>
 
-      {/* 成功提示文案（修正后） */}
+      {/* 成交确认文案 */}
       <p className="text-blue-600 text-lg font-medium">
         感谢您选择华人Okinawan，您的包车订单已确认，车辆已为您成功锁定。
       </p>
 
-      {/* 订单信息卡片 */}
+      {/* 订单信息 */}
       <div className="border rounded-lg p-6 text-left space-y-3 shadow">
+        <p><strong>订单编号：</strong> {order_id}</p>
+
         <p>
-          <strong>订单编号：</strong> {order_id}
+          <strong>用车日期：</strong>{" "}
+          {start_date || "已记录（客服将与您确认）"}
         </p>
+
         <p>
-          <strong>用车日期：</strong> {start_date}
+          <strong>出发酒店：</strong>{" "}
+          {departure_hotel || "已记录"}
         </p>
+
         <p>
-          <strong>出发酒店：</strong> {departure_hotel}
-        </p>
-        <p>
-          <strong>回程酒店：</strong> {end_hotel}
+          <strong>回程酒店：</strong>{" "}
+          {end_hotel || "已记录"}
         </p>
 
         <hr />
@@ -55,31 +58,39 @@ export default function Step6Final({ initialData }) {
           <br />
           （用车当日直接支付给司机）
         </p>
-
-        <p className="text-gray-500 text-sm mt-3">
-          📧 订单确认信息已发送至您的邮箱，如未收到请检查垃圾邮箱。
-        </p>
       </div>
 
-      {/* 客服说明 + 微信二维码 */}
-      <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-sm text-green-700">
-        <p className="mb-3">
-          如需修改行程或有任何问题，请直接添加我们的客服微信：
+      {/* 红框重点：强制引导加微信 */}
+      <div className="border-2 border-red-400 bg-red-50 rounded-lg p-5 text-red-700 text-sm space-y-2">
+        <p className="font-bold text-base">📣 重要提示（请务必查看）</p>
+        <p>
+          为确保行程顺利进行，请您 <strong>立即添加我们的客服微信</strong>，
+          并备注您的订单号：
         </p>
+        <p className="font-bold text-lg">{order_id}</p>
+        <p>客服将第一时间与您确认行程与司机安排。</p>
+      </div>
+
+      {/* 微信二维码 */}
+      <div className="space-y-3">
+        <p className="font-semibold text-gray-800">📱 客服微信二维码</p>
         <img
           src="/wechat-qrcode.png"
           alt="客服微信二维码"
-          className="mx-auto w-40 h-40"
+          className="mx-auto w-48 h-48"
         />
+        <p className="text-sm text-gray-500">
+          添加时请备注订单号，方便我们快速找到您
+        </p>
       </div>
 
-      {/* 操作按钮 */}
-      <div className="flex justify-center gap-4 mt-6">
+      {/* 返回首页（主按钮） */}
+      <div className="mt-8">
         <button
           onClick={() => {
             window.location.href = "https://xn--okinawa-n14kh45a.com";
           }}
-          className="px-6 py-3 bg-black text-white rounded-md text-lg"
+          className="px-10 py-4 bg-black text-white text-xl rounded-lg shadow"
         >
           返回首页
         </button>
@@ -87,4 +98,5 @@ export default function Step6Final({ initialData }) {
     </div>
   );
 }
+
 
