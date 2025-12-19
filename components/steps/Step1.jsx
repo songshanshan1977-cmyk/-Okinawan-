@@ -1,40 +1,58 @@
-// Step1：日期 + 酒店（不做库存检查）
+// Step1：日期 + 酒店（使用 react-day-picker 展示型日历）
 // 规则：
-// 1️⃣ 当日不能下单（稳定版，不受时区影响）
+// 1️⃣ 当日不能下单（稳定，不受时区影响）
 // 2️⃣ 结束日期不能早于开始日期（允许等于，表示 1 天游）
-// 3️⃣ 页面不显示任何规则提示文字
+// 3️⃣ 页面不显示任何规则提示文字（只在 Next 时校验）
 
 import { useState } from "react";
+import { DayPicker } from "react-day-picker";
+import "react-day-picker/dist/style.css";
 
 export default function Step1({ initialData, onNext }) {
-  const [startDate, setStartDate] = useState(initialData.start_date || "");
-  const [endDate, setEndDate] = useState(initialData.end_date || "");
+  const [range, setRange] = useState(() => {
+    if (initialData.start_date) {
+      return {
+        from: new Date(initialData.start_date),
+        to: initialData.end_date
+          ? new Date(initialData.end_date)
+          : new Date(initialData.start_date),
+      };
+    }
+    return undefined;
+  });
+
   const [departureHotel, setDepartureHotel] = useState(
     initialData.departure_hotel || ""
   );
-  const [endHotel, setEndHotel] = useState(initialData.end_hotel || "");
+  const [endHotel, setEndHotel] = useState(
+    initialData.end_hotel || ""
+  );
   const [error, setError] = useState("");
+
+  // ✅ 稳定的“明天”
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+
+  const formatDate = (d) =>
+    d.toISOString().slice(0, 10); // yyyy-mm-dd
 
   const handleNext = () => {
     setError("");
 
-    if (!startDate) {
-      setError("请选择用车开始日期");
+    if (!range?.from) {
+      setError("请选择用车日期");
       return;
     }
 
-    if (!departureHotel) {
+    if (!departureHotel.trim()) {
       setError("请输入出发酒店");
       return;
     }
 
-    // ✅ 计算“明天”（稳定，不吃时区）
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(today.getDate() + 1);
-
-    const start = new Date(startDate);
+    const start = range.from;
+    const end = range.to || range.from;
 
     // ❌ 当日不能下单
     if (start < tomorrow) {
@@ -43,55 +61,54 @@ export default function Step1({ initialData, onNext }) {
     }
 
     // ❌ 结束日期不能早于开始日期（允许等于）
-    if (endDate) {
-      const end = new Date(endDate);
-      if (end < start) {
-        setError("结束日期不能早于开始日期");
-        return;
-      }
+    if (end < start) {
+      setError("结束日期不能早于开始日期");
+      return;
     }
 
     onNext({
       order_id: initialData.order_id,
-      start_date: startDate,
-      end_date: endDate || startDate,
+      start_date: formatDate(start),
+      end_date: formatDate(end),
       departure_hotel: departureHotel,
       end_hotel: endHotel || departureHotel,
     });
   };
 
   return (
-    <div style={{ maxWidth: "900px", margin: "0 auto" }}>
-      <h2 style={{ fontSize: "28px", textAlign: "center", marginBottom: "8px" }}>
+    <div style={{ maxWidth: 1000, margin: "0 auto", padding: 24 }}>
+      <h2 style={{ fontSize: 28, textAlign: "center", marginBottom: 8 }}>
         立即预订
       </h2>
-      <p style={{ textAlign: "center", color: "#666", marginBottom: "32px" }}>
+      <p style={{ textAlign: "center", color: "#666", marginBottom: 32 }}>
         请选择您期望的包车开始和结束日期
       </p>
 
-      <div style={{ display: "flex", gap: "40px", marginBottom: "24px" }}>
-        <div style={{ flex: 1 }}>
-          <label>开始日期</label>
-          <input
-            type="date"
-            value={startDate}
-            onChange={(e) => setStartDate(e.target.value)}
-            style={{ width: "100%", padding: "10px" }}
-          />
-        </div>
-
-        <div style={{ flex: 1 }}>
-          <label>结束日期</label>
-          <input
-            type="date"
-            value={endDate}
-            onChange={(e) => setEndDate(e.target.value)}
-            style={{ width: "100%", padding: "10px" }}
-          />
-        </div>
+      {/* 📅 日历 */}
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: 32 }}>
+        <DayPicker
+          mode="range"
+          selected={range}
+          onSelect={setRange}
+          numberOfMonths={2}
+          disabled={{ before: tomorrow }}
+          modifiersStyles={{
+            selected: {
+              backgroundColor: "#3f6df6",
+              color: "#fff",
+            },
+            range_middle: {
+              backgroundColor: "#dbeafe",
+            },
+            disabled: {
+              color: "#d11a2a",
+            },
+          }}
+        />
       </div>
 
-      <div style={{ display: "flex", gap: "40px", marginBottom: "24px" }}>
+      {/* 酒店 */}
+      <div style={{ display: "flex", gap: 40, marginBottom: 24 }}>
         <div style={{ flex: 1 }}>
           <label>出发酒店</label>
           <input
@@ -114,7 +131,7 @@ export default function Step1({ initialData, onNext }) {
       </div>
 
       {error && (
-        <div style={{ color: "red", marginBottom: "16px" }}>
+        <div style={{ color: "red", marginBottom: 16 }}>
           {error}
         </div>
       )}
