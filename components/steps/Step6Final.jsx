@@ -2,12 +2,12 @@ export default function Step6Final({ initialData }) {
   const { order_id } = initialData || {};
 
   return (
-    <div className="min-h-screen bg-gray-50 flex justify-center">
-      <div className="w-full max-w-xl px-6 py-16">
+    <div className="min-h-screen bg-gray-100 flex items-center justify-center px-4">
+      <div className="w-full max-w-lg bg-white rounded-2xl shadow-lg p-8">
 
-        {/* 顶部成功提示 */}
-        <div className="text-center mb-10">
-          <h1 className="text-3xl font-bold text-green-600 mb-4">
+        {/* 标题 */}
+        <div className="text-center mb-6">
+          <h1 className="text-2xl font-bold text-green-600 mb-2">
             🎉 预订成功！（押金已支付）
           </h1>
           <p className="text-gray-700">
@@ -15,45 +15,44 @@ export default function Step6Final({ initialData }) {
           </p>
         </div>
 
-        {/* 信息卡片 */}
-        <div className="bg-white rounded-2xl shadow-md p-6 space-y-4 text-center">
-
-          <p className="text-green-700 font-medium">
-            ✅ 客服将第一时间与您确认行程与司机安排
+        {/* 说明区 */}
+        <div className="space-y-3 text-gray-800 text-sm mb-6">
+          <p className="flex items-start gap-2">
+            <span>✅</span>
+            <span>客服将第一时间与您确认行程与司机安排</span>
           </p>
-
-          <p className="text-red-600 font-semibold">
-            📌 请务必添加我们的售后微信
+          <p className="flex items-start gap-2 text-red-600 font-medium">
+            <span>📌</span>
+            <span>请务必添加我们的售后微信</span>
           </p>
-
-          <p className="text-gray-800">
+          <p>
             添加微信时请备注订单号：
             <br />
-            <span className="font-bold text-lg">{order_id}</span>
+            <span className="font-semibold text-base">{order_id}</span>
           </p>
-
-          {/* 二维码 */}
-          <div className="pt-4 flex flex-col items-center gap-2">
-            <span className="text-sm text-gray-500">
-              扫码添加客服微信
-            </span>
-            <img
-              src="/w1.png.png"
-              alt="客服微信二维码"
-              className="rounded-lg"
-              style={{
-                width: "160px",
-                height: "160px",
-              }}
-            />
-          </div>
         </div>
 
-        {/* 返回首页按钮 */}
-        <div className="mt-12 flex justify-center">
+        {/* 二维码区 */}
+        <div className="flex flex-col items-center gap-3 mb-8">
+          <span className="text-sm text-gray-500">
+            扫码添加客服微信
+          </span>
+          <img
+            src="/w1.png.png"
+            alt="客服微信二维码"
+            style={{
+              width: "220px",
+              height: "220px",
+            }}
+            className="rounded-lg border"
+          />
+        </div>
+
+        {/* 返回首页 */}
+        <div className="flex justify-center">
           <a
             href="https://xn--okinawa-n14kh45a.com"
-            className="inline-block px-10 py-4 bg-green-600 hover:bg-green-700 text-white text-lg font-semibold rounded-xl shadow"
+            className="px-8 py-3 bg-green-600 hover:bg-green-700 text-white text-base font-semibold rounded-lg shadow"
           >
             返回首页
           </a>
@@ -63,6 +62,7 @@ export default function Step6Final({ initialData }) {
     </div>
   );
 }
+
 
 
 
