@@ -1,7 +1,7 @@
 // Step1：日期 + 酒店（不做库存检查）
 // 规则：
 // 1️⃣ 当日不能下单（静默校验）
-// 2️⃣ 结束日期必须晚于开始日期（静默校验）
+// 2️⃣ 结束日期不能早于开始日期（允许等于，表示 1 天）
 // 3️⃣ 页面不显示任何规则提示文字
 
 import { useState } from "react";
@@ -38,11 +38,11 @@ export default function Step1({ initialData, onNext }) {
       return;
     }
 
-    // ❌ 结束日期必须晚于开始日期（如果有选）
+    // ❌ 结束日期不能早于开始日期（允许等于）
     if (endDate) {
       const end = new Date(endDate);
-      if (end <= start) {
-        setError("结束日期需晚于开始日期");
+      if (end < start) {
+        setError("结束日期不能早于开始日期");
         return;
       }
     }
@@ -134,6 +134,5 @@ export default function Step1({ initialData, onNext }) {
     </div>
   );
 }
-
 
 
