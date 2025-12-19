@@ -2,21 +2,22 @@ export default function Step6Final({ initialData }) {
   const { order_id } = initialData || {};
 
   return (
-    <div className="min-h-screen flex justify-center bg-white">
-      <div className="w-full max-w-3xl px-6 py-14">
+    <div className="min-h-screen bg-gray-50 flex justify-center">
+      <div className="w-full max-w-xl px-6 py-16">
 
-        {/* 标题 */}
+        {/* 顶部成功提示 */}
         <div className="text-center mb-10">
-          <h2 className="text-3xl font-bold text-green-600 mb-3">
+          <h1 className="text-3xl font-bold text-green-600 mb-4">
             🎉 预订成功！（押金已支付）
-          </h2>
-          <p className="text-gray-700 text-lg">
+          </h1>
+          <p className="text-gray-700">
             感谢您选择 <strong>华人 Okinawan</strong>，您的包车已成功锁定。
           </p>
         </div>
 
-        {/* 信息区 */}
-        <div className="space-y-4 text-gray-800 text-base text-center">
+        {/* 信息卡片 */}
+        <div className="bg-white rounded-2xl shadow-md p-6 space-y-4 text-center">
+
           <p className="text-green-700 font-medium">
             ✅ 客服将第一时间与您确认行程与司机安排
           </p>
@@ -25,39 +26,34 @@ export default function Step6Final({ initialData }) {
             📌 请务必添加我们的售后微信
           </p>
 
-          <p>
+          <p className="text-gray-800">
             添加微信时请备注订单号：
             <br />
             <span className="font-bold text-lg">{order_id}</span>
           </p>
-        </div>
 
-        {/* 二维码（关键：独立、受控、不被撑大） */}
-        <div className="mt-10 flex justify-center">
-          <div className="flex flex-col items-center gap-3">
-            <p className="text-sm text-gray-600">
+          {/* 二维码 */}
+          <div className="pt-4 flex flex-col items-center gap-2">
+            <span className="text-sm text-gray-500">
               扫码添加客服微信
-            </p>
-
-            {/* 这里是重点 */}
+            </span>
             <img
               src="/w1.png.png"
               alt="客服微信二维码"
+              className="rounded-lg"
               style={{
-                width: "180px",
-                height: "180px",
-                maxWidth: "180px",
-                maxHeight: "180px",
+                width: "160px",
+                height: "160px",
               }}
             />
           </div>
         </div>
 
-        {/* 返回首页 */}
-        <div className="mt-14 flex justify-center">
+        {/* 返回首页按钮 */}
+        <div className="mt-12 flex justify-center">
           <a
             href="https://xn--okinawa-n14kh45a.com"
-            className="px-10 py-4 bg-green-600 hover:bg-green-700 text-white text-xl font-bold rounded-xl"
+            className="inline-block px-10 py-4 bg-green-600 hover:bg-green-700 text-white text-lg font-semibold rounded-xl shadow"
           >
             返回首页
           </a>
@@ -67,6 +63,7 @@ export default function Step6Final({ initialData }) {
     </div>
   );
 }
+
 
 
 
