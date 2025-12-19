@@ -22,10 +22,19 @@ const formatDate = (d) => {
   return `${y}-${m}-${day}`;
 };
 
+// ✅ 计算用车天数（同一天 = 1 天游）
+const calcDays = (start, end) => {
+  const s = new Date(start);
+  const e = new Date(end || start);
+  return Math.floor((e - s) / (1000 * 60 * 60 * 24)) + 1;
+};
+
 export default function Step2({ initialData, onNext, onBack }) {
   const [carModel, setCarModel] = useState(initialData.car_model || "");
   const [driverLang, setDriverLang] = useState(initialData.driver_lang || "zh");
   const [duration, setDuration] = useState(initialData.duration || 8);
+
+  // 🔵 totalPrice =【总价】（单日价 × 天数）
   const [totalPrice, setTotalPrice] = useState(initialData.total_price || 0);
 
   const [pax, setPax] = useState(initialData.pax ?? 1);
@@ -41,9 +50,9 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [stockHint, setStockHint] = useState(null);
 
   /**
-   * 🔵 拉价格（✅ GET + query，对齐后端）
+   * 🔵 拉【单日价格】
    */
-  const fetchPrice = async (modelKey, lang, hours) => {
+  const fetchDailyPrice = async (modelKey, lang, hours) => {
     if (!modelKey) return null;
 
     const use_date = initialData.start_date;
@@ -64,7 +73,7 @@ export default function Step2({ initialData, onNext, onBack }) {
   };
 
   /**
-   * ✅ 车型 / 语言 / 时长 / 日期变化 → 拉价格
+   * ✅ 车型 / 语言 / 时长 / 日期变化 → 重新算【总价】
    */
   useEffect(() => {
     let cancelled = false;
@@ -73,11 +82,15 @@ export default function Step2({ initialData, onNext, onBack }) {
       setError("");
       if (!carModel) return;
 
-      const price = await fetchPrice(carModel, driverLang, duration);
+      const dailyPrice = await fetchDailyPrice(carModel, driverLang, duration);
       if (cancelled) return;
 
-      if (price > 0) {
-        setTotalPrice(price);
+      if (dailyPrice > 0) {
+        const days = calcDays(
+          initialData.start_date,
+          initialData.end_date
+        );
+        setTotalPrice(dailyPrice * days);
       } else {
         setTotalPrice(0);
         setError("价格读取失败，请稍后重试。");
@@ -88,10 +101,16 @@ export default function Step2({ initialData, onNext, onBack }) {
     return () => {
       cancelled = true;
     };
-  }, [carModel, driverLang, duration, initialData.start_date]);
+  }, [
+    carModel,
+    driverLang,
+    duration,
+    initialData.start_date,
+    initialData.end_date,
+  ]);
 
   /**
-   * 库存检查
+   * 库存检查（仍按开始日期）
    */
   const checkInventory = async () => {
     const res = await fetch("/api/check-inventory", {
@@ -149,7 +168,7 @@ export default function Step2({ initialData, onNext, onBack }) {
       car_model_id: CAR_MODEL_IDS[carModel],
       driver_lang: driverLang,
       duration,
-      total_price: totalPrice,
+      total_price: totalPrice, // ✅ 已是多日总价
       pax: Number(pax),
       luggage: Number(luggage),
       name: name.trim(),
@@ -253,5 +272,6 @@ export default function Step2({ initialData, onNext, onBack }) {
     </div>
   );
 }
+
 
 
