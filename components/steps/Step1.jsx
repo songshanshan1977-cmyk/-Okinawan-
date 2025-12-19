@@ -52,7 +52,6 @@ export default function Step1({ initialData, onNext }) {
 
   const disabledDays = useMemo(() => [{ before: tomorrow }], [tomorrow]);
 
-  // 月份标题：2025年12月（不会出现 14 月）
   const formatCaption = (date) =>
     format(date, "yyyy年M月", { locale: zhCN });
 
@@ -81,7 +80,6 @@ export default function Step1({ initialData, onNext }) {
       return;
     }
 
-    // 再次兜底：当日不能预约
     const start0 = new Date(start);
     start0.setHours(0, 0, 0, 0);
     if (start0 < tomorrow) {
@@ -100,29 +98,118 @@ export default function Step1({ initialData, onNext }) {
 
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "24px 16px" }}>
-      {/* ===== 内置样式（不依赖 Tailwind） ===== */}
       <style>{`
-        .calWrap{ display:flex; gap:56px; justify-content:center; margin: 22px 0 28px; }
-        .calBox{ width:360px; border:1px solid #ddd; background:#fff; border-radius:6px; }
-        .calTitle{ text-align:center; font-weight:700; font-size:22px; margin-bottom:10px; }
-        .fieldRow{ display:flex; gap:56px; justify-content:center; margin-top: 12px; }
-        .field{ width:520px; }
-        .input{ width:100%; padding:14px 12px; font-size:16px; border:1px solid #e5e5e5; border-radius:6px; outline:none; }
-        .btnRow{ display:flex; justify-content:flex-end; margin-top: 18px; }
-        .btn{ background:#3f6df6; color:#fff; border:none; padding:14px 34px; font-size:18px; border-radius:8px; cursor:pointer; }
-        .err{ color:#d00; margin-top: 12px; text-align:center; }
+        .calWrap{
+          display:flex;
+          gap:56px;
+          justify-content:center;
+          margin: 22px 0 28px;
+        }
 
-        /* DayPicker 风格 */
+        /* ⭐ 关键修改点：左右留白更均匀 */
+        .calBox{
+          width:360px;
+          padding:12px;
+          box-sizing:border-box;
+          border:1px solid #ddd;
+          background:#fff;
+          border-radius:8px;
+        }
+
+        .calTitle{
+          text-align:center;
+          font-weight:700;
+          font-size:22px;
+          margin-bottom:10px;
+        }
+
+        .fieldRow{
+          display:flex;
+          gap:56px;
+          justify-content:center;
+          margin-top: 12px;
+        }
+
+        .field{ width:520px; }
+
+        .input{
+          width:100%;
+          padding:14px 12px;
+          font-size:16px;
+          border:1px solid #e5e5e5;
+          border-radius:6px;
+          outline:none;
+        }
+
+        .btnRow{
+          display:flex;
+          justify-content:flex-end;
+          margin-top: 18px;
+        }
+
+        .btn{
+          background:#3f6df6;
+          color:#fff;
+          border:none;
+          padding:14px 34px;
+          font-size:18px;
+          border-radius:8px;
+          cursor:pointer;
+        }
+
+        .err{
+          color:#d00;
+          margin-top: 12px;
+          text-align:center;
+        }
+
+        /* ===== DayPicker 视觉优化 ===== */
+
         .rdp{ margin:0; }
         .rdp-month{ width:100%; }
-        .rdp-caption{ display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#f3f3f3; border-bottom:1px solid #ddd; }
+        .rdp-table{ margin:0 auto; } /* ⭐ 居中关键 */
+
+        .rdp-caption{
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          padding:10px 12px;
+          background:#f3f3f3;
+          border-bottom:1px solid #ddd;
+        }
+
         .rdp-caption_label{ font-weight:700; }
-        .rdp-nav button{ border:1px solid #bbb; background:#fff; width:30px; height:30px; border-radius:4px; cursor:pointer; }
+
+        .rdp-nav button{
+          border:1px solid #bbb;
+          background:#fff;
+          width:30px;
+          height:30px;
+          border-radius:6px;
+          cursor:pointer;
+        }
+
         .rdp-head{ border-bottom:1px solid #ddd; }
         .rdp-head_cell{ font-weight:700; padding:10px 0; }
-        .rdp-day{ width:40px; height:40px; border:1px solid #e6e6e6; }
-        .rdp-day_selected{ background:#fff3a0 !important; color:#000 !important; font-weight:700; }
-        .rdp-day_disabled{ color:#bbb !important; }
+
+        .rdp-cell{ padding:4px; }
+
+        .rdp-day{
+          width:40px;
+          height:40px;
+          border:1px solid #e6e6e6;
+          border-radius:6px;
+        }
+
+        .rdp-day_selected{
+          background:#fff3a0 !important;
+          color:#000 !important;
+          font-weight:700;
+        }
+
+        .rdp-day_disabled{
+          color:#bbb !important;
+        }
       `}</style>
 
       <h2 style={{ fontSize: 34, textAlign: "center", marginBottom: 8 }}>
