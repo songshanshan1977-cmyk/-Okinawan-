@@ -6,12 +6,11 @@ export default function Step6Final({ initialData }) {
     departure_hotel,
     end_hotel,
     total_price,
-    phone,
   } = initialData;
 
   // ⭐ 固定规则（锁死）
   const deposit = 500;
-  const balance = Math.max(total_price - deposit, 0);
+  const balance = Math.max((total_price || 0) - deposit, 0);
 
   return (
     <div className="max-w-3xl mx-auto py-12 space-y-8 text-center">
@@ -20,9 +19,9 @@ export default function Step6Final({ initialData }) {
         🎉 预订成功！（押金已支付）
       </h2>
 
-      <p className="text-gray-700 text-lg">
-        感谢您，{name}！  
-        您的包车订单已确认，车辆已为您锁定。
+      {/* 成功提示文案（修正后） */}
+      <p className="text-blue-600 text-lg font-medium">
+        感谢您选择华人Okinawan，您的包车订单已确认，车辆已为您成功锁定。
       </p>
 
       {/* 订单信息卡片 */}
@@ -43,7 +42,8 @@ export default function Step6Final({ initialData }) {
         <hr />
 
         <p>
-          <strong>包车总费用：</strong> ¥{total_price.toLocaleString()} RMB
+          <strong>包车总费用：</strong>{" "}
+          ¥{Number(total_price || 0).toLocaleString()} RMB
         </p>
 
         <p className="text-blue-600 font-semibold">
@@ -51,7 +51,8 @@ export default function Step6Final({ initialData }) {
         </p>
 
         <p className="text-orange-600 font-semibold">
-          ⭐ 剩余尾款：¥{balance.toLocaleString()} RMB  
+          ⭐ 剩余尾款：¥{balance.toLocaleString()} RMB
+          <br />
           （用车当日直接支付给司机）
         </p>
 
@@ -60,28 +61,28 @@ export default function Step6Final({ initialData }) {
         </p>
       </div>
 
-      {/* 提示说明 */}
+      {/* 客服说明 + 微信二维码 */}
       <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-sm text-green-700">
-        如需修改行程或有任何问题，请至少提前联系我们的客服团队。
+        <p className="mb-3">
+          如需修改行程或有任何问题，请直接添加我们的客服微信：
+        </p>
+        <img
+          src="/wechat-qrcode.png"
+          alt="客服微信二维码"
+          className="mx-auto w-40 h-40"
+        />
       </div>
 
       {/* 操作按钮 */}
       <div className="flex justify-center gap-4 mt-6">
-        <a
-          href="/"
+        <button
+          onClick={() => {
+            window.location.href = "https://xn--okinawa-n14kh45a.com";
+          }}
           className="px-6 py-3 bg-black text-white rounded-md text-lg"
         >
           返回首页
-        </a>
-
-        <a
-          href={`https://wa.me/819021716363?text=我要确认订单%20${order_id}`}
-          target="_blank"
-          rel="noreferrer"
-          className="px-6 py-3 border border-green-600 text-green-600 rounded-md text-lg"
-        >
-          立即联系客服
-        </a>
+        </button>
       </div>
     </div>
   );
