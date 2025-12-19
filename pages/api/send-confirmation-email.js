@@ -72,9 +72,9 @@ export default async function handler(req, res) {
       </div>
     `;
 
-    // 3️⃣ 发送邮件
+    // 3️⃣ 发送邮件（⭐ 关键修复点）
     await resend.emails.send({
-      from: "HonestOki <service@honestoki.com>",
+      from: "HonestOki <no-reply@华人okinawa.com>",
       to: order.email,
       subject: `您的冲绳包车订单确认（${order.order_id}）`,
       html,
