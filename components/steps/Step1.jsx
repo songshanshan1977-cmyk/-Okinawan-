@@ -11,7 +11,9 @@ export default function Step1({ initialData, onNext }) {
   const [departureHotel, setDepartureHotel] = useState(
     initialData.departure_hotel || ""
   );
-  const [endHotel, setEndHotel] = useState(initialData.end_hotel || "");
+  const [endHotel, setEndHotel] = useState(
+    initialData.end_hotel || ""
+  );
   const [error, setError] = useState("");
 
   const handleNext = () => {
@@ -27,17 +29,17 @@ export default function Step1({ initialData, onNext }) {
       return;
     }
 
-    // 当日不能预约
+    // ⛔ 当日不能下单
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const start = new Date(startDate);
 
     if (start <= today) {
-      setError("当日不能下单，请选择明天或更晚的日期。");
+      setError("当日不能下单，请选择明天或更晚的日期");
       return;
     }
 
-    // ✅ 结束日期必须大于开始日期（如果填写了）
+    // ⛔ 结束日期必须大于开始日期
     if (endDate) {
       const end = new Date(endDate);
       if (end <= start) {
@@ -46,7 +48,7 @@ export default function Step1({ initialData, onNext }) {
       }
     }
 
-    // ✅ 直接进入 Step2，不做任何库存请求
+    // ✅ 进入 Step2（不查库存）
     onNext({
       order_id: initialData.order_id,
       start_date: startDate,
@@ -57,61 +59,82 @@ export default function Step1({ initialData, onNext }) {
   };
 
   return (
-    <div>
-      <h2 style={{ fontSize: "24px", marginBottom: "16px" }}>
-        Step1：选择日期 & 酒店
+    <div style={{ maxWidth: "720px", margin: "0 auto" }}>
+      <h2 style={{ fontSize: "28px", marginBottom: "8px", textAlign: "center" }}>
+        立即预订
       </h2>
+      <p style={{ textAlign: "center", color: "#666", marginBottom: "32px" }}>
+        请选择您期望的包车开始和结束日期
+      </p>
 
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "12px",
-          maxWidth: "420px",
-        }}
-      >
-        <label>
-          用车日期（开始）：
+      <div style={{ display: "flex", gap: "40px", marginBottom: "24px" }}>
+        <div style={{ flex: 1 }}>
+          <label style={{ fontWeight: "bold" }}>开始日期</label>
           <input
             type="date"
             value={startDate}
             onChange={(e) => setStartDate(e.target.value)}
+            style={{ width: "100%", marginTop: "6px" }}
           />
-        </label>
+        </div>
 
-        <label>
-          用车日期（结束，可选）：
+        <div style={{ flex: 1 }}>
+          <label style={{ fontWeight: "bold" }}>结束日期</label>
           <input
             type="date"
             value={endDate}
             onChange={(e) => setEndDate(e.target.value)}
+            style={{ width: "100%", marginTop: "6px" }}
           />
-          <div style={{ fontSize: "12px", color: "#666", marginTop: "4px" }}>
+          <div style={{ fontSize: "12px", color: "#888", marginTop: "4px" }}>
             结束日期必须大于开始日期
           </div>
-        </label>
+        </div>
+      </div>
 
-        <label>
-          出发酒店：
+      <div style={{ display: "flex", gap: "40px", marginBottom: "24px" }}>
+        <div style={{ flex: 1 }}>
+          <label style={{ fontWeight: "bold" }}>出发酒店</label>
           <input
             type="text"
             value={departureHotel}
             onChange={(e) => setDepartureHotel(e.target.value)}
+            style={{ width: "100%", marginTop: "6px" }}
           />
-        </label>
+        </div>
 
-        <label>
-          结束酒店（可选）：
+        <div style={{ flex: 1 }}>
+          <label style={{ fontWeight: "bold" }}>回程酒店</label>
           <input
             type="text"
             value={endHotel}
             onChange={(e) => setEndHotel(e.target.value)}
+            style={{ width: "100%", marginTop: "6px" }}
           />
-        </label>
+        </div>
+      </div>
 
-        {error && <div style={{ color: "red" }}>{error}</div>}
+      {error && (
+        <div style={{ color: "red", marginBottom: "16px" }}>
+          {error}
+        </div>
+      )}
 
-        <button onClick={handleNext}>下一步：选择车型</button>
+      <div style={{ textAlign: "right" }}>
+        <button
+          onClick={handleNext}
+          style={{
+            padding: "12px 28px",
+            fontSize: "16px",
+            backgroundColor: "#2563eb",
+            color: "#fff",
+            border: "none",
+            borderRadius: "6px",
+            cursor: "pointer",
+          }}
+        >
+          下一步
+        </button>
       </div>
     </div>
   );
