@@ -62,6 +62,7 @@ export default async function handler(req, res) {
       type: "deposit",
     };
 
+    // ⭐ 创建 Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -91,6 +92,12 @@ export default async function handler(req, res) {
       // ⭐⭐⭐ 正确的回跳地址 ⭐⭐⭐
       success_url: `${FRONTEND_URL}/booking?step=5&order_id=${order.order_id}`,
       cancel_url: `${FRONTEND_URL}/booking?step=4&order_id=${order.order_id}&cancel=1`,
+    });
+
+    // ⭐⭐⭐ 新增：锁库存（A2-1 的唯一改动点）⭐⭐⭐
+    await supabase.rpc("lock_inventory", {
+      p_car_model_id: order.car_model_id,
+      p_date: order.start_date,
     });
 
     return res.status(200).json({ url: session.url });
