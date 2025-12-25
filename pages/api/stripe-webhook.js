@@ -42,145 +42,112 @@ export default async function handler(req, res) {
   }
 
   try {
+    /**
+     * =========================
+     * 1️⃣ 支付成功 → 确认库存
+     * =========================
+     */
     if (event.type === "payment_intent.succeeded") {
       const intent = event.data.object;
 
-      let orderId = intent.metadata?.order_id || null;
-      let carModelId = intent.metadata?.car_model_id || null;
-      let startDate = intent.metadata?.start_date || null;
-
-      // ✅ 兼容 metadata 在 charge 上的情况
-      if (!orderId && intent.latest_charge) {
-        const charge = await stripe.charges.retrieve(intent.latest_charge);
-        if (charge?.metadata) {
-          orderId = charge.metadata.order_id || orderId;
-          carModelId = charge.metadata.car_model_id || carModelId;
-          startDate = charge.metadata.start_date || startDate;
-        }
-      }
-
+      const orderId = intent.metadata?.order_id || null;
       if (!orderId) {
         console.warn("⚠️ payment_intent.succeeded 但没有 order_id");
         return res.json({ received: true });
       }
 
-      // ① 读取订单（判断是否已锁库存）
-      const { data: order, error: orderError } = await supabase
+      // 读取订单（用于幂等）
+      const { data: order, error } = await supabase
         .from("orders")
-        .select("inventory_locked")
+        .select("car_model_id, start_date, inventory_confirmed_at")
         .eq("order_id", orderId)
         .maybeSingle();
 
-      if (orderError) {
-        console.error("❌ 读取订单失败:", orderError);
-        throw orderError;
+      if (error || !order) {
+        console.error("❌ 读取订单失败:", error);
+        throw error;
       }
 
-      // ② 更新订单支付状态
-      await supabase
-        .from("orders")
-        .update({
-          payment_status: "paid",
-          paid_at: new Date().toISOString(),
-        })
-        .eq("order_id", orderId);
+      // ⭐ 幂等：只确认一次库存
+      if (!order.inventory_confirmed_at) {
+        // ✅ 确认库存（RPC）
+        await supabase.rpc("confirm_inventory", {
+          p_car_model_id: order.car_model_id,
+          p_date: order.start_date,
+        });
 
-      // ⭐⭐⭐ NEW：读取完整订单（给 Step5 / 邮件用）⭐⭐⭐
-      const { data: fullOrder, error: fullOrderError } = await supabase
-        .from("orders")
-        .select("*")
-        .eq("order_id", orderId)
-        .maybeSingle();
-
-      if (fullOrderError || !fullOrder) {
-        console.error("❌ 读取完整订单失败:", fullOrderError);
-      }
-
-      // ③ 防重复写 payments
-      const { data: existingPayment } = await supabase
-        .from("payments")
-        .select("id")
-        .eq("stripe_session_id", intent.id)
-        .maybeSingle();
-
-      if (!existingPayment) {
-        await supabase.from("payments").insert([
-          {
-            order_id: orderId,
-            stripe_session_id: intent.id,
-            amount: intent.amount_received,
-            currency: intent.currency,
-            car_model_id: carModelId,
-            paid: true,
-          },
-        ]);
-      }
-
-      // ④ 库存扣减（只执行一次）
-      if (!order?.inventory_locked && carModelId && startDate) {
-        const { data: inventory, error: inventoryError } = await supabase
-          .from("inventory")
-          .select("id, stock")
-          .eq("car_model_id", carModelId)
-          .eq("date", startDate)
-          .single();
-
-        if (inventoryError || !inventory) {
-          console.error("❌ 找不到库存记录:", inventoryError);
-          throw inventoryError;
-        }
-
-        if (inventory.stock <= 0) {
-          console.error("❌ 库存不足，阻止扣减");
-          return res.json({ received: true });
-        }
-
-        // 扣库存
-        const { error: updateError } = await supabase
-          .from("inventory")
-          .update({ stock: inventory.stock - 1 })
-          .eq("id", inventory.id);
-
-        if (updateError) {
-          console.error("❌ 扣库存失败:", updateError);
-          throw updateError;
-        }
-
-        // 锁定订单
+        // 标记已确认库存
         await supabase
           .from("orders")
-          .update({ inventory_locked: true })
+          .update({
+            payment_status: "paid",
+            paid_at: new Date().toISOString(),
+            inventory_confirmed_at: new Date().toISOString(),
+          })
           .eq("order_id", orderId);
 
-        console.log(
-          "🔒 库存已扣减并锁定订单:",
-          orderId,
-          "剩余 stock:",
-          inventory.stock - 1
-        );
-
-        // 📩 触发确认邮件（不影响 webhook 成功）
-        try {
-          await fetch(
-            `${process.env.NEXT_PUBLIC_SITE_URL}/api/send-confirmation-email`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                order_id: orderId,
-                order: fullOrder, // ⭐ NEW：完整订单直接给邮件 & Step5
-              }),
-            }
-          );
-          console.log("📧 已触发确认邮件:", orderId);
-        } catch (mailErr) {
-          console.error("⚠️ 触发确认邮件失败:", mailErr);
-        }
+        console.log("✅ 支付成功，库存已确认:", orderId);
+      } else {
+        console.log("🔁 重复 webhook，已跳过库存确认:", orderId);
       }
     }
 
-    if (event.type === "checkout.session.completed") {
-      console.log("📦 checkout 完成:", event.data.object.id);
+    /**
+     * =========================
+     * 2️⃣ 支付失败 → 释放锁
+     * =========================
+     */
+    if (event.type === "payment_intent.payment_failed") {
+      const intent = event.data.object;
+      const orderId = intent.metadata?.order_id || null;
+
+      if (!orderId) {
+        return res.json({ received: true });
+      }
+
+      const { data: order } = await supabase
+        .from("orders")
+        .select("car_model_id, start_date")
+        .eq("order_id", orderId)
+        .maybeSingle();
+
+      if (order) {
+        await supabase.rpc("release_inventory_lock", {
+          p_car_model_id: order.car_model_id,
+          p_date: order.start_date,
+        });
+
+        console.log("↩️ 支付失败，库存锁已释放:", orderId);
+      }
+    }
+
+    /**
+     * =========================
+     * 3️⃣ 会话过期 → 释放锁
+     * =========================
+     */
+    if (event.type === "checkout.session.expired") {
+      const session = event.data.object;
+      const orderId = session.metadata?.order_id || null;
+
+      if (!orderId) {
+        return res.json({ received: true });
+      }
+
+      const { data: order } = await supabase
+        .from("orders")
+        .select("car_model_id, start_date")
+        .eq("order_id", orderId)
+        .maybeSingle();
+
+      if (order) {
+        await supabase.rpc("release_inventory_lock", {
+          p_car_model_id: order.car_model_id,
+          p_date: order.start_date,
+        });
+
+        console.log("⏰ 会话过期，库存锁已释放:", orderId);
+      }
     }
 
     return res.json({ received: true });
