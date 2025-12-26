@@ -17,26 +17,30 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false });
   }
 
+  /**
+   * ⭐ 改动点说明
+   * - 不再读取 inventory.stock
+   * - 统一走规则视图 inventory_rules_v
+   * - 以 remaining_qty_calc 作为唯一判断依据
+   */
+
   const { data, error } = await supabase
-    .from("inventory")
-    .select("stock")              // ✅ 正确字段名
+    .from("inventory_rules_v")
+    .select("remaining_qty_calc")
     .eq("date", date)
-    .eq("car_model_id", car_model_id);
+    .eq("car_model_id", car_model_id)
+    .maybeSingle();
 
   if (error) {
-    console.error("inventory error:", error);
+    console.error("inventory_rules_v error:", error);
     return res.status(500).json({ ok: false });
   }
 
-  const totalStock = data.reduce(
-    (sum, row) => sum + (row.stock || 0),  // ✅ 正确字段
-    0
-  );
+  const remaining = data?.remaining_qty_calc ?? 0;
 
   return res.json({
-    ok: totalStock > 0,
-    total_stock: totalStock,
+    ok: remaining > 0,
+    remaining_qty: remaining,
   });
 }
-
 
