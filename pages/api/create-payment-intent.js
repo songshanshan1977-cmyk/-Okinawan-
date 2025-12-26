@@ -52,6 +52,35 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "订单已支付" });
     }
 
+    /**
+     * =================================================
+     * ⭐⭐ 新增：最终库存硬校验（真正“锁死”的关键）
+     * =================================================
+     */
+    const { data: rule, error: ruleError } = await supabase
+      .from("inventory_rules_v")
+      .select("remaining_qty_calc")
+      .eq("date", order.start_date)
+      .eq("car_model_id", order.car_model_id)
+      .maybeSingle();
+
+    if (ruleError) {
+      console.error("❌ inventory_rules_v 查询失败:", ruleError);
+      return res.status(500).json({ error: "库存校验失败" });
+    }
+
+    const remaining = rule?.remaining_qty_calc ?? 0;
+
+    if (remaining <= 0) {
+      console.warn(
+        "⛔ 库存不足，阻止创建支付：",
+        order.order_id,
+        order.car_model_id,
+        order.start_date
+      );
+      return res.status(409).json({ error: "库存不足，无法继续支付" });
+    }
+
     // ⭐ webhook / 回跳 / 后续逻辑统一使用 order_id
     const metadata = {
       order_id: order.order_id,
@@ -94,7 +123,7 @@ export default async function handler(req, res) {
       cancel_url: `${FRONTEND_URL}/booking?step=4&order_id=${order.order_id}&cancel=1`,
     });
 
-    // ⭐⭐⭐ 新增：锁库存（A2-1 的唯一改动点）⭐⭐⭐
+    // ⭐⭐ 锁库存（create-payment-intent 阶段）
     await supabase.rpc("lock_inventory", {
       p_car_model_id: order.car_model_id,
       p_date: order.start_date,
