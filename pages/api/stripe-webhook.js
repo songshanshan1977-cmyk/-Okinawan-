@@ -43,110 +43,105 @@ export default async function handler(req, res) {
 
   try {
     /**
-     * =========================
-     * 1️⃣ 支付成功 → 确认库存
-     * =========================
+     * ==================================================
+     * A1 + A2 主入口（唯一）：checkout.session.completed
+     * ==================================================
      */
-    if (event.type === "payment_intent.succeeded") {
-      const intent = event.data.object;
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+      const orderId = session.metadata?.order_id;
 
-      const orderId = intent.metadata?.order_id || null;
       if (!orderId) {
-        console.warn("⚠️ payment_intent.succeeded 但没有 order_id");
+        console.warn("⚠️ checkout.session.completed 但没有 order_id");
         return res.json({ received: true });
       }
 
-      // 读取订单（用于幂等）
-      const { data: order, error } = await supabase
+      /**
+       * 1️⃣ 读取订单（用于 A1 + A2）
+       */
+      const { data: order, error: orderErr } = await supabase
         .from("orders")
-        .select("car_model_id, start_date, inventory_confirmed_at")
+        .select("id, order_id, status, car_model_id, date, inventory_locked")
         .eq("order_id", orderId)
-        .maybeSingle();
+        .single();
 
-      if (error || !order) {
-        console.error("❌ 读取订单失败:", error);
-        throw error;
+      if (orderErr || !order) {
+        console.error("❌ 读取订单失败:", orderErr);
+        throw orderErr;
       }
 
-      // ⭐ 幂等：只确认一次库存
-      if (!order.inventory_confirmed_at) {
-        // ✅ 确认库存（RPC）
-        await supabase.rpc("confirm_inventory", {
-          p_car_model_id: order.car_model_id,
-          p_date: order.start_date,
-        });
-
-        // 标记已确认库存
+      /**
+       * ======================
+       * A1：标记订单已支付
+       * ======================
+       */
+      if (order.status !== "paid") {
         await supabase
           .from("orders")
           .update({
-            payment_status: "paid",
+            status: "paid",
             paid_at: new Date().toISOString(),
-            inventory_confirmed_at: new Date().toISOString(),
           })
           .eq("order_id", orderId);
 
-        console.log("✅ 支付成功，库存已确认:", orderId);
-      } else {
-        console.log("🔁 重复 webhook，已跳过库存确认:", orderId);
-      }
-    }
-
-    /**
-     * =========================
-     * 2️⃣ 支付失败 → 释放锁
-     * =========================
-     */
-    if (event.type === "payment_intent.payment_failed") {
-      const intent = event.data.object;
-      const orderId = intent.metadata?.order_id || null;
-
-      if (!orderId) {
-        return res.json({ received: true });
-      }
-
-      const { data: order } = await supabase
-        .from("orders")
-        .select("car_model_id, start_date")
-        .eq("order_id", orderId)
-        .maybeSingle();
-
-      if (order) {
-        await supabase.rpc("release_inventory_lock", {
-          p_car_model_id: order.car_model_id,
-          p_date: order.start_date,
+        await supabase.from("payments").insert({
+          order_id: orderId,
+          stripe_session_id: session.id,
+          amount: session.amount_total,
+          currency: session.currency,
+          status: "paid",
         });
 
-        console.log("↩️ 支付失败，库存锁已释放:", orderId);
+        console.log("✅ A1 完成：订单已 paid", orderId);
+      }
+
+      /**
+       * ======================
+       * A2：库存扣减（幂等）
+       * ======================
+       */
+      if (order.inventory_locked !== true) {
+        await supabase.rpc("increment_locked_qty", {
+          p_date: order.date,
+          p_car_model_id: order.car_model_id,
+        });
+
+        await supabase
+          .from("orders")
+          .update({ inventory_locked: true })
+          .eq("order_id", orderId);
+
+        console.log("✅ A2 完成：库存 locked_qty +1", orderId);
+      } else {
+        console.log("🔁 A2 幂等命中，已跳过库存扣减", orderId);
       }
     }
 
     /**
      * =========================
-     * 3️⃣ 会话过期 → 释放锁
+     * 下面是你原有逻辑，暂时保留
      * =========================
      */
+
     if (event.type === "checkout.session.expired") {
       const session = event.data.object;
       const orderId = session.metadata?.order_id || null;
 
-      if (!orderId) {
-        return res.json({ received: true });
-      }
+      if (orderId) {
+        const { data: order } = await supabase
+          .from("orders")
+          .select("car_model_id, date")
+          .eq("order_id", orderId)
+          .maybeSingle();
 
-      const { data: order } = await supabase
-        .from("orders")
-        .select("car_model_id, start_date")
-        .eq("order_id", orderId)
-        .maybeSingle();
+        if (order) {
+          await supabase.rpc("release_inventory_lock", {
+            p_car_model_id: order.car_model_id,
+            p_date: order.date,
+          });
 
-      if (order) {
-        await supabase.rpc("release_inventory_lock", {
-          p_car_model_id: order.car_model_id,
-          p_date: order.start_date,
-        });
-
-        console.log("⏰ 会话过期，库存锁已释放:", orderId);
+          console.log("⏰ 会话过期，库存锁已释放:", orderId);
+        }
       }
     }
 
@@ -156,5 +151,4 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
-
 
