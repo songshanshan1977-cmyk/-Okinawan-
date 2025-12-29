@@ -1,11 +1,17 @@
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient"; // ⭐ 新增：只为查车型名
+import { createClient } from "@supabase/supabase-js"; // ✅ 直接用官方 SDK
+
+// ✅ 就地创建 supabase（不依赖 @/lib）
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+);
 
 export default function Step5Confirmation({ onNext }) {
   const [loading, setLoading] = useState(true);
   const [order, setOrder] = useState(null);
   const [error, setError] = useState("");
-  const [carName, setCarName] = useState(""); // ⭐ 新增：车型名称
+  const [carName, setCarName] = useState(""); // ⭐ 只为车型显示
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -29,7 +35,7 @@ export default function Step5Confirmation({ onNext }) {
         setOrder(data);
 
         // ============================
-        // ⭐ 仅新增：用 car_model_id 查车型名
+        // ⭐ 唯一新增逻辑：查车型名称
         // ============================
         if (data.car_model_id) {
           const { data: car, error: carErr } = await supabase
@@ -53,13 +59,8 @@ export default function Step5Confirmation({ onNext }) {
       });
   }, []);
 
-  if (loading) {
-    return <p>正在加载订单信息...</p>;
-  }
-
-  if (error) {
-    return <p className="text-red-600">{error}</p>;
-  }
+  if (loading) return <p>正在加载订单信息...</p>;
+  if (error) return <p className="text-red-600">{error}</p>;
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 py-8">
@@ -78,7 +79,7 @@ export default function Step5Confirmation({ onNext }) {
 
         <hr />
 
-        {/* ⭐ 唯一修改点：车型显示 */}
+        {/* ✅ 车型终于不会空了 */}
         <p><strong>车型：</strong>{carName || "—"}</p>
 
         <p><strong>司机语言：</strong>{order.driver_lang === "jp" ? "日文司机" : "中文司机"}</p>
@@ -110,4 +111,5 @@ export default function Step5Confirmation({ onNext }) {
     </div>
   );
 }
+
 
