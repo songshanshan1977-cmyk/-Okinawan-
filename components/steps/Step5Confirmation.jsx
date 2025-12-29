@@ -1,17 +1,16 @@
 import { useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
 
-// ✅ 只用于“补车型名”，不影响其他逻辑
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
+/* ✅【新增】和 Step3 完全一致的车型映射（只为显示） */
+const carNameMap = {
+  car1: "经济 5 座轿车",
+  car2: "豪华 7 座阿尔法",
+  car3: "舒适 10 座海狮",
+};
 
 export default function Step5Confirmation({ onNext }) {
   const [loading, setLoading] = useState(true);
   const [order, setOrder] = useState(null);
   const [error, setError] = useState("");
-  const [carName, setCarName] = useState(""); // ⭐ 新增：仅用于显示车型
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -25,37 +24,12 @@ export default function Step5Confirmation({ onNext }) {
 
     fetch(`/api/get-order?order_id=${orderId}`)
       .then((res) => res.json())
-      .then(async (data) => {
+      .then((data) => {
         if (!data || data.error) {
           setError(data?.error || "订单不存在");
-          setLoading(false);
-          return;
-        }
-
-        setOrder(data);
-
-        // =========================
-        // ⭐ 仅在车型为空时补车型名
-        // =========================
-        if (!data.car_model && data.car_model_id) {
-          const { data: car, error: carErr } = await supabase
-            .from("cars")
-            .select("name_zh, name_jp")
-            .eq("id", data.car_model_id)
-            .single();
-
-          if (!carErr && car) {
-            setCarName(
-              data.driver_lang === "JP"
-                ? car.name_jp
-                : car.name_zh
-            );
-          }
         } else {
-          // 原本有值就直接用
-          setCarName(data.car_model);
+          setOrder(data);
         }
-
         setLoading(false);
       })
       .catch(() => {
@@ -75,7 +49,6 @@ export default function Step5Confirmation({ onNext }) {
   return (
     <div className="max-w-3xl mx-auto space-y-6 py-8">
       <h2 className="text-2xl font-bold">✅ 押金支付成功</h2>
-
       <p>您的订单已确认，我们已为您锁定车辆，请核对以下信息：</p>
 
       <div className="border rounded-lg p-6 space-y-3">
@@ -89,12 +62,15 @@ export default function Step5Confirmation({ onNext }) {
 
         <hr />
 
-        {/* ✅ 修复点：车型永远有值 */}
-        <p><strong>车型：</strong>{carName || "—"}</p>
+        {/* ✅【唯一修改点】车型显示逻辑与 Step3 完全一致 */}
+        <p>
+          <strong>车型：</strong>
+          {carNameMap[order.car_model] || "未选择"}
+        </p>
 
         <p>
           <strong>司机语言：</strong>
-          {order.driver_lang === "JP" ? "日文司机" : "中文司机"}
+          {order.driver_lang === "jp" ? "日文司机" : "中文司机"}
         </p>
         <p><strong>包车时长：</strong>{order.duration} 小时</p>
         <p><strong>人数：</strong>{order.pax} 人</p>
@@ -124,6 +100,5 @@ export default function Step5Confirmation({ onNext }) {
     </div>
   );
 }
-
 
 
