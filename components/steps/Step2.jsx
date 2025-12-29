@@ -34,13 +34,11 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [driverLang, setDriverLang] = useState(initialData.driver_lang || "zh");
   const [duration, setDuration] = useState(initialData.duration || 8);
 
-  // 🔵 totalPrice =【总价】（单日价 × 天数）
   const [totalPrice, setTotalPrice] = useState(initialData.total_price || 0);
 
   const [pax, setPax] = useState(initialData.pax ?? 1);
   const [luggage, setLuggage] = useState(initialData.luggage ?? 0);
 
-  // 客户信息
   const [name, setName] = useState(initialData.name ?? "");
   const [phone, setPhone] = useState(initialData.phone ?? "");
   const [email, setEmail] = useState(initialData.email ?? "");
@@ -48,6 +46,9 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   const [error, setError] = useState("");
   const [stockHint, setStockHint] = useState(null);
+
+  // 🔴 FIX：记录是否“已确认无库存”
+  const [inventoryZero, setInventoryZero] = useState(false);
 
   /**
    * 🔵 拉【单日价格】
@@ -80,7 +81,14 @@ export default function Step2({ initialData, onNext, onBack }) {
 
     const run = async () => {
       setError("");
+
       if (!carModel) return;
+
+      // 🔴 FIX：如果已经确认库存为 0，不报价格错误
+      if (inventoryZero) {
+        setTotalPrice(0);
+        return;
+      }
 
       const dailyPrice = await fetchDailyPrice(carModel, driverLang, duration);
       if (cancelled) return;
@@ -107,10 +115,11 @@ export default function Step2({ initialData, onNext, onBack }) {
     duration,
     initialData.start_date,
     initialData.end_date,
+    inventoryZero, // 🔴 FIX
   ]);
 
   /**
-   * 库存检查（仍按开始日期）
+   * 库存检查
    */
   const checkInventory = async () => {
     const res = await fetch("/api/check-inventory", {
@@ -137,6 +146,7 @@ export default function Step2({ initialData, onNext, onBack }) {
   const handleNext = async () => {
     setError("");
     setStockHint(null);
+    setInventoryZero(false); // 🔴 FIX：重置
 
     const today = formatDate(new Date());
     if (initialData.start_date === today) {
@@ -149,16 +159,17 @@ export default function Step2({ initialData, onNext, onBack }) {
     if (!phone.trim()) return setError("请输入电话（必填）");
     if (!email.trim()) return setError("请输入邮箱（必填）");
 
-    if (!totalPrice || totalPrice <= 0) {
-      setError("价格读取失败，请稍后重试。");
-      return;
-    }
-
     const inv = await checkInventory();
     setStockHint(inv.total_stock);
 
     if (!inv.ok) {
+      setInventoryZero(true); // 🔴 FIX：明确标记“无库存”
       setError("该日期该车型已无库存，请选择其他车型或日期。");
+      return;
+    }
+
+    if (!totalPrice || totalPrice <= 0) {
+      setError("价格读取失败，请稍后重试。");
       return;
     }
 
@@ -168,7 +179,7 @@ export default function Step2({ initialData, onNext, onBack }) {
       car_model_id: CAR_MODEL_IDS[carModel],
       driver_lang: driverLang,
       duration,
-      total_price: totalPrice, // ✅ 已是多日总价
+      total_price: totalPrice,
       pax: Number(pax),
       luggage: Number(luggage),
       name: name.trim(),
@@ -189,7 +200,10 @@ export default function Step2({ initialData, onNext, onBack }) {
         {["car1", "car2", "car3"].map((m) => (
           <button
             key={m}
-            onClick={() => setCarModel(m)}
+            onClick={() => {
+              setCarModel(m);
+              setInventoryZero(false); // 🔴 FIX：切换车型时清空库存状态
+            }}
             style={{
               padding: 12,
               borderRadius: 10,
