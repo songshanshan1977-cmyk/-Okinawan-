@@ -1,11 +1,4 @@
 import { useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js"; // ✅ 直接用官方 SDK
-
-// ✅ 就地创建 supabase（不依赖 @/lib）
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
 
 export default function Step5Confirmation({ onNext }) {
   const [loading, setLoading] = useState(true);
@@ -25,7 +18,7 @@ export default function Step5Confirmation({ onNext }) {
 
     fetch(`/api/get-order?order_id=${orderId}`)
       .then((res) => res.json())
-      .then(async (data) => {
+      .then((data) => {
         if (!data || data.error) {
           setError(data?.error || "订单不存在");
           setLoading(false);
@@ -34,22 +27,8 @@ export default function Step5Confirmation({ onNext }) {
 
         setOrder(data);
 
-        // ============================
-        // ⭐ 唯一新增逻辑：查车型名称
-        // ============================
-        if (data.car_model_id) {
-          const { data: car, error: carErr } = await supabase
-            .from("cars")
-            .select("name_zh, name_jp")
-            .eq("id", data.car_model_id)
-            .single();
-
-          if (!carErr && car) {
-            setCarName(
-              data.driver_lang === "jp" ? car.name_jp : car.name_zh
-            );
-          }
-        }
+        // ✅ 统一来源：只用后端给的中文车型名
+        setCarName(data.car_name_zh || "");
 
         setLoading(false);
       })
@@ -79,7 +58,7 @@ export default function Step5Confirmation({ onNext }) {
 
         <hr />
 
-        {/* ✅ 车型终于不会空了 */}
+        {/* ✅ 车型：从头到尾统一 */}
         <p><strong>车型：</strong>{carName || "—"}</p>
 
         <p><strong>司机语言：</strong>{order.driver_lang === "jp" ? "日文司机" : "中文司机"}</p>
@@ -111,5 +90,6 @@ export default function Step5Confirmation({ onNext }) {
     </div>
   );
 }
+
 
 
