@@ -41,9 +41,7 @@ export default async function handler(req, res) {
     return res.status(400).send("Webhook Error");
   }
 
-  // ==================================================
   // 只处理 checkout.session.completed
-  // ==================================================
   if (event.type !== "checkout.session.completed") {
     return res.json({ received: true });
   }
@@ -52,21 +50,23 @@ export default async function handler(req, res) {
   const orderId = session.metadata?.order_id;
 
   if (!orderId) {
-    console.warn("⚠️ checkout.session.completed 缺少 order_id");
+    console.warn("⚠️ 缺少 order_id");
     return res.json({ received: true });
   }
 
   // =========================
-  // 1️⃣ 读取订单（安全）
+  // 1️⃣ 正确读取 orders
   // =========================
   const { data: order, error: orderErr } = await supabase
     .from("orders")
-    .select("order_id, status, car_model_id, date, inventory_locked")
+    .select(
+      "order_id, status, car_model_id, start_date, inventory_locked"
+    )
     .eq("order_id", orderId)
     .maybeSingle();
 
   if (orderErr || !order) {
-    console.error("❌ 订单不存在:", orderId, orderErr);
+    console.error("❌ 订单读取失败:", orderId, orderErr);
     return res.json({ received: true });
   }
 
@@ -74,7 +74,7 @@ export default async function handler(req, res) {
   // A1：订单 paid + payments 写入
   // =========================
   if (order.status !== "paid") {
-    const { error: orderUpdateErr } = await supabase
+    await supabase
       .from("orders")
       .update({
         status: "paid",
@@ -82,11 +82,7 @@ export default async function handler(req, res) {
       })
       .eq("order_id", orderId);
 
-    if (orderUpdateErr) {
-      console.error("❌ orders 更新失败:", orderUpdateErr);
-    }
-
-    const { error: paymentErr } = await supabase
+    const { error: payErr } = await supabase
       .from("payments")
       .insert({
         order_id: orderId,
@@ -95,43 +91,37 @@ export default async function handler(req, res) {
         currency: session.currency,
       });
 
-    if (paymentErr) {
-      console.error("❌ payments 写入失败:", paymentErr);
+    if (payErr) {
+      console.error("❌ payments 写入失败:", payErr);
     } else {
       console.log("✅ payments 写入成功:", orderId);
     }
   } else {
-    console.log("🔁 A1 幂等命中，已 paid:", orderId);
+    console.log("🔁 已是 paid，跳过 A1");
   }
 
   // =========================
-  // A2：库存锁（不影响 A1）
+  // A2：库存锁定（用 start_date）
   // =========================
   if (!order.inventory_locked) {
-    try {
-      const { error: lockErr } = await supabase.rpc(
-        "increment_locked_qty",
-        {
-          p_date: order.date,
-          p_car_model_id: order.car_model_id,
-        }
-      );
-
-      if (lockErr) {
-        console.error("❌ A2 锁库存失败:", lockErr);
-      } else {
-        await supabase
-          .from("orders")
-          .update({ inventory_locked: true })
-          .eq("order_id", orderId);
-
-        console.log("✅ A2 库存锁定成功:", orderId);
+    const { error: lockErr } = await supabase.rpc(
+      "increment_locked_qty",
+      {
+        p_date: order.start_date,
+        p_car_model_id: order.car_model_id,
       }
-    } catch (e) {
-      console.error("❌ A2 异常:", e);
+    );
+
+    if (!lockErr) {
+      await supabase
+        .from("orders")
+        .update({ inventory_locked: true })
+        .eq("order_id", orderId);
+
+      console.log("✅ A2 库存锁定成功:", orderId);
+    } else {
+      console.error("❌ A2 锁库存失败:", lockErr);
     }
-  } else {
-    console.log("🔁 A2 幂等命中，库存已锁:", orderId);
   }
 
   return res.json({ received: true });
