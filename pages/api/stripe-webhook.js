@@ -57,8 +57,7 @@ export default async function handler(req, res) {
       }
 
       /**
-       * 1️⃣ 读取订单（用于 A1 + A2）
-       * ⭐ 修复点：date → start_date
+       * 1️⃣ 读取订单
        */
       const { data: order, error: orderErr } = await supabase
         .from("orders")
@@ -75,10 +74,11 @@ export default async function handler(req, res) {
 
       /**
        * ======================
-       * A1：标记订单已支付
+       * A1：标记订单已支付 + 写 payments
        * ======================
        */
       if (order.status !== "paid") {
+        // 1️⃣ 更新 orders
         await supabase
           .from("orders")
           .update({
@@ -87,12 +87,14 @@ export default async function handler(req, res) {
           })
           .eq("order_id", orderId);
 
-        // ✅ payments 表字段完全对齐
+        // 2️⃣ 写入 payments（⚠️ 关键修复点）
         await supabase.from("payments").insert({
           order_id: orderId,
           stripe_session_id: session.id,
           amount: session.amount_total,
           currency: session.currency,
+          car_model_id: order.car_model_id, // ✅ 必填：解决 NOT NULL
+          paid: true,                       // ✅ 明确标记
         });
 
         console.log("✅ A1 完成：订单已 paid + payments 写入", orderId);
@@ -105,7 +107,7 @@ export default async function handler(req, res) {
        */
       if (order.inventory_locked !== true) {
         await supabase.rpc("increment_locked_qty", {
-          p_date: order.start_date, // ⭐ 修复点
+          p_date: order.start_date,
           p_car_model_id: order.car_model_id,
         });
 
@@ -132,14 +134,14 @@ export default async function handler(req, res) {
       if (orderId) {
         const { data: order } = await supabase
           .from("orders")
-          .select("car_model_id, start_date") // ⭐ 修复点
+          .select("car_model_id, start_date")
           .eq("order_id", orderId)
           .maybeSingle();
 
         if (order) {
           await supabase.rpc("release_inventory_lock", {
             p_car_model_id: order.car_model_id,
-            p_date: order.start_date, // ⭐ 修复点
+            p_date: order.start_date,
           });
 
           console.log("⏰ 会话过期，库存锁已释放:", orderId);
