@@ -42,11 +42,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    /**
-     * ==================================================
-     * A1 + A2 主入口（唯一）：checkout.session.completed
-     * ==================================================
-     */
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
       const orderId = session.metadata?.order_id;
@@ -56,26 +51,19 @@ export default async function handler(req, res) {
         return res.json({ received: true });
       }
 
-      /**
-       * 1️⃣ 读取订单（用于 A1 + A2）
-       */
-      const { data: order, error: orderErr } = await supabase
+      const { data: order } = await supabase
         .from("orders")
-        .select("id, order_id, status, car_model_id, date, inventory_locked")
+        .select("status, car_model_id, date, inventory_locked")
         .eq("order_id", orderId)
         .single();
 
-      if (orderErr || !order) {
-        console.error("❌ 读取订单失败:", orderErr);
-        throw orderErr;
-      }
-
-      /**
-       * ======================
-       * A1：标记订单已支付
-       * ======================
-       */
+      // ===== A1：订单已支付 =====
       if (order.status !== "paid") {
+        // 🔑 关键：从 PaymentIntent 取真实金额
+        const paymentIntent = await stripe.paymentIntents.retrieve(
+          session.payment_intent
+        );
+
         await supabase
           .from("orders")
           .update({
@@ -84,22 +72,17 @@ export default async function handler(req, res) {
           })
           .eq("order_id", orderId);
 
-        // ✅ 修复点：payments 表没有 status 字段
         await supabase.from("payments").insert({
           order_id: orderId,
           stripe_session_id: session.id,
-          amount: session.amount_total,
-          currency: session.currency,
+          amount: paymentIntent.amount_received,
+          currency: paymentIntent.currency,
         });
 
-        console.log("✅ A1 完成：订单已 paid + payments 写入", orderId);
+        console.log("✅ A1 完成：orders + payments 写入", orderId);
       }
 
-      /**
-       * ======================
-       * A2：库存扣减（幂等）
-       * ======================
-       */
+      // ===== A2：库存锁定 =====
       if (order.inventory_locked !== true) {
         await supabase.rpc("increment_locked_qty", {
           p_date: order.date,
@@ -112,36 +95,6 @@ export default async function handler(req, res) {
           .eq("order_id", orderId);
 
         console.log("✅ A2 完成：库存 locked_qty +1", orderId);
-      } else {
-        console.log("🔁 A2 幂等命中，已跳过库存扣减", orderId);
-      }
-    }
-
-    /**
-     * =========================
-     * 下面是你原有逻辑，暂时保留
-     * =========================
-     */
-
-    if (event.type === "checkout.session.expired") {
-      const session = event.data.object;
-      const orderId = session.metadata?.order_id || null;
-
-      if (orderId) {
-        const { data: order } = await supabase
-          .from("orders")
-          .select("car_model_id, date")
-          .eq("order_id", orderId)
-          .maybeSingle();
-
-        if (order) {
-          await supabase.rpc("release_inventory_lock", {
-            p_car_model_id: order.car_model_id,
-            p_date: order.date,
-          });
-
-          console.log("⏰ 会话过期，库存锁已释放:", orderId);
-        }
       }
     }
 
@@ -151,3 +104,4 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
+
