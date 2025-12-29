@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-/* ✅【新增】和 Step3 完全一致的车型映射（只为显示） */
+// ✅ 和 Step3 完全一致的车型映射
 const carNameMap = {
   car1: "经济 5 座轿车",
   car2: "豪华 7 座阿尔法",
@@ -38,13 +38,8 @@ export default function Step5Confirmation({ onNext }) {
       });
   }, []);
 
-  if (loading) {
-    return <p>正在加载订单信息...</p>;
-  }
-
-  if (error) {
-    return <p className="text-red-600">{error}</p>;
-  }
+  if (loading) return <p>正在加载订单信息...</p>;
+  if (error) return <p className="text-red-600">{error}</p>;
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 py-8">
@@ -62,16 +57,13 @@ export default function Step5Confirmation({ onNext }) {
 
         <hr />
 
-        {/* ✅【唯一修改点】车型显示逻辑与 Step3 完全一致 */}
+        {/* ✅ 这里是唯一修改点 */}
         <p>
           <strong>车型：</strong>
           {carNameMap[order.car_model] || "未选择"}
         </p>
 
-        <p>
-          <strong>司机语言：</strong>
-          {order.driver_lang === "jp" ? "日文司机" : "中文司机"}
-        </p>
+        <p><strong>司机语言：</strong>{order.driver_lang === "jp" ? "日文司机" : "中文司机"}</p>
         <p><strong>包车时长：</strong>{order.duration} 小时</p>
         <p><strong>人数：</strong>{order.pax} 人</p>
         <p><strong>行李：</strong>{order.luggage} 件</p>
@@ -100,5 +92,6 @@ export default function Step5Confirmation({ onNext }) {
     </div>
   );
 }
+
 
 
