@@ -84,15 +84,15 @@ export default async function handler(req, res) {
           })
           .eq("order_id", orderId);
 
+        // ✅ 修复点：payments 表没有 status 字段
         await supabase.from("payments").insert({
           order_id: orderId,
           stripe_session_id: session.id,
           amount: session.amount_total,
           currency: session.currency,
-          status: "paid",
         });
 
-        console.log("✅ A1 完成：订单已 paid", orderId);
+        console.log("✅ A1 完成：订单已 paid + payments 写入", orderId);
       }
 
       /**
@@ -151,4 +151,3 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
-
