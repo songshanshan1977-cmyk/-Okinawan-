@@ -5,18 +5,20 @@ import { createClient } from "@supabase/supabase-js";
 
 export const config = { api: { bodyParser: false } };
 
+// Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2022-11-15",
 });
 
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+// Supabase（必须用 service role）
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// 读取 raw body
+// 读取 raw body（Stripe webhook 必须）
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -42,26 +44,36 @@ export default async function handler(req, res) {
   }
 
   try {
-    // =========================
-    // 主入口：checkout.session.completed
-    // =========================
+    /**
+     * ==================================================
+     * 主入口：checkout.session.completed
+     * ==================================================
+     */
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      // 兼容两种 key：order_id / orderId（避免前端写错导致查不到）
-      const orderId = session.metadata?.order_id || session.metadata?.orderId;
+      // 兼容两种 metadata 写法
+      const orderId =
+        session.metadata?.order_id || session.metadata?.orderId || null;
 
-      console.log("🧾 webhook received session:", session.id, "orderId:", orderId);
+      console.log("🧾 Webhook 命中 checkout.session.completed", {
+        session_id: session.id,
+        orderId,
+      });
 
       if (!orderId) {
-        console.warn("⚠️ checkout.session.completed 但 metadata 没有 order_id/orderId");
+        console.warn("⚠️ metadata 中没有 order_id，直接跳过");
         return res.json({ received: true });
       }
 
-      // 1) 读取订单（允许查不到，但不能崩）
+      /**
+       * 1️⃣ 读取订单（⚠️ 关键：字段名必须和真实表一致）
+       */
       const { data: order, error: orderErr } = await supabase
         .from("orders")
-        .select("order_id, status, car_model_id, date, inventory_locked")
+        .select(
+          "order_id, status, car_model_id, start_date, inventory_locked"
+        )
         .eq("order_id", orderId)
         .maybeSingle();
 
@@ -71,20 +83,23 @@ export default async function handler(req, res) {
       }
 
       if (!order) {
-        console.error("❌ 订单不存在（orders 没有这条 order_id）:", orderId);
-        // 不要抛错，让 Stripe 不要无限重试把你刷爆
+        console.error("❌ 订单不存在，order_id =", orderId);
+        // 不抛错，避免 Stripe 无限重试
         return res.json({ received: true, order_found: false });
       }
 
-      console.log("🧾 order found:", {
+      console.log("🧾 订单读取成功:", {
         order_id: order.order_id,
         status: order.status,
         inventory_locked: order.inventory_locked,
       });
 
-      // 2) A1：更新订单 paid + 写 payments（幂等：先看是否已有 payment）
-      //    注意：你的 payments 表没有 status 字段
-      const { data: existingPay, error: existErr } = await supabase
+      /**
+       * 2️⃣ A1：订单 paid + payments 写入（幂等）
+       */
+
+      // 查 payments 是否已存在（避免重复写）
+      const { data: existingPayment, error: existErr } = await supabase
         .from("payments")
         .select("id")
         .eq("order_id", orderId)
@@ -94,84 +109,113 @@ export default async function handler(req, res) {
         console.error("❌ 查询 payments 是否存在失败:", existErr);
       }
 
-      // 确保拿到金额：优先 amount_total，拿不到就去取 PaymentIntent
-      let amount = session.amount_total ?? null;
-      let currency = session.currency ?? null;
+      // 从 PaymentIntent 取真实金额（最稳）
+      let amount = null;
+      let currency = null;
 
       try {
-        if ((!amount || !currency) && session.payment_intent) {
-          const pi = await stripe.paymentIntents.retrieve(session.payment_intent);
-          amount = amount || pi.amount_received || pi.amount || null;
-          currency = currency || pi.currency || null;
+        if (session.payment_intent) {
+          const pi = await stripe.paymentIntents.retrieve(
+            session.payment_intent
+          );
+          amount = pi.amount_received ?? pi.amount ?? null;
+          currency = pi.currency ?? null;
         }
       } catch (e) {
-        console.error("❌ 读取 PaymentIntent 失败:", e?.message || e);
+        console.error("❌ 读取 PaymentIntent 失败:", e);
       }
 
+      // 更新订单状态（即使重复也安全）
       if (order.status !== "paid") {
         const { error: updErr } = await supabase
           .from("orders")
-          .update({ status: "paid", paid_at: new Date().toISOString() })
+          .update({
+            status: "paid",
+            paid_at: new Date().toISOString(),
+          })
           .eq("order_id", orderId);
 
-        if (updErr) console.error("❌ orders 更新 paid 失败:", updErr);
-        else console.log("✅ A1 orders -> paid:", orderId);
+        if (updErr) {
+          console.error("❌ orders 更新 paid 失败:", updErr);
+        } else {
+          console.log("✅ A1 orders.status = paid");
+        }
       } else {
-        console.log("🔁 A1：orders 已经 paid，跳过更新:", orderId);
+        console.log("🔁 A1 orders 已是 paid，跳过更新");
       }
 
-      if (!existingPay) {
+      // 写 payments（只写一次）
+      if (!existingPayment) {
         const { error: payErr } = await supabase.from("payments").insert({
           order_id: orderId,
           stripe_session_id: session.id,
-          amount: amount,       // int4
-          currency: currency,   // text
+          amount: amount,
+          currency: currency,
         });
 
-        if (payErr) console.error("❌ payments insert 失败:", payErr);
-        else console.log("✅ A1 payments 写入成功:", orderId);
+        if (payErr) {
+          console.error("❌ payments insert 失败:", payErr);
+        } else {
+          console.log("✅ A1 payments 写入成功");
+        }
       } else {
-        console.log("🔁 A1：payments 已存在，跳过写入:", orderId);
+        console.log("🔁 A1 payments 已存在，跳过写入");
       }
 
-      // 3) A2：库存锁定（幂等）
+      /**
+       * 3️⃣ A2：库存锁定（幂等）
+       */
       if (order.inventory_locked !== true) {
-        const { error: rpcErr } = await supabase.rpc("increment_locked_qty", {
-          p_date: order.date,
-          p_car_model_id: order.car_model_id,
-        });
+        const { error: rpcErr } = await supabase.rpc(
+          "increment_locked_qty",
+          {
+            p_date: order.start_date, // ⚠️ 必须是 start_date
+            p_car_model_id: order.car_model_id,
+          }
+        );
 
-        if (rpcErr) console.error("❌ A2 RPC increment_locked_qty 失败:", rpcErr);
-        else console.log("✅ A2 locked_qty +1:", orderId);
+        if (rpcErr) {
+          console.error("❌ A2 increment_locked_qty 失败:", rpcErr);
+        } else {
+          console.log("✅ A2 locked_qty +1");
+        }
 
         const { error: lockErr } = await supabase
           .from("orders")
           .update({ inventory_locked: true })
           .eq("order_id", orderId);
 
-        if (lockErr) console.error("❌ A2 orders.inventory_locked 更新失败:", lockErr);
-        else console.log("✅ A2 orders.inventory_locked = true:", orderId);
+        if (lockErr) {
+          console.error("❌ A2 inventory_locked 更新失败:", lockErr);
+        } else {
+          console.log("✅ A2 inventory_locked = true");
+        }
       } else {
-        console.log("🔁 A2：inventory_locked 已 true，跳过:", orderId);
+        console.log("🔁 A2 inventory 已锁，跳过");
       }
     }
 
-    // 你原有 expired 逻辑保留（按你之前写法）
+    /**
+     * ==================================================
+     * checkout.session.expired（保留）
+     * ==================================================
+     */
     if (event.type === "checkout.session.expired") {
       const session = event.data.object;
-      const orderId = session.metadata?.order_id || session.metadata?.orderId || null;
+      const orderId =
+        session.metadata?.order_id || session.metadata?.orderId || null;
 
       if (orderId) {
         const { data: order } = await supabase
           .from("orders")
-          .select("car_model_id, date")
+          .select("car_model_id, start_date")
           .eq("order_id", orderId)
           .maybeSingle();
 
         if (order) {
           await supabase.rpc("release_inventory_lock", {
             p_car_model_id: order.car_model_id,
-            p_date: order.date,
+            p_date: order.start_date,
           });
 
           console.log("⏰ 会话过期，库存锁已释放:", orderId);
