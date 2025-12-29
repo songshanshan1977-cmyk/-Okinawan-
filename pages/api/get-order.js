@@ -14,7 +14,12 @@ export default async function handler(req, res) {
 
   const { data, error } = await supabase
     .from("orders")
-    .select("*")
+    .select(`
+      *,
+      car_models (
+        name_zh
+      )
+    `)
     .eq("order_id", order_id)
     .single();
 
@@ -22,5 +27,13 @@ export default async function handler(req, res) {
     return res.status(404).json({ error: "订单不存在" });
   }
 
-  res.status(200).json(data);
+  // ✅ 展示字段统一：car_name_zh
+  const result = {
+    ...data,
+    car_name_zh: data.car_models?.name_zh || "",
+  };
+
+  delete result.car_models;
+
+  res.status(200).json(result);
 }
