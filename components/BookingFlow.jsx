@@ -21,8 +21,9 @@ function generateOrderId() {
 }
 
 export default function BookingFlow() {
-  // ✅ step 默认 1
-  const [step, setStep] = useState(1);
+  // ⭐ FIX 1：step 不给默认值
+  const [step, setStep] = useState(null);
+  const [ready, setReady] = useState(false); // ⭐ FIX 2：是否已解析 URL
 
   // ⭐ 表单数据（完整结构不动）
   const [formData, setFormData] = useState(() => ({
@@ -51,29 +52,26 @@ export default function BookingFlow() {
   }));
 
   // =====================================================
-  // ⭐⭐ 核心补丁：Stripe 回来时加载 Step + 订单数据 ⭐⭐
+  // ⭐ Stripe 回来时解析 step（核心修复点）
   // =====================================================
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     const params = new URLSearchParams(window.location.search);
-    const stepFromUrl = Number(params.get("step"));
+    const stepFromUrl = Number(params.get("step")) || 1;
     const orderIdFromUrl = params.get("order_id");
 
-    // ① 先处理 step
-    if ([1, 2, 3, 4, 5, 6].includes(stepFromUrl)) {
-      setStep(stepFromUrl);
-    }
+    setStep(stepFromUrl);
 
-    // ② 如果是 Stripe 回来的 Step5，用 order_id 拉订单
+    // Stripe 回 Step5，拉订单
     if (stepFromUrl === 5 && orderIdFromUrl) {
       fetch(`/api/get-order?order_id=${orderIdFromUrl}`)
         .then((res) => res.json())
         .then((data) => {
-          if (data?.order) {
+          if (data && !data.error) {
             setFormData((prev) => ({
               ...prev,
-              ...data.order,
+              ...data,
             }));
           }
         })
@@ -81,9 +79,11 @@ export default function BookingFlow() {
           console.error("❌ 加载订单失败：", err);
         });
     }
+
+    setReady(true); // ⭐ FIX 3：URL 解析完成
   }, []);
 
-  // ⭐ 更新数据（保持你原来的逻辑）
+  // ⭐ 更新数据（原逻辑不动）
   const updateFormData = (patch) => {
     setFormData((prev) => {
       const next = { ...prev, ...patch };
@@ -93,6 +93,9 @@ export default function BookingFlow() {
       return next;
     });
   };
+
+  // ⭐ FIX 4：URL 未解析前，不渲染任何 Step（防闪现）
+  if (!ready) return null;
 
   // ================= 渲染 =================
   return (
@@ -149,5 +152,4 @@ export default function BookingFlow() {
     </div>
   );
 }
-
 
