@@ -78,27 +78,28 @@ export default async function handler(req, res) {
        * ======================
        */
       if (order.status !== "paid") {
-        // 1️⃣ 更新 orders
+        // 1️⃣ 更新 orders（⚠️ 唯一修改点：加 status=pending 条件）
         await supabase
           .from("orders")
           .update({
             status: "paid",
             paid_at: new Date().toISOString(),
           })
-          .eq("order_id", orderId);
+          .eq("order_id", orderId)
+          .eq("status", "pending"); // ✅ A1-3 幂等关键
 
-        // 2️⃣ 写入 payments（⚠️ 关键修复点）
+        // 2️⃣ 写入 payments（保持不变）
         await supabase.from("payments").upsert(
           {
             order_id: orderId,
             stripe_session_id: session.id,
             amount: session.amount_total,
             currency: session.currency,
-            car_model_id: order.car_model_id, // ✅ 必填：解决 NOT NULL
-            paid: true,                       // ✅ 明确标记
+            car_model_id: order.car_model_id,
+            paid: true,
           },
           {
-            onConflict: "stripe_session_id", // ✅ 幂等关键：同一 session 只会有一条
+            onConflict: "stripe_session_id",
           }
         );
 
@@ -160,4 +161,3 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
-
