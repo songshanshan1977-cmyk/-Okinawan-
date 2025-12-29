@@ -88,14 +88,19 @@ export default async function handler(req, res) {
           .eq("order_id", orderId);
 
         // 2️⃣ 写入 payments（⚠️ 关键修复点）
-        await supabase.from("payments").insert({
-          order_id: orderId,
-          stripe_session_id: session.id,
-          amount: session.amount_total,
-          currency: session.currency,
-          car_model_id: order.car_model_id, // ✅ 必填：解决 NOT NULL
-          paid: true,                       // ✅ 明确标记
-        });
+        await supabase.from("payments").upsert(
+          {
+            order_id: orderId,
+            stripe_session_id: session.id,
+            amount: session.amount_total,
+            currency: session.currency,
+            car_model_id: order.car_model_id, // ✅ 必填：解决 NOT NULL
+            paid: true,                       // ✅ 明确标记
+          },
+          {
+            onConflict: "stripe_session_id", // ✅ 幂等关键：同一 session 只会有一条
+          }
+        );
 
         console.log("✅ A1 完成：订单已 paid + payments 写入", orderId);
       }
