@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 
-// ✅ 与 Step3 完全一致的车型映射
-const carNameMap = {
-  car1: "经济 5 座轿车",
-  car2: "豪华 7 座阿尔法",
-  car3: "舒适 10 座海狮",
+// ⭐ 仅新增：车型 ID → 名称 映射（与 Step3 语义一致）
+const carIdNameMap = {
+  "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济 5 座轿车",
+  "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
+  "453df662-d350-4ab9-b811-61ffcda40d4b": "舒适 10 座海狮",
 };
 
 export default function Step5Confirmation({ onNext }) {
@@ -38,19 +38,17 @@ export default function Step5Confirmation({ onNext }) {
       });
   }, []);
 
-  if (loading) return <p>正在加载订单信息...</p>;
-  if (error) return <p className="text-red-600">{error}</p>;
+  if (loading) {
+    return <p>正在加载订单信息...</p>;
+  }
 
-  // ⭐⭐⭐ 核心修复点（只这一段是新增）⭐⭐⭐
-  const carDisplayName =
-    carNameMap[order.car_model] ||
-    order.car_model || // 兜底：历史已写中文的订单
-    "未选择";
+  if (error) {
+    return <p className="text-red-600">{error}</p>;
+  }
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 py-8">
       <h2 className="text-2xl font-bold">✅ 押金支付成功</h2>
-
       <p>您的订单已确认，我们已为您锁定车辆，请核对以下信息：</p>
 
       <div className="border rounded-lg p-6 space-y-3">
@@ -64,8 +62,11 @@ export default function Step5Confirmation({ onNext }) {
 
         <hr />
 
-        {/* ✅ 修复后的车型显示 */}
-        <p><strong>车型：</strong>{carDisplayName}</p>
+        {/* ✅ 这里是唯一修复点 */}
+        <p>
+          <strong>车型：</strong>
+          {carIdNameMap[order.car_model_id] || "未选择"}
+        </p>
 
         <p><strong>司机语言：</strong>{order.driver_lang === "jp" ? "日文司机" : "中文司机"}</p>
         <p><strong>包车时长：</strong>{order.duration} 小时</p>
