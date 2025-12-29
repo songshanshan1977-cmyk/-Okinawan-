@@ -1,10 +1,17 @@
 import { useEffect, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+// ✅ 只用于“补车型名”，不影响其他逻辑
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+);
 
 export default function Step5Confirmation({ onNext }) {
   const [loading, setLoading] = useState(true);
   const [order, setOrder] = useState(null);
   const [error, setError] = useState("");
-  const [carName, setCarName] = useState(""); // ⭐ 只为车型显示
+  const [carName, setCarName] = useState(""); // ⭐ 新增：仅用于显示车型
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -18,7 +25,7 @@ export default function Step5Confirmation({ onNext }) {
 
     fetch(`/api/get-order?order_id=${orderId}`)
       .then((res) => res.json())
-      .then((data) => {
+      .then(async (data) => {
         if (!data || data.error) {
           setError(data?.error || "订单不存在");
           setLoading(false);
@@ -27,8 +34,27 @@ export default function Step5Confirmation({ onNext }) {
 
         setOrder(data);
 
-        // ✅ 统一来源：只用后端给的中文车型名
-        setCarName(data.car_name_zh || "");
+        // =========================
+        // ⭐ 仅在车型为空时补车型名
+        // =========================
+        if (!data.car_model && data.car_model_id) {
+          const { data: car, error: carErr } = await supabase
+            .from("cars")
+            .select("name_zh, name_jp")
+            .eq("id", data.car_model_id)
+            .single();
+
+          if (!carErr && car) {
+            setCarName(
+              data.driver_lang === "JP"
+                ? car.name_jp
+                : car.name_zh
+            );
+          }
+        } else {
+          // 原本有值就直接用
+          setCarName(data.car_model);
+        }
 
         setLoading(false);
       })
@@ -38,8 +64,13 @@ export default function Step5Confirmation({ onNext }) {
       });
   }, []);
 
-  if (loading) return <p>正在加载订单信息...</p>;
-  if (error) return <p className="text-red-600">{error}</p>;
+  if (loading) {
+    return <p>正在加载订单信息...</p>;
+  }
+
+  if (error) {
+    return <p className="text-red-600">{error}</p>;
+  }
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 py-8">
@@ -58,10 +89,13 @@ export default function Step5Confirmation({ onNext }) {
 
         <hr />
 
-        {/* ✅ 车型：从头到尾统一 */}
+        {/* ✅ 修复点：车型永远有值 */}
         <p><strong>车型：</strong>{carName || "—"}</p>
 
-        <p><strong>司机语言：</strong>{order.driver_lang === "jp" ? "日文司机" : "中文司机"}</p>
+        <p>
+          <strong>司机语言：</strong>
+          {order.driver_lang === "JP" ? "日文司机" : "中文司机"}
+        </p>
         <p><strong>包车时长：</strong>{order.duration} 小时</p>
         <p><strong>人数：</strong>{order.pax} 人</p>
         <p><strong>行李：</strong>{order.luggage} 件</p>
