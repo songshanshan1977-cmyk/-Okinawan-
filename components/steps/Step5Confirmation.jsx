@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient"; // ⭐ 新增：只为查车型名
 
 export default function Step5Confirmation({ onNext }) {
   const [loading, setLoading] = useState(true);
   const [order, setOrder] = useState(null);
   const [error, setError] = useState("");
+  const [carName, setCarName] = useState(""); // ⭐ 新增：车型名称
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -17,12 +19,32 @@ export default function Step5Confirmation({ onNext }) {
 
     fetch(`/api/get-order?order_id=${orderId}`)
       .then((res) => res.json())
-      .then((data) => {
+      .then(async (data) => {
         if (!data || data.error) {
           setError(data?.error || "订单不存在");
-        } else {
-          setOrder(data);
+          setLoading(false);
+          return;
         }
+
+        setOrder(data);
+
+        // ============================
+        // ⭐ 仅新增：用 car_model_id 查车型名
+        // ============================
+        if (data.car_model_id) {
+          const { data: car, error: carErr } = await supabase
+            .from("cars")
+            .select("name_zh, name_jp")
+            .eq("id", data.car_model_id)
+            .single();
+
+          if (!carErr && car) {
+            setCarName(
+              data.driver_lang === "jp" ? car.name_jp : car.name_zh
+            );
+          }
+        }
+
         setLoading(false);
       })
       .catch(() => {
@@ -56,7 +78,9 @@ export default function Step5Confirmation({ onNext }) {
 
         <hr />
 
-        <p><strong>车型：</strong>{order.car_model}</p>
+        {/* ⭐ 唯一修改点：车型显示 */}
+        <p><strong>车型：</strong>{carName || "—"}</p>
+
         <p><strong>司机语言：</strong>{order.driver_lang === "jp" ? "日文司机" : "中文司机"}</p>
         <p><strong>包车时长：</strong>{order.duration} 小时</p>
         <p><strong>人数：</strong>{order.pax} 人</p>
@@ -86,3 +110,4 @@ export default function Step5Confirmation({ onNext }) {
     </div>
   );
 }
+
