@@ -34,11 +34,13 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [driverLang, setDriverLang] = useState(initialData.driver_lang || "zh");
   const [duration, setDuration] = useState(initialData.duration || 8);
 
+  // 🔵 总价
   const [totalPrice, setTotalPrice] = useState(initialData.total_price || 0);
 
   const [pax, setPax] = useState(initialData.pax ?? 1);
   const [luggage, setLuggage] = useState(initialData.luggage ?? 0);
 
+  // 客户信息
   const [name, setName] = useState(initialData.name ?? "");
   const [phone, setPhone] = useState(initialData.phone ?? "");
   const [email, setEmail] = useState(initialData.email ?? "");
@@ -47,15 +49,11 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [error, setError] = useState("");
   const [stockHint, setStockHint] = useState(null);
 
-  // 🔴 FIX：记录是否“已确认无库存”
-  const [inventoryZero, setInventoryZero] = useState(false);
-
   /**
-   * 🔵 拉【单日价格】
+   * 🔵 拉单日价格
    */
   const fetchDailyPrice = async (modelKey, lang, hours) => {
     if (!modelKey) return null;
-
     const use_date = initialData.start_date;
     if (!use_date) return null;
 
@@ -74,21 +72,14 @@ export default function Step2({ initialData, onNext, onBack }) {
   };
 
   /**
-   * ✅ 车型 / 语言 / 时长 / 日期变化 → 重新算【总价】
+   * ✅ 车型 / 语言 / 时长变化 → 重算价格
    */
   useEffect(() => {
     let cancelled = false;
 
     const run = async () => {
       setError("");
-
       if (!carModel) return;
-
-      // 🔴 FIX：如果已经确认库存为 0，不报价格错误
-      if (inventoryZero) {
-        setTotalPrice(0);
-        return;
-      }
 
       const dailyPrice = await fetchDailyPrice(carModel, driverLang, duration);
       if (cancelled) return;
@@ -100,8 +91,8 @@ export default function Step2({ initialData, onNext, onBack }) {
         );
         setTotalPrice(dailyPrice * days);
       } else {
+        // ⭐ 唯一修改点：无库存时不再报“价格读取失败”
         setTotalPrice(0);
-        setError("价格读取失败，请稍后重试。");
       }
     };
 
@@ -115,7 +106,6 @@ export default function Step2({ initialData, onNext, onBack }) {
     duration,
     initialData.start_date,
     initialData.end_date,
-    inventoryZero, // 🔴 FIX
   ]);
 
   /**
@@ -146,7 +136,6 @@ export default function Step2({ initialData, onNext, onBack }) {
   const handleNext = async () => {
     setError("");
     setStockHint(null);
-    setInventoryZero(false); // 🔴 FIX：重置
 
     const today = formatDate(new Date());
     if (initialData.start_date === today) {
@@ -159,17 +148,16 @@ export default function Step2({ initialData, onNext, onBack }) {
     if (!phone.trim()) return setError("请输入电话（必填）");
     if (!email.trim()) return setError("请输入邮箱（必填）");
 
+    if (!totalPrice || totalPrice <= 0) {
+      setError("价格读取失败，请稍后重试。");
+      return;
+    }
+
     const inv = await checkInventory();
     setStockHint(inv.total_stock);
 
     if (!inv.ok) {
-      setInventoryZero(true); // 🔴 FIX：明确标记“无库存”
       setError("该日期该车型已无库存，请选择其他车型或日期。");
-      return;
-    }
-
-    if (!totalPrice || totalPrice <= 0) {
-      setError("价格读取失败，请稍后重试。");
       return;
     }
 
@@ -195,15 +183,11 @@ export default function Step2({ initialData, onNext, onBack }) {
         Step2：选择车型 & 服务
       </h2>
 
-      {/* 车型 */}
       <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
         {["car1", "car2", "car3"].map((m) => (
           <button
             key={m}
-            onClick={() => {
-              setCarModel(m);
-              setInventoryZero(false); // 🔴 FIX：切换车型时清空库存状态
-            }}
+            onClick={() => setCarModel(m)}
             style={{
               padding: 12,
               borderRadius: 10,
@@ -220,52 +204,6 @@ export default function Step2({ initialData, onNext, onBack }) {
             </div>
           </button>
         ))}
-      </div>
-
-      {/* 参数 */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        <label>
-          司机语言：
-          <select value={driverLang} onChange={(e) => setDriverLang(e.target.value)}>
-            <option value="zh">中文司机</option>
-            <option value="jp">日文司机</option>
-          </select>
-        </label>
-
-        <label>
-          包车时长：
-          <select value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
-            <option value={8}>8 小时</option>
-            <option value={10}>10 小时</option>
-          </select>
-        </label>
-
-        <label>
-          人数：
-          <select value={pax} onChange={(e) => setPax(e.target.value)}>
-            {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
-              <option key={n} value={n}>{n}</option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          行李：
-          <select value={luggage} onChange={(e) => setLuggage(e.target.value)}>
-            {Array.from({ length: 11 }, (_, i) => i).map((n) => (
-              <option key={n} value={n}>{n}</option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      {/* 客户信息 */}
-      <div style={{ marginTop: 16, border: "1px solid #eee", padding: 12, borderRadius: 10 }}>
-        <strong>客户信息</strong>
-        <div>姓名（必填）：<input value={name} onChange={(e) => setName(e.target.value)} /></div>
-        <div>电话（必填）：<input value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
-        <div>邮箱（必填）：<input value={email} onChange={(e) => setEmail(e.target.value)} /></div>
-        <div>备注（可选）：<input value={remark} onChange={(e) => setRemark(e.target.value)} /></div>
       </div>
 
       <div style={{ marginTop: 12 }}>
@@ -286,6 +224,7 @@ export default function Step2({ initialData, onNext, onBack }) {
     </div>
   );
 }
+
 
 
 
