@@ -62,7 +62,7 @@ export default async function handler(req, res) {
       const { data: order, error: orderErr } = await supabase
         .from("orders")
         .select(
-          "id, order_id, status, car_model_id, start_date, inventory_locked"
+          "id, order_id, status, car_model_id, start_date, end_date, inventory_locked"
         )
         .eq("order_id", orderId)
         .single();
@@ -112,9 +112,10 @@ export default async function handler(req, res) {
        * ======================
        */
       if (order.inventory_locked !== true) {
-        await supabase.rpc("increment_locked_qty", {
-          p_date: order.start_date,
+        await supabase.rpc("lock_inventory_range", {
           p_car_model_id: order.car_model_id,
+          p_start_date: order.start_date,
+          p_end_date: order.end_date,
         });
 
         await supabase
@@ -122,7 +123,7 @@ export default async function handler(req, res) {
           .update({ inventory_locked: true })
           .eq("order_id", orderId);
 
-        console.log("✅ A2 完成：库存 locked_qty +1", orderId);
+        console.log("✅ A2 完成：多日库存已逐日锁定", orderId);
       } else {
         console.log("🔁 A2 幂等命中，已跳过库存扣减", orderId);
       }
