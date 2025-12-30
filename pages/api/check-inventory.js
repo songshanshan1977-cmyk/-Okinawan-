@@ -17,12 +17,6 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false });
   }
 
-  /**
-   * ✅ 多日库存校验（关键修复）
-   * - 查询区间内所有日期
-   * - 任意一天 remaining_qty_calc <= 0 → 不可下单
-   */
-
   const { data, error } = await supabase
     .from("inventory_rules_v")
     .select("date, remaining_qty_calc")
@@ -35,20 +29,12 @@ export default async function handler(req, res) {
     return res.status(500).json({ ok: false });
   }
 
-  // 🔴 只要有一天没库存，直接拦
-  const hasNoStockDay = data.some(
-    (row) => (row.remaining_qty_calc ?? 0) <= 0
-  );
-
-  if (hasNoStockDay) {
-    return res.json({
-      ok: false,
-      reason: "DATE_RANGE_NO_STOCK",
-    });
-  }
+  // ⭐ 只要有一天 remaining <= 0，就直接拒绝
+  const hasNoStock = data.some(d => (d.remaining_qty_calc ?? 0) <= 0);
 
   return res.json({
-    ok: true,
+    ok: !hasNoStock,
+    days: data,
   });
 }
 
