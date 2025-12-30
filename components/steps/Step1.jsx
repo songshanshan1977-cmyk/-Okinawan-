@@ -258,6 +258,20 @@ export default function Step1({ initialData, onNext }) {
         </div>
       </div>
 
+      {/* ===== ⭐ 新增：日历颜色/规则说明（仅展示，不改逻辑） ===== */}
+      <div style={{ maxWidth: 760, margin: "0 auto", textAlign: "center" }}>
+        <div className="text-sm text-gray-600 mt-2 space-y-1">
+          <div>🟢 Green: In stock for the same day, reservations are available.</div>
+          <div>🔴 Red: Fully booked for the day, no reservations available.</div>
+          <div>🔵 Blue: Currently selected travel dates</div>
+        </div>
+
+        <div className="text-orange-600 mt-2">
+          ⚠️ Multi-day car rentals require availability for all dates.
+        </div>
+      </div>
+      {/* ===== 新增结束 ===== */}
+
       <div className="fieldRow">
         <div className="field">
           <label style={{ display: "block", marginBottom: 8 }}>
@@ -292,5 +306,4 @@ export default function Step1({ initialData, onNext }) {
     </div>
   );
 }
-
 
