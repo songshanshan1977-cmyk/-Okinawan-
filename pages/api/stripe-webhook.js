@@ -121,7 +121,16 @@ export default async function handler(req, res) {
           .update({ inventory_locked: true })
           .eq("order_id", orderId);
 
-        console.log("✅ A2 完成：库存 locked_qty +1", orderId);
+        // ⭐ 仅此一行改动：加日志（不改任何逻辑）
+        console.log(
+          "✅ A2 完成：库存已锁定",
+          {
+            order_id: orderId,
+            car_model_id: order.car_model_id,
+            start_date: order.start_date,
+            end_date: order.end_date || order.start_date,
+          }
+        );
       } else {
         console.log("🔁 A2 幂等命中，已跳过库存扣减", orderId);
       }
