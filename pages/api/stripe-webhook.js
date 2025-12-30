@@ -78,7 +78,6 @@ export default async function handler(req, res) {
        * ======================
        */
       if (order.status !== "paid") {
-        // 1️⃣ 更新 orders（⚠️ 唯一修改点：加 status=pending 条件）
         await supabase
           .from("orders")
           .update({
@@ -86,9 +85,8 @@ export default async function handler(req, res) {
             paid_at: new Date().toISOString(),
           })
           .eq("order_id", orderId)
-          .eq("status", "pending"); // ✅ A1-3 幂等关键
+          .eq("status", "pending");
 
-        // 2️⃣ 写入 payments（保持不变）
         await supabase.from("payments").upsert(
           {
             order_id: orderId,
@@ -112,10 +110,10 @@ export default async function handler(req, res) {
        * ======================
        */
       if (order.inventory_locked !== true) {
-        await supabase.rpc("lock_inventory_range", {
+        await supabase.rpc("increment_locked_qty", {
+          p_date: order.start_date,
+          p_end_date: order.end_date || order.start_date,
           p_car_model_id: order.car_model_id,
-          p_start_date: order.start_date,
-          p_end_date: order.end_date,
         });
 
         await supabase
@@ -123,7 +121,7 @@ export default async function handler(req, res) {
           .update({ inventory_locked: true })
           .eq("order_id", orderId);
 
-        console.log("✅ A2 完成：多日库存已逐日锁定", orderId);
+        console.log("✅ A2 完成：库存 locked_qty +1", orderId);
       } else {
         console.log("🔁 A2 幂等命中，已跳过库存扣减", orderId);
       }
@@ -162,3 +160,4 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
+
