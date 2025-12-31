@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-// ⭐ 仅新增：车型 ID → 名称 映射（与 Step3 语义一致）
+// ⭐ 车型 ID → 名称 映射（与 Step3 / 邮件一致）
 const carIdNameMap = {
   "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济 5 座轿车",
   "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
@@ -38,13 +38,28 @@ export default function Step5Confirmation({ onNext }) {
       });
   }, []);
 
-  if (loading) {
-    return <p>正在加载订单信息...</p>;
-  }
+  if (loading) return <p>正在加载订单信息...</p>;
+  if (error) return <p className="text-red-600">{error}</p>;
 
-  if (error) {
-    return <p className="text-red-600">{error}</p>;
-  }
+  // ===== B3-2：统一日期展示规则 =====
+  const isMultiDay =
+    order.end_date && order.end_date !== order.start_date;
+
+  const days = isMultiDay
+    ? Math.floor(
+        (new Date(order.end_date) - new Date(order.start_date)) /
+          (1000 * 60 * 60 * 24)
+      ) + 1
+    : 1;
+
+  const dateText = isMultiDay
+    ? `${order.start_date} ～ ${order.end_date}（共 ${days} 天）`
+    : order.start_date;
+
+  const balance = Math.max(
+    (order.total_price || 0) - 500,
+    0
+  );
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 py-8">
@@ -52,40 +67,75 @@ export default function Step5Confirmation({ onNext }) {
       <p>您的订单已确认，我们已为您锁定车辆，请核对以下信息：</p>
 
       <div className="border rounded-lg p-6 space-y-3">
-        <p><strong>订单编号：</strong>{order.order_id}</p>
+        <p>
+          <strong>订单编号：</strong>
+          {order.order_id}
+        </p>
 
         <hr />
 
-        <p><strong>用车日期：</strong>{order.start_date} → {order.end_date}</p>
-        <p><strong>出发酒店：</strong>{order.departure_hotel}</p>
-        <p><strong>回程酒店：</strong>{order.end_hotel}</p>
+        <p>
+          <strong>用车日期：</strong>
+          {dateText}
+        </p>
+        <p>
+          <strong>出发酒店：</strong>
+          {order.departure_hotel}
+        </p>
+        <p>
+          <strong>回程酒店：</strong>
+          {order.end_hotel}
+        </p>
 
         <hr />
 
-        {/* ✅ 这里是唯一修复点 */}
         <p>
           <strong>车型：</strong>
           {carIdNameMap[order.car_model_id] || "未选择"}
         </p>
-
-        <p><strong>司机语言：</strong>{order.driver_lang === "jp" ? "日文司机" : "中文司机"}</p>
-        <p><strong>包车时长：</strong>{order.duration} 小时</p>
-        <p><strong>人数：</strong>{order.pax} 人</p>
-        <p><strong>行李：</strong>{order.luggage} 件</p>
-
-        <hr />
-
-        <p><strong>包车总费用：</strong>¥{order.total_price}</p>
-        <p className="text-green-600 font-bold">✔ 已支付押金：¥500</p>
-        <p className="text-orange-600">
-          ⭐ 尾款需在用车当日支付给司机：¥{order.total_price - 500}
+        <p>
+          <strong>司机语言：</strong>
+          {order.driver_lang === "jp" ? "日文司机" : "中文司机"}
+        </p>
+        <p>
+          <strong>包车时长：</strong>
+          {order.duration} 小时
+        </p>
+        <p>
+          <strong>人数：</strong>
+          {order.pax} 人
+        </p>
+        <p>
+          <strong>行李：</strong>
+          {order.luggage} 件
         </p>
 
         <hr />
 
-        <p><strong>联系人：</strong>{order.name}</p>
-        <p><strong>电话：</strong>{order.phone}</p>
-        <p><strong>邮箱：</strong>{order.email || "—"}</p>
+        <p>
+          <strong>包车总费用：</strong>¥{order.total_price}
+        </p>
+        <p className="text-green-600 font-bold">
+          ✔ 已支付押金：¥500
+        </p>
+        <p className="text-orange-600">
+          ⭐ 尾款（用车当日支付司机）：¥{balance}
+        </p>
+
+        <hr />
+
+        <p>
+          <strong>联系人：</strong>
+          {order.name}
+        </p>
+        <p>
+          <strong>电话：</strong>
+          {order.phone}
+        </p>
+        <p>
+          <strong>邮箱：</strong>
+          {order.email || "—"}
+        </p>
       </div>
 
       <button
@@ -97,5 +147,6 @@ export default function Step5Confirmation({ onNext }) {
     </div>
   );
 }
+
 
 
