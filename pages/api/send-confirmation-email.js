@@ -77,9 +77,9 @@ export default async function handler(req, res) {
       </div>
     `;
 
-    // 4️⃣ 发送邮件（⭐ 关键：from 必须是已验证域名）
+    // 4️⃣ 发送邮件（⭐ 仅修正 from，改为 ASCII 域名）
     await resend.emails.send({
-      from: "HonestOki <no-reply@华人okinawa.com>",
+      from: "HonestOki <no-reply@xn--okinawa-n14kh45a.com>",
       to: order.email,
       subject: `您的冲绳包车订单确认（${order.order_id}）`,
       html,
@@ -99,3 +99,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
+
