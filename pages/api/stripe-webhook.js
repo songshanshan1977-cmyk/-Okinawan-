@@ -86,7 +86,9 @@ export default async function handler(req, res) {
        * A1：标记订单已支付 + 写 payments
        * ======================
        */
-      if (order.status !== "paid") {
+      const wasPaid = order.status === "paid"; // ⭐ 新增：记录“之前是否已 paid”
+
+      if (!wasPaid) {
         await supabase
           .from("orders")
           .update({
@@ -142,10 +144,10 @@ export default async function handler(req, res) {
 
       /**
        * ======================
-       * B3：确认邮件（幂等）
+       * B3：确认邮件（只在「第一次 paid」时触发）
        * ======================
        */
-      if (order.email_status !== "sent") {
+      if (!wasPaid && order.email_status !== "sent") {
         try {
           const baseUrl =
             process.env.NEXT_PUBLIC_SITE_URL ||
@@ -166,7 +168,7 @@ export default async function handler(req, res) {
             throw new Error(JSON.stringify(result));
           }
 
-          console.log("📧 B3 确认邮件触发成功:", orderId);
+          console.log("📧 B3 确认邮件触发成功（首次 paid）:", orderId);
         } catch (mailErr) {
           console.error(
             "❌ B3 邮件发送失败",
@@ -175,7 +177,7 @@ export default async function handler(req, res) {
           );
         }
       } else {
-        console.log("🔁 B3 幂等命中，邮件已发送过", orderId);
+        console.log("🔁 B3 跳过：非首次 paid 或邮件已处理", orderId);
       }
     }
 
