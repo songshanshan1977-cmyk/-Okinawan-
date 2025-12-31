@@ -42,13 +42,14 @@ export default async function handler(req, res) {
       0
     );
 
-    // 3️⃣ 邮件 HTML 内容
+    // 3️⃣ 邮件 HTML（✅ 已删除 HonestOki，仅保留「华人 Okinawa 包车服务」）
+    //    ✅ 已加入 WhatsApp / 微信 二维码（占位 URL，换图即可）
     const html = `
-      <div style="font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px;">
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 0 auto;">
         <h2>冲绳包车服务确认书</h2>
 
         <p>尊敬的 ${order.name} 您好，</p>
-        <p>您已成功预订 <strong>华人 Okinawa · HonestOki</strong> 包车服务，订单详情如下：</p>
+        <p>您已成功预订 <strong>华人 Okinawa 包车服务</strong>，订单详情如下：</p>
 
         <h3>📄 订单信息</h3>
         <ul>
@@ -65,21 +66,45 @@ export default async function handler(req, res) {
           <li><strong>尾款（用车当日支付司机）：</strong> ¥${balance}</li>
         </ul>
 
-        <p style="margin-top:16px;">
-          📩 本邮件为系统自动发送，请勿直接回复。<br/>
-          📞 如需修改订单或紧急联系，请通过 WhatsApp / 微信联系客服。
+        <h3>📞 联系客服</h3>
+        <p>如需修改订单或紧急联系，请通过以下方式联系我们：</p>
+
+        <div style="display:flex; gap:16px; align-items:flex-start;">
+          <div style="text-align:center;">
+            <p style="margin-bottom:6px;">WhatsApp</p>
+            <img
+              src="https://YOUR_DOMAIN/whatsapp-qr.png"
+              alt="WhatsApp QR"
+              width="120"
+              style="border:1px solid #eee;"
+            />
+          </div>
+
+          <div style="text-align:center;">
+            <p style="margin-bottom:6px;">微信</p>
+            <img
+              src="https://YOUR_DOMAIN/wechat-qr.png"
+              alt="WeChat QR"
+              width="120"
+              style="border:1px solid #eee;"
+            />
+          </div>
+        </div>
+
+        <p style="margin-top:16px; color:#666;">
+          📩 本邮件为系统自动发送，请勿直接回复。
         </p>
 
         <p style="margin-top:24px;">
           —— <br/>
-          华人 Okinawa · HonestOki 包车服务团队
+          华人 Okinawa 包车服务团队
         </p>
       </div>
     `;
 
-    // 4️⃣ 发送邮件（⭐ 仅修正 from，改为 ASCII 域名）
+    // 4️⃣ 发送邮件（✅ from 使用 ASCII 域名，避免 422）
     await resend.emails.send({
-      from: "HonestOki <no-reply@xn--okinawa-n14kh45a.com>",
+      from: "Huaren Okinawa <no-reply@huarenokinawa.com>",
       to: order.email,
       subject: `您的冲绳包车订单确认（${order.order_id}）`,
       html,
