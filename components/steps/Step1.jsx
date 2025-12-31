@@ -82,6 +82,7 @@ export default function Step1({ initialData, onNext }) {
 
     const start0 = new Date(start);
     start0.setHours(0, 0, 0, 0);
+
     if (start0 < tomorrow) {
       setError("请选择明天或之后的日期");
       return;
@@ -99,122 +100,142 @@ export default function Step1({ initialData, onNext }) {
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "24px 16px" }}>
       <style>{`
-        .calWrap{
-          display:flex;
-          gap:56px;
-          justify-content:center;
+        .calWrap {
+          display: flex;
+          gap: 56px;
+          justify-content: center;
           margin: 22px 0 28px;
         }
 
-        /* ⭐ 关键修改点：左右留白更均匀 */
-        .calBox{
-          width:360px;
-          padding:12px;
-          box-sizing:border-box;
-          border:1px solid #ddd;
-          background:#fff;
-          border-radius:8px;
+        .calBox {
+          width: 360px;
+          padding: 12px;
+          box-sizing: border-box;
+          border: 1px solid #ddd;
+          background: #fff;
+          border-radius: 8px;
         }
 
-        .calTitle{
-          text-align:center;
-          font-weight:700;
-          font-size:22px;
-          margin-bottom:10px;
+        .calTitle {
+          text-align: center;
+          font-weight: 700;
+          font-size: 22px;
+          margin-bottom: 10px;
         }
 
-        .fieldRow{
-          display:flex;
-          gap:56px;
-          justify-content:center;
+        .fieldRow {
+          display: flex;
+          gap: 56px;
+          justify-content: center;
           margin-top: 12px;
         }
 
-        .field{ width:520px; }
-
-        .input{
-          width:100%;
-          padding:14px 12px;
-          font-size:16px;
-          border:1px solid #e5e5e5;
-          border-radius:6px;
-          outline:none;
+        .field {
+          width: 520px;
         }
 
-        .btnRow{
-          display:flex;
-          justify-content:flex-end;
+        .input {
+          width: 100%;
+          padding: 14px 12px;
+          font-size: 16px;
+          border: 1px solid #e5e5e5;
+          border-radius: 6px;
+          outline: none;
+        }
+
+        .btnRow {
+          display: flex;
+          justify-content: flex-end;
           margin-top: 18px;
         }
 
-        .btn{
-          background:#3f6df6;
-          color:#fff;
-          border:none;
-          padding:14px 34px;
-          font-size:18px;
-          border-radius:8px;
-          cursor:pointer;
+        .btn {
+          background: #3f6df6;
+          color: #fff;
+          border: none;
+          padding: 14px 34px;
+          font-size: 18px;
+          border-radius: 8px;
+          cursor: pointer;
         }
 
-        .err{
-          color:#d00;
+        .err {
+          color: #d00;
           margin-top: 12px;
-          text-align:center;
+          text-align: center;
         }
 
         /* ===== DayPicker 视觉优化 ===== */
 
-        .rdp{ margin:0; }
-        .rdp-month{ width:100%; }
-        .rdp-table{ margin:0 auto; } /* ⭐ 居中关键 */
-
-        .rdp-caption{
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          padding:10px 12px;
-          background:#f3f3f3;
-          border-bottom:1px solid #ddd;
+        .rdp {
+          margin: 0;
         }
 
-        .rdp-caption_label{ font-weight:700; }
-
-        .rdp-nav button{
-          border:1px solid #bbb;
-          background:#fff;
-          width:30px;
-          height:30px;
-          border-radius:6px;
-          cursor:pointer;
+        .rdp-month {
+          width: 100%;
         }
 
-        .rdp-head{ border-bottom:1px solid #ddd; }
-        .rdp-head_cell{ font-weight:700; padding:10px 0; }
-
-        .rdp-cell{ padding:4px; }
-
-        .rdp-day{
-          width:40px;
-          height:40px;
-          border:1px solid #e6e6e6;
-          border-radius:6px;
+        .rdp-table {
+          margin: 0 auto;
         }
 
-        .rdp-day_selected{
-          background:#fff3a0 !important;
-          color:#000 !important;
-          font-weight:700;
+        .rdp-caption {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 10px 12px;
+          background: #f3f3f3;
+          border-bottom: 1px solid #ddd;
         }
 
-        .rdp-day_disabled{
-          color:#bbb !important;
+        .rdp-caption_label {
+          font-weight: 700;
+        }
+
+        .rdp-nav button {
+          border: 1px solid #bbb;
+          background: #fff;
+          width: 30px;
+          height: 30px;
+          border-radius: 6px;
+          cursor: pointer;
+        }
+
+        .rdp-head {
+          border-bottom: 1px solid #ddd;
+        }
+
+        .rdp-head_cell {
+          font-weight: 700;
+          padding: 10px 0;
+        }
+
+        .rdp-cell {
+          padding: 4px;
+        }
+
+        .rdp-day {
+          width: 40px;
+          height: 40px;
+          border: 1px solid #e6e6e6;
+          border-radius: 6px;
+        }
+
+        .rdp-day_selected {
+          background: #fff3a0 !important;
+          color: #000 !important;
+          font-weight: 700;
+        }
+
+        .rdp-day_disabled {
+          color: #bbb !important;
         }
       `}</style>
 
       <h2 style={{ fontSize: 34, textAlign: "center", marginBottom: 8 }}>
         立即预订
       </h2>
+
       <p style={{ textAlign: "center", color: "#666", marginBottom: 12 }}>
         请选择您期望的包车开始和结束日期
       </p>
@@ -258,20 +279,6 @@ export default function Step1({ initialData, onNext }) {
         </div>
       </div>
 
-      {/* ===== ⭐ 新增：日历颜色/规则说明（仅展示，不改逻辑） ===== */}
-      <div style={{ maxWidth: 760, margin: "0 auto", textAlign: "center" }}>
-        <div className="text-sm text-gray-600 mt-2 space-y-1">
-          <div>🟢 Green: In stock for the same day, reservations are available.</div>
-          <div>🔴 Red: Fully booked for the day, no reservations available.</div>
-          <div>🔵 Blue: Currently selected travel dates</div>
-        </div>
-
-        <div className="text-orange-600 mt-2">
-          ⚠️ Multi-day car rentals require availability for all dates.
-        </div>
-      </div>
-      {/* ===== 新增结束 ===== */}
-
       <div className="fieldRow">
         <div className="field">
           <label style={{ display: "block", marginBottom: 8 }}>
@@ -306,4 +313,3 @@ export default function Step1({ initialData, onNext }) {
     </div>
   );
 }
-
