@@ -3,10 +3,10 @@
 import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
 
-// ⭐ Resend 客户端
+// ⭐ Resend
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// ⭐ Supabase Service Role（仅在 Server 使用）
+// ⭐ Supabase（Service Role）
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "order_id missing" });
     }
 
-    // 1️⃣ 获取订单
+    // 1️⃣ 读取订单
     const { data: order, error } = await supabase
       .from("orders")
       .select("*")
@@ -42,9 +42,15 @@ export default async function handler(req, res) {
       0
     );
 
-    // 3️⃣ 邮件 HTML 内容（最终版）
+    // 3️⃣ 用车日期显示（支持多日）
+    const dateText =
+      order.end_date && order.end_date !== order.start_date
+        ? `${order.start_date} → ${order.end_date}`
+        : order.start_date;
+
+    // 4️⃣ 邮件 HTML
     const html = `
-      <div style="font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 0 auto;">
+      <div style="font-family: Arial, sans-serif; line-height:1.6; max-width:600px; margin:0 auto;">
         <h2>冲绳包车服务确认书</h2>
 
         <p>尊敬的 ${order.name} 您好，</p>
@@ -53,9 +59,9 @@ export default async function handler(req, res) {
         <h3>📄 订单信息</h3>
         <ul>
           <li><strong>订单编号：</strong> ${order.order_id}</li>
-          <li><strong>用车日期：</strong> ${order.start_date}${order.end_date ? " → " + order.end_date : ""}</li>
-          <li><strong>出发酒店：</strong> ${order.departure_hotel}</li>
-          <li><strong>结束酒店：</strong> ${order.end_hotel}</li>
+          <li><strong>用车日期：</strong> ${dateText}</li>
+          <li><strong>出发酒店：</strong> ${order.departure_hotel || "-"}</li>
+          <li><strong>结束酒店：</strong> ${order.end_hotel || "-"}</li>
         </ul>
 
         <h3>💰 费用明细</h3>
@@ -68,22 +74,20 @@ export default async function handler(req, res) {
         <h3>📞 联系客服</h3>
         <p>如需修改订单或紧急联系，请通过以下方式联系我们：</p>
 
-        <div style="display:flex; gap:16px; align-items:flex-start;">
+        <div style="display:flex; gap:16px; margin-top:12px;">
           <div style="text-align:center;">
-            <p style="margin-bottom:6px;">WhatsApp</p>
+            <div>WhatsApp</div>
             <img
               src="https://okinawan.vercel.app/w2.png"
-              alt="WhatsApp QR"
               width="120"
               style="border:1px solid #eee;"
             />
           </div>
 
           <div style="text-align:center;">
-            <p style="margin-bottom:6px;">微信</p>
+            <div>微信</div>
             <img
               src="https://okinawan.vercel.app/w1.png.png"
-              alt="WeChat QR"
               width="120"
               style="border:1px solid #eee;"
             />
@@ -101,21 +105,19 @@ export default async function handler(req, res) {
       </div>
     `;
 
-    // 4️⃣ 发送邮件（已验证域名）
+    // 5️⃣ 发送邮件（⭐ 用已验证域名）
     await resend.emails.send({
-      from: "Huaren Okinawa <no-reply@huarenokinawa.com>",
+      from: "华人 Okinawa <no-reply@xn--okinawa-n14kh45a.com>",
       to: order.email,
       subject: `您的冲绳包车订单确认（${order.order_id}）`,
       html,
     });
 
-    // 5️⃣ 更新订单邮件状态
+    // 6️⃣ 更新邮件状态
     await supabase
       .from("orders")
       .update({ email_status: "sent" })
       .eq("order_id", order_id);
-
-    console.log("📧 确认邮件已发送：", order.order_id);
 
     return res.status(200).json({ ok: true });
   } catch (err) {
