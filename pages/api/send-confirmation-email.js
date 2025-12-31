@@ -42,7 +42,7 @@ export default async function handler(req, res) {
       0
     );
 
-    // 3️⃣ 邮件 HTML 内容（仅客户确认邮件）
+    // 3️⃣ 邮件 HTML 内容（最终版）
     const html = `
       <div style="font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 0 auto;">
         <h2>冲绳包车服务确认书</h2>
@@ -53,7 +53,7 @@ export default async function handler(req, res) {
         <h3>📄 订单信息</h3>
         <ul>
           <li><strong>订单编号：</strong> ${order.order_id}</li>
-          <li><strong>用车日期：</strong> ${order.start_date}</li>
+          <li><strong>用车日期：</strong> ${order.start_date}${order.end_date ? " → " + order.end_date : ""}</li>
           <li><strong>出发酒店：</strong> ${order.departure_hotel}</li>
           <li><strong>结束酒店：</strong> ${order.end_hotel}</li>
         </ul>
@@ -64,6 +64,31 @@ export default async function handler(req, res) {
           <li><strong>已支付押金：</strong> ¥${order.deposit_amount}</li>
           <li><strong>尾款（用车当日支付司机）：</strong> ¥${balance}</li>
         </ul>
+
+        <h3>📞 联系客服</h3>
+        <p>如需修改订单或紧急联系，请通过以下方式联系我们：</p>
+
+        <div style="display:flex; gap:16px; align-items:flex-start;">
+          <div style="text-align:center;">
+            <p style="margin-bottom:6px;">WhatsApp</p>
+            <img
+              src="https://okinawan.vercel.app/w2.png"
+              alt="WhatsApp QR"
+              width="120"
+              style="border:1px solid #eee;"
+            />
+          </div>
+
+          <div style="text-align:center;">
+            <p style="margin-bottom:6px;">微信</p>
+            <img
+              src="https://okinawan.vercel.app/w1.png.png"
+              alt="WeChat QR"
+              width="120"
+              style="border:1px solid #eee;"
+            />
+          </div>
+        </div>
 
         <p style="margin-top:16px; color:#666;">
           📩 本邮件为系统自动发送，请勿直接回复。
@@ -76,9 +101,9 @@ export default async function handler(req, res) {
       </div>
     `;
 
-    // 4️⃣ 发送邮件（使用已验证域名）
+    // 4️⃣ 发送邮件（已验证域名）
     await resend.emails.send({
-      from: "华人 Okinawa 包车服务 <no-reply@xn--okinawa-n14kh45a.com>",
+      from: "Huaren Okinawa <no-reply@huarenokinawa.com>",
       to: order.email,
       subject: `您的冲绳包车订单确认（${order.order_id}）`,
       html,
