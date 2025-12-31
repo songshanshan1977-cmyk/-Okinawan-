@@ -44,7 +44,7 @@ export default async function handler(req, res) {
   try {
     /**
      * ==================================================
-     * A1 + A2 + B3 主入口：checkout.session.completed
+     * A1 + A2 + B3 主入口（唯一）：checkout.session.completed
      * ==================================================
      */
     if (event.type === "checkout.session.completed") {
@@ -62,7 +62,16 @@ export default async function handler(req, res) {
       const { data: order, error: orderErr } = await supabase
         .from("orders")
         .select(
-          "id, order_id, status, car_model_id, start_date, end_date, inventory_locked, email_status"
+          `
+          id,
+          order_id,
+          status,
+          car_model_id,
+          start_date,
+          end_date,
+          inventory_locked,
+          email_status
+        `
         )
         .eq("order_id", orderId)
         .single();
@@ -133,19 +142,29 @@ export default async function handler(req, res) {
 
       /**
        * ======================
-       * B3：发送确认邮件（幂等）
+       * B3：确认邮件（幂等）
        * ======================
        */
       if (order.email_status !== "sent") {
         try {
-          await fetch(
-            "https://okinawan.vercel.app/api/send-confirmation-email",
+          const baseUrl =
+            process.env.NEXT_PUBLIC_SITE_URL ||
+            "https://okinawan.vercel.app";
+
+          const resp = await fetch(
+            `${baseUrl}/api/send-confirmation-email`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ order_id: orderId }),
             }
           );
+
+          const result = await resp.json();
+
+          if (!resp.ok) {
+            throw new Error(JSON.stringify(result));
+          }
 
           console.log("📧 B3 确认邮件触发成功:", orderId);
         } catch (mailErr) {
@@ -193,3 +212,4 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
+
