@@ -62,7 +62,7 @@ export default async function handler(req, res) {
       const { data: order, error: orderErr } = await supabase
         .from("orders")
         .select(
-          "id, order_id, status, car_model_id, start_date, end_date, inventory_locked"
+          "id, order_id, status, car_model_id, start_date, end_date, inventory_locked, email_status"
         )
         .eq("order_id", orderId)
         .single();
@@ -102,6 +102,28 @@ export default async function handler(req, res) {
         );
 
         console.log("✅ A1 完成：订单已 paid + payments 写入", orderId);
+
+        /**
+         * ======================
+         * B3-1：支付成功后触发确认邮件（幂等）
+         * ======================
+         */
+        if (order.email_status !== "sent") {
+          try {
+            await fetch(
+              `${process.env.NEXT_PUBLIC_BASE_URL}/api/send-confirmation-email`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ order_id: orderId }),
+              }
+            );
+
+            console.log("📧 B3 完成：确认邮件已触发", orderId);
+          } catch (e) {
+            console.error("❌ B3 邮件发送失败", orderId, e);
+          }
+        }
       }
 
       /**
@@ -121,16 +143,12 @@ export default async function handler(req, res) {
           .update({ inventory_locked: true })
           .eq("order_id", orderId);
 
-        // ⭐ 仅此一行改动：加日志（不改任何逻辑）
-        console.log(
-          "✅ A2 完成：库存已锁定",
-          {
-            order_id: orderId,
-            car_model_id: order.car_model_id,
-            start_date: order.start_date,
-            end_date: order.end_date || order.start_date,
-          }
-        );
+        console.log("✅ A2 完成：库存已锁定", {
+          order_id: orderId,
+          car_model_id: order.car_model_id,
+          start_date: order.start_date,
+          end_date: order.end_date || order.start_date,
+        });
       } else {
         console.log("🔁 A2 幂等命中，已跳过库存扣减", orderId);
       }
