@@ -1,4 +1,5 @@
 // pages/index.jsx
+
 import Head from "next/head";
 import { useRouter } from "next/router";
 
@@ -11,132 +12,121 @@ export default function Home() {
         <title>华人 Okinawa 包车预约系统</title>
         <meta
           name="description"
-          content="冲绳当地华人正规包车服务 · 官方在线预约系统"
+          content="冲绳当地华人正规包车服务 · 官方在线预约 · 押金仅 500 RMB"
         />
       </Head>
 
-      <div className="container">
-        {/* 顶部品牌区 */}
-        <header className="header">
-          <h1>华人 Okinawa 包车预约系统</h1>
-          <p className="tagline">Honest · Local · Reliable</p>
-          <p className="subtitle">
-            冲绳当地华人正规包车服务 · 官方在线预约
+      <main
+        style={{
+          minHeight: "100vh",
+          background: "linear-gradient(180deg, #f8fafc 0%, #ffffff 60%)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "24px",
+        }}
+      >
+        <div
+          style={{
+            maxWidth: "720px",
+            width: "100%",
+            textAlign: "center",
+          }}
+        >
+          {/* 品牌区 */}
+          <h1
+            style={{
+              fontSize: "32px",
+              fontWeight: 700,
+              marginBottom: "12px",
+              letterSpacing: "0.5px",
+            }}
+          >
+            华人 Okinawa 包车预约系统
+          </h1>
+
+          <p
+            style={{
+              fontSize: "16px",
+              color: "#555",
+              marginBottom: "32px",
+            }}
+          >
+            冲绳当地华人包车 · 官方直营在线预约
           </p>
-        </header>
 
-        {/* 信任说明区 */}
-        <section className="trust">
-          <ul>
-            <li>✅ 押金仅 500 RMB，其余费用用车当日支付司机</li>
-            <li>✅ 支付成功后系统自动发送订单确认邮件</li>
-            <li>✅ 中文 / 日文司机可选，沟通无障碍</li>
-          </ul>
-        </section>
+          {/* 信任说明卡片 */}
+          <div
+            style={{
+              background: "#fff",
+              borderRadius: "16px",
+              padding: "28px 24px",
+              boxShadow: "0 20px 40px rgba(0,0,0,0.06)",
+              marginBottom: "36px",
+              textAlign: "left",
+            }}
+          >
+            <h2
+              style={{
+                fontSize: "18px",
+                fontWeight: 600,
+                marginBottom: "16px",
+                textAlign: "center",
+              }}
+            >
+              为什么选择我们
+            </h2>
 
-        {/* 主 CTA */}
-        <section className="cta">
-          <button onClick={() => router.push("/booking")}>
-            立即预约包车
+            <ul
+              style={{
+                listStyle: "none",
+                padding: 0,
+                margin: 0,
+                lineHeight: "1.9",
+                fontSize: "15px",
+              }}
+            >
+              <li>✅ 仅收 <strong>500 RMB 押金</strong>，其余费用用车当日直接支付司机</li>
+              <li>✅ 支付成功后，系统自动发送 <strong>订单确认邮件</strong></li>
+              <li>✅ <strong>中文 / 日文司机</strong> 可选，沟通无障碍</li>
+            </ul>
+          </div>
+
+          {/* 主 CTA */}
+          <button
+            onClick={() => router.push("/booking")}
+            style={{
+              background: "linear-gradient(135deg, #2563eb, #1d4ed8)",
+              color: "#fff",
+              border: "none",
+              borderRadius: "12px",
+              padding: "16px 48px",
+              fontSize: "18px",
+              fontWeight: 600,
+              cursor: "pointer",
+              boxShadow: "0 10px 24px rgba(37,99,235,0.35)",
+            }}
+          >
+            开始包车预约
           </button>
-        </section>
 
-        {/* 底部兜底 */}
-        <footer className="footer">
-          <p>客服联系方式：微信 / WhatsApp</p>
-          <p className="note">
-            本系统为「华人 Okinawa」官方包车预约系统
-          </p>
-        </footer>
-      </div>
-
-      {/* 页面样式 */}
-      <style jsx>{`
-        .container {
-          min-height: 100vh;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          background: #fafafa;
-          padding: 24px;
-          text-align: center;
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-            "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
-            Helvetica, Arial, sans-serif;
-          color: #222;
-        }
-
-        .header h1 {
-          font-size: 28px;
-          margin-bottom: 8px;
-        }
-
-        .tagline {
-          font-size: 14px;
-          letter-spacing: 1px;
-          color: #666;
-          margin-bottom: 6px;
-        }
-
-        .subtitle {
-          font-size: 15px;
-          color: #555;
-          margin-bottom: 28px;
-        }
-
-        .trust {
-          background: #fff;
-          border-radius: 12px;
-          padding: 20px 24px;
-          max-width: 520px;
-          width: 100%;
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
-          margin-bottom: 32px;
-          text-align: left;
-        }
-
-        .trust ul {
-          list-style: none;
-          padding: 0;
-          margin: 0;
-        }
-
-        .trust li {
-          font-size: 15px;
-          line-height: 1.8;
-          margin-bottom: 8px;
-        }
-
-        .cta {
-          margin-bottom: 32px;
-        }
-
-        .cta button {
-          background: #2563eb;
-          color: #fff;
-          border: none;
-          border-radius: 10px;
-          padding: 14px 36px;
-          font-size: 16px;
-          cursor: pointer;
-          box-shadow: 0 6px 18px rgba(37, 99, 235, 0.3);
-        }
-
-        .cta button:hover {
-          background: #1e4ed8;
-        }
-
-        .footer {
-          font-size: 13px;
-          color: #777;
-        }
-
-        .note {
-          margin-top: 4px;
-          color: #999;
-        }
-      `}</style>
+          {/* 底部兜底 */}
+          <div
+            style={{
+              marginTop: "36px",
+              fontSize: "13px",
+              color: "#777",
+              lineHeight: "1.6",
+            }}
+          >
+            <div>客服联系方式：微信 / WhatsApp</div>
+            <div style={{ marginTop: "6px" }}>
+              本系统为 <strong>华人 Okinawa</strong> 官方包车预约系统
+            </div>
+          </div>
+        </div>
+      </main>
     </>
   );
 }
+
