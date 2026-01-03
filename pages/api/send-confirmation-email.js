@@ -17,6 +17,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  const startedAt = new Date().toISOString();
+
   try {
     const { order_id } = req.body;
 
@@ -49,6 +51,8 @@ export default async function handler(req, res) {
         : order.start_date;
 
     // 4️⃣ 邮件 HTML
+    const subject = `您的冲绳包车订单确认（${order.order_id}）`;
+
     const html = `
       <div style="font-family: Arial, sans-serif; line-height:1.6; max-width:600px; margin:0 auto;">
         <h2>冲绳包车服务确认书</h2>
@@ -105,21 +109,54 @@ export default async function handler(req, res) {
       </div>
     `;
 
-    // 5️⃣ 发送邮件（⭐ 用已验证域名）
-    await resend.emails.send({
-      from: "华人 Okinawa <no-reply@xn--okinawa-n14kh45a.com>",
-      to: order.email,
-      subject: `您的冲绳包车订单确认（${order.order_id}）`,
-      html,
+    // 5️⃣ 发送邮件
+    let resendResp;
+    try {
+      resendResp = await resend.emails.send({
+        from: "华人 Okinawa <no-reply@xn--okinawa-n14kh45a.com>",
+        to: order.email,
+        subject,
+        html,
+      });
+    } catch (mailErr) {
+      // ⭐ 失败也要写 send_logs
+      await supabase.from("send_logs").insert({
+        order_id: order.order_id,
+        email: order.email,
+        subject,
+        status: "failed",
+        error_message: mailErr?.message || String(mailErr),
+        created_at: startedAt,
+      });
+
+      // 同步订单邮件状态（可选，但你现在中控要看异常，建议写）
+      await supabase
+        .from("orders")
+        .update({ email_status: "failed" })
+        .eq("order_id", order_id);
+
+      throw mailErr;
+    }
+
+    // 6️⃣ 写 send_logs（成功）
+    await supabase.from("send_logs").insert({
+      order_id: order.order_id,
+      email: order.email,
+      subject,
+      status: "sent",
+      error_message: null,
+      // Resend 返回里一般会有 id；没有也不影响
+      provider_message_id: resendResp?.data?.id || null,
+      created_at: startedAt,
     });
 
-    // 6️⃣ 更新邮件状态
+    // 7️⃣ 更新订单邮件状态
     await supabase
       .from("orders")
       .update({ email_status: "sent" })
       .eq("order_id", order_id);
 
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true, resend: resendResp });
   } catch (err) {
     console.error("❌ Send email error:", err);
     return res.status(500).json({ error: "Internal Server Error" });
