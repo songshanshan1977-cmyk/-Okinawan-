@@ -39,6 +39,10 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [name, setName] = useState(initialData.name ?? "");
   const [phone, setPhone] = useState(initialData.phone ?? "");
   const [email, setEmail] = useState(initialData.email ?? "");
+
+  // ✅ 只新增：行程（可选）
+  const [itinerary, setItinerary] = useState(initialData.itinerary ?? "");
+
   const [remark, setRemark] = useState(initialData.remark ?? "");
 
   const [error, setError] = useState("");
@@ -68,18 +72,11 @@ export default function Step2({ initialData, onNext, onBack }) {
       setError("");
       if (!carModel) return;
 
-      const dailyPrice = await fetchDailyPrice(
-        carModel,
-        driverLang,
-        duration
-      );
+      const dailyPrice = await fetchDailyPrice(carModel, driverLang, duration);
       if (cancelled) return;
 
       if (dailyPrice > 0) {
-        const days = calcDays(
-          initialData.start_date,
-          initialData.end_date
-        );
+        const days = calcDays(initialData.start_date, initialData.end_date);
         setTotalPrice(dailyPrice * days);
       } else {
         setTotalPrice(0);
@@ -91,13 +88,7 @@ export default function Step2({ initialData, onNext, onBack }) {
     return () => {
       cancelled = true;
     };
-  }, [
-    carModel,
-    driverLang,
-    duration,
-    initialData.start_date,
-    initialData.end_date,
-  ]);
+  }, [carModel, driverLang, duration, initialData.start_date, initialData.end_date]);
 
   const checkInventory = async () => {
     const res = await fetch("/api/check-inventory", {
@@ -131,8 +122,7 @@ export default function Step2({ initialData, onNext, onBack }) {
     if (!name.trim()) return setError("请输入姓名（必填）");
     if (!phone.trim()) return setError("请输入电话（必填）");
     if (!email.trim()) return setError("请输入邮箱（必填）");
-    if (!totalPrice || totalPrice <= 0)
-      return setError("价格读取失败，请稍后重试。");
+    if (!totalPrice || totalPrice <= 0) return setError("价格读取失败，请稍后重试。");
 
     const inv = await checkInventory();
     setStockHint(inv.total_stock);
@@ -154,6 +144,10 @@ export default function Step2({ initialData, onNext, onBack }) {
       name: name.trim(),
       phone: phone.trim(),
       email: email.trim(),
+
+      // ✅ 只新增：把行程带到下一步
+      itinerary: itinerary ?? "",
+
       remark: remark ?? "",
     });
   };
@@ -175,9 +169,7 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   return (
     <div style={{ maxWidth: 820, margin: "0 auto", padding: 20 }}>
-      <h2 style={{ fontSize: 26, marginBottom: 20 }}>
-        Step2：选择车型 & 服务
-      </h2>
+      <h2 style={{ fontSize: 26, marginBottom: 20 }}>Step2：选择车型 & 服务</h2>
 
       {/* 车型 */}
       <div style={{ display: "flex", gap: 16, marginBottom: 20 }}>
@@ -189,12 +181,8 @@ export default function Step2({ initialData, onNext, onBack }) {
               flex: 1,
               padding: 16,
               borderRadius: 16,
-              border:
-                carModel === m
-                  ? "2px solid #2563eb"
-                  : "1px solid #e5e7eb",
-              background:
-                carModel === m ? "#eff6ff" : "#f9fafb",
+              border: carModel === m ? "2px solid #2563eb" : "1px solid #e5e7eb",
+              background: carModel === m ? "#eff6ff" : "#f9fafb",
               cursor: "pointer",
               textAlign: "center",
               fontWeight: 600,
@@ -274,9 +262,7 @@ export default function Step2({ initialData, onNext, onBack }) {
 
       {/* 客户信息 */}
       <div style={{ ...box, marginBottom: 20 }}>
-        <strong style={{ display: "block", marginBottom: 12 }}>
-          客户信息
-        </strong>
+        <strong style={{ display: "block", marginBottom: 12 }}>客户信息</strong>
 
         <div style={{ display: "grid", gap: 12 }}>
           <input
@@ -297,6 +283,15 @@ export default function Step2({ initialData, onNext, onBack }) {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
+
+          {/* ✅ 只新增：行程（可选） */}
+          <input
+            style={input}
+            placeholder="行程（可选）"
+            value={itinerary}
+            onChange={(e) => setItinerary(e.target.value)}
+          />
+
           <input
             style={input}
             placeholder="备注（可选）"
@@ -337,9 +332,7 @@ export default function Step2({ initialData, onNext, onBack }) {
       )}
 
       {error && error !== "NO_STOCK" && (
-        <div style={{ color: "#dc2626", marginBottom: 12 }}>
-          {error}
-        </div>
+        <div style={{ color: "#dc2626", marginBottom: 12 }}>{error}</div>
       )}
 
       <div style={{ display: "flex", gap: 12 }}>
