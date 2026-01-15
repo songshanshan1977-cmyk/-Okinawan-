@@ -179,6 +179,41 @@ export default async function handler(req, res) {
       } else {
         console.log("🔁 B3 跳过：非首次 paid 或邮件已处理", orderId);
       }
+
+      /**
+       * ======================
+       * ✅ 新增：B0 新订单提醒邮件（只在「第一次 paid」时触发）
+       * 不影响原有逻辑：独立 try/catch
+       * ======================
+       */
+      if (!wasPaid) {
+        try {
+          const baseUrl =
+            process.env.NEXT_PUBLIC_SITE_URL ||
+            "https://okinawan.vercel.app";
+
+          const resp = await fetch(`${baseUrl}/api/send-notify-new-order`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order_id: orderId }),
+          });
+
+          const result = await resp.json();
+          if (!resp.ok) {
+            throw new Error(JSON.stringify(result));
+          }
+
+          console.log("📩 B0 新订单提醒邮件触发成功（首次 paid）:", orderId);
+        } catch (notifyErr) {
+          console.error(
+            "❌ B0 新订单提醒邮件发送失败",
+            orderId,
+            notifyErr?.message || notifyErr
+          );
+        }
+      } else {
+        console.log("🔁 B0 跳过：非首次 paid", orderId);
+      }
     }
 
     /**
