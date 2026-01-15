@@ -141,6 +141,14 @@ export default function Step4Payment({ initialData, onBack }) {
         <p>
           <strong>电话：</strong> {initialData.phone}
         </p>
+
+        {/* ✅ 只新增：微信（可选），放在电话下面 */}
+        {initialData.wechat && (
+          <p>
+            <strong>微信：</strong> {initialData.wechat}
+          </p>
+        )}
+
         <p>
           <strong>邮箱：</strong> {initialData.email || "—"}
         </p>
