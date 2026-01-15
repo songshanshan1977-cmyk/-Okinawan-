@@ -40,8 +40,11 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [phone, setPhone] = useState(initialData.phone ?? "");
   const [email, setEmail] = useState(initialData.email ?? "");
 
-  // ✅ 只新增：行程（可选）
+  // ✅ 已有：行程（可选）
   const [itinerary, setItinerary] = useState(initialData.itinerary ?? "");
+
+  // ✅ 只新增：微信（可选）—— 放在电话下面
+  const [wechat, setWechat] = useState(initialData.wechat ?? "");
 
   const [remark, setRemark] = useState(initialData.remark ?? "");
 
@@ -143,9 +146,13 @@ export default function Step2({ initialData, onNext, onBack }) {
       luggage: Number(luggage),
       name: name.trim(),
       phone: phone.trim(),
+
+      // ✅ 只新增：把微信带到下一步（可选）
+      wechat: wechat ?? "",
+
       email: email.trim(),
 
-      // ✅ 只新增：把行程带到下一步
+      // ✅ 已有：把行程带到下一步（可选）
       itinerary: itinerary ?? "",
 
       remark: remark ?? "",
@@ -277,6 +284,15 @@ export default function Step2({ initialData, onNext, onBack }) {
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
           />
+
+          {/* ✅ 只新增：微信（可选）放在电话下面 */}
+          <input
+            style={input}
+            placeholder="微信（可选）"
+            value={wechat}
+            onChange={(e) => setWechat(e.target.value)}
+          />
+
           <input
             style={input}
             placeholder="邮箱（必填）"
@@ -284,7 +300,7 @@ export default function Step2({ initialData, onNext, onBack }) {
             onChange={(e) => setEmail(e.target.value)}
           />
 
-          {/* ✅ 只新增：行程（可选） */}
+          {/* ✅ 已有：行程（可选） */}
           <input
             style={input}
             placeholder="行程（可选）"
@@ -342,5 +358,4 @@ export default function Step2({ initialData, onNext, onBack }) {
     </div>
   );
 }
-
 
