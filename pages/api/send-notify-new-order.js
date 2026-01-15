@@ -1,9 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method Not Allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
 
   try {
     const { order_id } = req.body || {};
@@ -20,8 +18,10 @@ export default async function handler(req, res) {
       process.env.SUPABASE_SERVICE_ROLE_KEY
     );
 
-    // 1) 先读 orders（把酒店字段也读出来；并加多种可能字段名兜底）
-    const { data: order, error: orderErr } = await supabase
+    /**
+     * 1️⃣ 订单表（只多取一个行程字段，其余不动）
+     */
+    const { data: order, error } = await supabase
       .from("orders")
       .select(`
         order_id,
@@ -35,53 +35,41 @@ export default async function handler(req, res) {
         email,
         remark,
         total_price,
-
         departure_hotel,
         end_hotel,
-        pickup_hotel,
-        dropoff_hotel,
-        start_hotel,
-        return_hotel
+        itinerary
       `)
       .eq("order_id", order_id)
       .single();
 
-    if (orderErr || !order) {
-      return res.status(404).json({ error: "Order not found", details: orderErr || null });
+    if (error || !order) {
+      return res.status(404).json({ error: "Order not found", details: error || null });
     }
 
-    // 2) 酒店字段：优先按你说的「出发酒店/回程酒店」
-    const departureHotel =
-      order.departure_hotel ||
-      order.pickup_hotel ||
-      order.start_hotel ||
-      "-";
-
-    const returnHotel =
-      order.end_hotel ||
-      order.dropoff_hotel ||
-      order.return_hotel ||
-      "-";
-
-    // 3) 车型中文名：用 car_model_id 去 car_models 查
-    let carModelZh = "-";
+    /**
+     * 2️⃣ 查中文车型名（不动）
+     */
+    let carModelName = "-";
     if (order.car_model_id) {
-      const { data: carModel, error: carErr } = await supabase
+      const { data: carModel } = await supabase
         .from("car_models")
-        .select("name_zh, title_zh, display_name_zh, name")
+        .select("name_zh")
         .eq("id", order.car_model_id)
         .maybeSingle();
 
-      if (!carErr && carModel) {
-        carModelZh =
-          carModel.name_zh ||
-          carModel.title_zh ||
-          carModel.display_name_zh ||
-          carModel.name ||
-          "-";
+      if (carModel?.name_zh) {
+        carModelName = carModel.name_zh;
       }
     }
 
+    /**
+     * 3️⃣ 行程字段兜底（只用于显示）
+     */
+    const itineraryText = order.itinerary || "-";
+
+    /**
+     * 4️⃣ 邮件内容（只在「车型」上面加一行）
+     */
     const subject = `【新订单提醒】${order.order_id} | ${order.start_date || ""}`;
 
     const text = [
@@ -89,9 +77,10 @@ export default async function handler(req, res) {
       ``,
       `订单号：${order.order_id}`,
       `用车日期：${order.start_date || "-"} ~ ${order.end_date || order.start_date || "-"}`,
-      `出发酒店：${departureHotel}`,
-      `回程酒店：${returnHotel}`,
-      `车型：${carModelZh}`,
+      `出发酒店：${order.departure_hotel || "-"}`,
+      `回程酒店：${order.end_hotel || "-"}`,
+      `行程：${itineraryText}`,
+      `车型：${carModelName}`,
       `司机语言：${order.driver_lang || "-"}`,
       `时长：${order.duration || "-"}`,
       ``,
@@ -117,8 +106,9 @@ export default async function handler(req, res) {
     const data = await r.json();
     if (!r.ok) return res.status(500).json({ error: "Resend failed", details: data });
 
-    return res.status(200).json({ ok: true, id: data.id, carModelZh, departureHotel, returnHotel });
+    return res.status(200).json({ ok: true, id: data.id });
   } catch (e) {
     return res.status(500).json({ error: "Server error", details: String(e) });
   }
 }
+
