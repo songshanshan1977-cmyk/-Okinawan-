@@ -49,9 +49,9 @@ export default async function handler(req, res) {
           car_model_id: data.car_model_id,
           driver_lang: data.driver_lang,
 
-          duration: data.duration,        // ✅ 关键修复
-          pax: data.pax,                  // ✅
-          luggage: data.luggage,          // ✅
+          duration: data.duration, // ✅ 关键修复
+          pax: data.pax, // ✅
+          luggage: data.luggage, // ✅
 
           start_date: data.start_date,
           end_date: data.end_date,
@@ -65,6 +65,10 @@ export default async function handler(req, res) {
           phone: data.phone,
           email: data.email,
           remark: data.remark,
+
+          // ✅ 只新增：行程 + 微信（可选字段，不影响原逻辑）
+          itinerary: data.itinerary ?? null,
+          wechat: data.wechat ?? null,
 
           payment_status: "pending",
           inventory_status: "pending",
@@ -89,5 +93,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
-
 
