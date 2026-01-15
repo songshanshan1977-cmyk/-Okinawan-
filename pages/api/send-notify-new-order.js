@@ -1,21 +1,19 @@
 import { createClient } from "@supabase/supabase-js";
 
 /**
- * ✅ 车型 ID → 中文车型（锁死映射，最稳）
+ * 车型 ID → 中文车型（锁死映射，最稳）
  */
 function mapCarModelZh(carModelId) {
   const MAP = {
-    // ⚠️ 用你系统里真实 UUID（示例）
     "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型 5 座",
     "82cf604f-e688-49fe-aecf-69894a01f6cb": "阿尔法 7 座",
     "453df662-d350-4ab9-b811-61ffcda40d4b": "海狮 10 座",
   };
-
   return MAP[carModelId] || "-";
 }
 
 /**
- * ✅ 司机语言 → 中文
+ * 司机语言 → 中文
  */
 function mapDriverLangZh(lang) {
   if (lang === "jp") return "日文司机";
@@ -24,14 +22,20 @@ function mapDriverLangZh(lang) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
 
   try {
     const { order_id } = req.body || {};
-    if (!order_id) return res.status(400).json({ error: "order_id is required" });
+    if (!order_id) {
+      return res.status(400).json({ error: "order_id is required" });
+    }
 
     const resendKey = process.env.RESEND_API_KEY;
-    if (!resendKey) return res.status(500).json({ error: "Missing RESEND_API_KEY" });
+    if (!resendKey) {
+      return res.status(500).json({ error: "Missing RESEND_API_KEY" });
+    }
 
     const to = process.env.NOTIFY_TO_EMAIL || "songshanshan1977@gmail.com";
     const from = process.env.NOTIFY_FROM_EMAIL || "onboarding@resend.dev";
@@ -41,6 +45,9 @@ export default async function handler(req, res) {
       process.env.SUPABASE_SERVICE_ROLE_KEY
     );
 
+    /**
+     * 读取订单（只用你确认存在的字段）
+     */
     const { data: order, error } = await supabase
       .from("orders")
       .select(`
@@ -69,6 +76,9 @@ export default async function handler(req, res) {
     const carModelZh = mapCarModelZh(order.car_model_id);
     const driverLangZh = mapDriverLangZh(order.driver_lang);
 
+    /**
+     * 邮件内容（最终锁定顺序）
+     */
     const subject = `【新订单提醒】${order.order_id} | ${order.start_date || ""}`;
 
     const text = [
@@ -103,12 +113,15 @@ export default async function handler(req, res) {
     });
 
     const data = await r.json();
-    if (!r.ok) return res.status(500).json({ error: "Resend failed", details: data });
+    if (!r.ok) {
+      return res.status(500).json({ error: "Resend failed", details: data });
+    }
 
     return res.status(200).json({ ok: true, id: data.id });
   } catch (e) {
     return res.status(500).json({ error: "Server error", details: String(e) });
   }
 }
+
 
 
