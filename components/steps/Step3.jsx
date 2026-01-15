@@ -21,6 +21,9 @@ export default function Step3({ initialData, onNext, onBack }) {
     phone,
     email,
     remark,
+
+    // ✅ 只新增：行程（可选）
+    itinerary,
   } = initialData;
 
   const handleNext = () => {
@@ -61,6 +64,10 @@ export default function Step3({ initialData, onNext, onBack }) {
         <hr style={{ margin: "12px 0" }} />
 
         <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>🚗 车型 & 服务</h3>
+
+        {/* ✅ 只新增：行程（可选）放在车型上面 */}
+        {itinerary && <p>行程：{itinerary}</p>}
+
         <p>车型：{carNameMap[car_model] || "未选择"}</p>
         <p>司机语言：{driver_lang === "zh" ? "中文司机" : "日文司机"}</p>
         <p>包车时长：{duration} 小时</p>
@@ -98,5 +105,4 @@ export default function Step3({ initialData, onNext, onBack }) {
     </div>
   );
 }
-
 
