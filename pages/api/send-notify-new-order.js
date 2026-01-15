@@ -1,7 +1,9 @@
 import { createClient } from "@supabase/supabase-js";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
 
   try {
     const { order_id } = req.body || {};
@@ -13,14 +15,13 @@ export default async function handler(req, res) {
     const to = process.env.NOTIFY_TO_EMAIL || "songshanshan1977@gmail.com";
     const from = process.env.NOTIFY_FROM_EMAIL || "onboarding@resend.dev";
 
-    // 用 service_role 查订单（跟你 webhook 一致，稳定）
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL,
       process.env.SUPABASE_SERVICE_ROLE_KEY
     );
 
-    // ⭐ 这里字段按你常用的写：如果你表里字段名不同，改 select 这一行就行
-    const { data: order, error } = await supabase
+    // 1) 先读 orders（把酒店字段也读出来；并加多种可能字段名兜底）
+    const { data: order, error: orderErr } = await supabase
       .from("orders")
       .select(`
         order_id,
@@ -33,13 +34,52 @@ export default async function handler(req, res) {
         phone,
         email,
         remark,
-        total_price
+        total_price,
+
+        departure_hotel,
+        end_hotel,
+        pickup_hotel,
+        dropoff_hotel,
+        start_hotel,
+        return_hotel
       `)
       .eq("order_id", order_id)
       .single();
 
-    if (error || !order) {
-      return res.status(404).json({ error: "Order not found", details: error || null });
+    if (orderErr || !order) {
+      return res.status(404).json({ error: "Order not found", details: orderErr || null });
+    }
+
+    // 2) 酒店字段：优先按你说的「出发酒店/回程酒店」
+    const departureHotel =
+      order.departure_hotel ||
+      order.pickup_hotel ||
+      order.start_hotel ||
+      "-";
+
+    const returnHotel =
+      order.end_hotel ||
+      order.dropoff_hotel ||
+      order.return_hotel ||
+      "-";
+
+    // 3) 车型中文名：用 car_model_id 去 car_models 查
+    let carModelZh = "-";
+    if (order.car_model_id) {
+      const { data: carModel, error: carErr } = await supabase
+        .from("car_models")
+        .select("name_zh, title_zh, display_name_zh, name")
+        .eq("id", order.car_model_id)
+        .maybeSingle();
+
+      if (!carErr && carModel) {
+        carModelZh =
+          carModel.name_zh ||
+          carModel.title_zh ||
+          carModel.display_name_zh ||
+          carModel.name ||
+          "-";
+      }
     }
 
     const subject = `【新订单提醒】${order.order_id} | ${order.start_date || ""}`;
@@ -49,7 +89,9 @@ export default async function handler(req, res) {
       ``,
       `订单号：${order.order_id}`,
       `用车日期：${order.start_date || "-"} ~ ${order.end_date || order.start_date || "-"}`,
-      `车型ID：${order.car_model_id || "-"}`,
+      `出发酒店：${departureHotel}`,
+      `回程酒店：${returnHotel}`,
+      `车型：${carModelZh}`,
       `司机语言：${order.driver_lang || "-"}`,
       `时长：${order.duration || "-"}`,
       ``,
@@ -75,7 +117,7 @@ export default async function handler(req, res) {
     const data = await r.json();
     if (!r.ok) return res.status(500).json({ error: "Resend failed", details: data });
 
-    return res.status(200).json({ ok: true, id: data.id });
+    return res.status(200).json({ ok: true, id: data.id, carModelZh, departureHotel, returnHotel });
   } catch (e) {
     return res.status(500).json({ error: "Server error", details: String(e) });
   }
