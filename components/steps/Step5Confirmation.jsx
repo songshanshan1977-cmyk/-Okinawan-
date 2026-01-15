@@ -42,8 +42,7 @@ export default function Step5Confirmation({ onNext }) {
   if (error) return <p className="text-red-600">{error}</p>;
 
   // ===== B3-2：统一日期展示规则 =====
-  const isMultiDay =
-    order.end_date && order.end_date !== order.start_date;
+  const isMultiDay = order.end_date && order.end_date !== order.start_date;
 
   const days = isMultiDay
     ? Math.floor(
@@ -56,10 +55,7 @@ export default function Step5Confirmation({ onNext }) {
     ? `${order.start_date} ～ ${order.end_date}（共 ${days} 天）`
     : order.start_date;
 
-  const balance = Math.max(
-    (order.total_price || 0) - 500,
-    0
-  );
+  const balance = Math.max((order.total_price || 0) - 500, 0);
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 py-8">
@@ -93,6 +89,15 @@ export default function Step5Confirmation({ onNext }) {
           <strong>车型：</strong>
           {carIdNameMap[order.car_model_id] || "未选择"}
         </p>
+
+        {/* ✅ 只新增：行程（可选）放在车型下面 */}
+        {order.itinerary && (
+          <p>
+            <strong>行程：</strong>
+            {order.itinerary}
+          </p>
+        )}
+
         <p>
           <strong>司机语言：</strong>
           {order.driver_lang === "jp" ? "日文司机" : "中文司机"}
@@ -115,9 +120,7 @@ export default function Step5Confirmation({ onNext }) {
         <p>
           <strong>包车总费用：</strong>¥{order.total_price}
         </p>
-        <p className="text-green-600 font-bold">
-          ✔ 已支付押金：¥500
-        </p>
+        <p className="text-green-600 font-bold">✔ 已支付押金：¥500</p>
         <p className="text-orange-600">
           ⭐ 尾款（用车当日支付司机）：¥{balance}
         </p>
@@ -132,6 +135,15 @@ export default function Step5Confirmation({ onNext }) {
           <strong>电话：</strong>
           {order.phone}
         </p>
+
+        {/* ✅ 只新增：微信（可选）放在电话下面 */}
+        {order.wechat && (
+          <p>
+            <strong>微信：</strong>
+            {order.wechat}
+          </p>
+        )}
+
         <p>
           <strong>邮箱：</strong>
           {order.email || "—"}
