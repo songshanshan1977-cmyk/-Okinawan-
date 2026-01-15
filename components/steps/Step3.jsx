@@ -24,6 +24,9 @@ export default function Step3({ initialData, onNext, onBack }) {
 
     // ✅ 只新增：行程（可选）
     itinerary,
+
+    // ✅ 只新增：微信（可选）
+    wechat,
   } = initialData;
 
   const handleNext = () => {
@@ -94,6 +97,10 @@ export default function Step3({ initialData, onNext, onBack }) {
 
         <p>姓名：{name || "-"}</p>
         <p>电话：{phone || "-"}</p>
+
+        {/* ✅ 只新增：微信（可选）放在电话下面 */}
+        {wechat && <p>微信：{wechat}</p>}
+
         <p>邮箱：{email || "-"}</p>
         {remark && <p>备注：{remark}</p>}
       </div>
@@ -105,4 +112,5 @@ export default function Step3({ initialData, onNext, onBack }) {
     </div>
   );
 }
+
 
