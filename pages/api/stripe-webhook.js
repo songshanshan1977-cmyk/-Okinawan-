@@ -16,7 +16,9 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// 读取 raw body
+// =======================
+// utils
+// =======================
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -25,9 +27,6 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-/**
- * ✅ 在 Vercel Production / Preview 最稳的 baseUrl 获取
- */
 function getBaseUrl() {
   const site = process.env.NEXT_PUBLIC_SITE_URL;
   if (site && /^https?:\/\//i.test(site)) return site.replace(/\/$/, "");
@@ -38,9 +37,6 @@ function getBaseUrl() {
   return "https://okinawan.vercel.app";
 }
 
-/**
- * ✅ 容错读取响应
- */
 async function readResponseSafe(resp) {
   const text = await resp.text();
   let json = null;
@@ -50,6 +46,9 @@ async function readResponseSafe(resp) {
   return { text, json };
 }
 
+// =======================
+// webhook handler
+// =======================
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).send("Method Not Allowed");
@@ -67,27 +66,33 @@ export default async function handler(req, res) {
   }
 
   try {
-    /**
-     * ==================================================
-     * A1 + A2 + B3 主入口：checkout.session.completed
-     * ==================================================
-     */
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-      const orderId = session.metadata?.order_id;
+    // =========================
+    // ✅ 支付成功主入口（关键）
+    // =========================
+    const isCheckoutCompleted =
+      event.type === "checkout.session.completed";
+    const isPaymentSucceeded =
+      event.type === "payment_intent.succeeded";
+
+    if (isCheckoutCompleted || isPaymentSucceeded) {
+      const obj = event.data.object;
+
+      const orderId = obj.metadata?.order_id;
 
       if (!orderId) {
-        console.warn("⚠️ checkout.session.completed 但没有 order_id");
+        console.warn(
+          "⚠️ 支付成功事件但没有 order_id",
+          event.type
+        );
         return res.json({ received: true });
       }
 
       /**
-       * 1️⃣ 读取订单（✅ 新增：driver_lang）
+       * 1️⃣ 读取订单
        */
       const { data: order, error: orderErr } = await supabase
         .from("orders")
-        .select(
-          `
+        .select(`
           id,
           order_id,
           status,
@@ -97,8 +102,7 @@ export default async function handler(req, res) {
           driver_lang,
           inventory_locked,
           email_status
-        `
-        )
+        `)
         .eq("order_id", orderId)
         .single();
 
@@ -107,13 +111,13 @@ export default async function handler(req, res) {
         return res.json({ received: true });
       }
 
-      /**
-       * ======================
-       * A1：标记订单已支付 + 写 payments
-       * ======================
-       */
       const wasPaid = order.status === "paid";
 
+      /**
+       * ======================
+       * A1：订单 + payments
+       * ======================
+       */
       if (!wasPaid) {
         await supabase
           .from("orders")
@@ -127,23 +131,24 @@ export default async function handler(req, res) {
         await supabase.from("payments").upsert(
           {
             order_id: orderId,
-            stripe_session_id: session.id,
-            amount: session.amount_total,
-            currency: session.currency,
+            stripe_session_id: obj.id,
+            amount:
+              obj.amount_total ??
+              obj.amount_received ??
+              null,
+            currency: obj.currency ?? null,
             car_model_id: order.car_model_id,
             paid: true,
           },
-          {
-            onConflict: "stripe_session_id",
-          }
+          { onConflict: "stripe_session_id" }
         );
 
-        console.log("✅ A1 完成：订单已 paid + payments 写入", orderId);
+        console.log("✅ A1 完成：订单已 paid", orderId);
       }
 
       /**
        * ======================
-       * A2：库存扣减（幂等，✅ 按 driver_lang）
+       * A2：库存锁定（幂等）
        * ======================
        */
       if (order.inventory_locked !== true) {
@@ -151,7 +156,7 @@ export default async function handler(req, res) {
           p_date: order.start_date,
           p_end_date: order.end_date || order.start_date,
           p_car_model_id: order.car_model_id,
-          p_driver_lang: order.driver_lang, // ⭐ 新增
+          p_driver_lang: order.driver_lang,
         });
 
         await supabase
@@ -163,11 +168,9 @@ export default async function handler(req, res) {
           order_id: orderId,
           car_model_id: order.car_model_id,
           driver_lang: order.driver_lang,
-          start_date: order.start_date,
-          end_date: order.end_date || order.start_date,
         });
       } else {
-        console.log("🔁 A2 幂等命中，已跳过库存扣减", orderId);
+        console.log("🔁 A2 幂等命中，跳过库存扣减", orderId);
       }
 
       /**
@@ -179,31 +182,26 @@ export default async function handler(req, res) {
         try {
           const baseUrl = getBaseUrl();
 
-          const resp = await fetch(`${baseUrl}/api/send-confirmation-email`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ order_id: orderId }),
-          });
+          const resp = await fetch(
+            `${baseUrl}/api/send-confirmation-email`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ order_id: orderId }),
+            }
+          );
 
           const { text, json } = await readResponseSafe(resp);
 
           if (!resp.ok) {
-            console.error("❌ B3 确认邮件接口返回非 200", {
-              order_id: orderId,
-              status: resp.status,
-              body: json || text,
-              baseUrl,
-            });
-            throw new Error(`B3 non-200: ${resp.status}`);
+            throw new Error(
+              `B3 non-200 ${resp.status} ${json || text}`
+            );
           }
 
-          console.log("📧 B3 确认邮件触发成功（首次 paid）:", {
-            order_id: orderId,
-            baseUrl,
-            result: json || text,
-          });
-        } catch (mailErr) {
-          console.error("❌ B3 邮件发送失败", orderId, mailErr?.message || mailErr);
+          console.log("📧 B3 确认邮件已触发", orderId);
+        } catch (err) {
+          console.error("❌ B3 邮件发送失败", orderId, err);
         }
       }
 
@@ -216,31 +214,26 @@ export default async function handler(req, res) {
         try {
           const baseUrl = getBaseUrl();
 
-          const resp = await fetch(`${baseUrl}/api/send-notify-new-order`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ order_id: orderId }),
-          });
+          const resp = await fetch(
+            `${baseUrl}/api/send-notify-new-order`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ order_id: orderId }),
+            }
+          );
 
           const { text, json } = await readResponseSafe(resp);
 
           if (!resp.ok) {
-            console.error("❌ B0 新订单提醒接口返回非 200", {
-              order_id: orderId,
-              status: resp.status,
-              body: json || text,
-              baseUrl,
-            });
-            throw new Error(`B0 non-200: ${resp.status}`);
+            throw new Error(
+              `B0 non-200 ${resp.status} ${json || text}`
+            );
           }
 
-          console.log("📩 B0 新订单提醒邮件触发成功（首次 paid）:", {
-            order_id: orderId,
-            baseUrl,
-            result: json || text,
-          });
-        } catch (notifyErr) {
-          console.error("❌ B0 新订单提醒邮件发送失败", orderId, notifyErr?.message || notifyErr);
+          console.log("📩 B0 新订单提醒已触发", orderId);
+        } catch (err) {
+          console.error("❌ B0 新订单提醒失败", orderId, err);
         }
       }
     }
@@ -252,7 +245,7 @@ export default async function handler(req, res) {
      */
     if (event.type === "checkout.session.expired") {
       const session = event.data.object;
-      const orderId = session.metadata?.order_id || null;
+      const orderId = session.metadata?.order_id;
 
       if (orderId) {
         const { data: order } = await supabase
@@ -265,10 +258,10 @@ export default async function handler(req, res) {
           await supabase.rpc("release_inventory_lock", {
             p_car_model_id: order.car_model_id,
             p_date: order.start_date,
-            p_driver_lang: order.driver_lang, // ⭐ 同步
+            p_driver_lang: order.driver_lang,
           });
 
-          console.log("⏰ 会话过期，库存锁已释放:", orderId);
+          console.log("⏰ 会话过期，库存锁已释放", orderId);
         }
       }
     }
@@ -279,4 +272,5 @@ export default async function handler(req, res) {
     return res.status(500).send("Internal Server Error");
   }
 }
+
 
