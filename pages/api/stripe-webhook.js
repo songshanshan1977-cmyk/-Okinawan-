@@ -26,10 +26,7 @@ async function buffer(readable) {
 }
 
 /**
- * ✅ 新增：在 Vercel Production / Preview 最稳的 baseUrl 获取
- * 优先：NEXT_PUBLIC_SITE_URL（你手动配置）
- * 其次：VERCEL_URL（Vercel 自动注入，通常是 xxx.vercel.app，不带协议）
- * 最后：你的固定域名
+ * ✅ 在 Vercel Production / Preview 最稳的 baseUrl 获取
  */
 function getBaseUrl() {
   const site = process.env.NEXT_PUBLIC_SITE_URL;
@@ -42,7 +39,7 @@ function getBaseUrl() {
 }
 
 /**
- * ✅ 新增：容错读取响应（有些错误响应不是 JSON）
+ * ✅ 容错读取响应
  */
 async function readResponseSafe(resp) {
   const text = await resp.text();
@@ -72,7 +69,7 @@ export default async function handler(req, res) {
   try {
     /**
      * ==================================================
-     * A1 + A2 + B3 主入口（唯一）：checkout.session.completed
+     * A1 + A2 + B3 主入口：checkout.session.completed
      * ==================================================
      */
     if (event.type === "checkout.session.completed") {
@@ -85,7 +82,7 @@ export default async function handler(req, res) {
       }
 
       /**
-       * 1️⃣ 读取订单
+       * 1️⃣ 读取订单（✅ 新增：driver_lang）
        */
       const { data: order, error: orderErr } = await supabase
         .from("orders")
@@ -97,6 +94,7 @@ export default async function handler(req, res) {
           car_model_id,
           start_date,
           end_date,
+          driver_lang,
           inventory_locked,
           email_status
         `
@@ -114,7 +112,7 @@ export default async function handler(req, res) {
        * A1：标记订单已支付 + 写 payments
        * ======================
        */
-      const wasPaid = order.status === "paid"; // ⭐ 新增：记录“之前是否已 paid”
+      const wasPaid = order.status === "paid";
 
       if (!wasPaid) {
         await supabase
@@ -145,7 +143,7 @@ export default async function handler(req, res) {
 
       /**
        * ======================
-       * A2：库存扣减（幂等）
+       * A2：库存扣减（幂等，✅ 按 driver_lang）
        * ======================
        */
       if (order.inventory_locked !== true) {
@@ -153,6 +151,7 @@ export default async function handler(req, res) {
           p_date: order.start_date,
           p_end_date: order.end_date || order.start_date,
           p_car_model_id: order.car_model_id,
+          p_driver_lang: order.driver_lang, // ⭐ 新增
         });
 
         await supabase
@@ -163,6 +162,7 @@ export default async function handler(req, res) {
         console.log("✅ A2 完成：库存已锁定", {
           order_id: orderId,
           car_model_id: order.car_model_id,
+          driver_lang: order.driver_lang,
           start_date: order.start_date,
           end_date: order.end_date || order.start_date,
         });
@@ -172,7 +172,7 @@ export default async function handler(req, res) {
 
       /**
        * ======================
-       * B3：确认邮件（只在「第一次 paid」时触发）
+       * B3：确认邮件
        * ======================
        */
       if (!wasPaid && order.email_status !== "sent") {
@@ -205,13 +205,11 @@ export default async function handler(req, res) {
         } catch (mailErr) {
           console.error("❌ B3 邮件发送失败", orderId, mailErr?.message || mailErr);
         }
-      } else {
-        console.log("🔁 B3 跳过：非首次 paid 或邮件已处理", orderId);
       }
 
       /**
        * ======================
-       * ✅ B0 新订单提醒邮件（只在「第一次 paid」时触发）
+       * B0：新订单提醒
        * ======================
        */
       if (!wasPaid) {
@@ -244,8 +242,6 @@ export default async function handler(req, res) {
         } catch (notifyErr) {
           console.error("❌ B0 新订单提醒邮件发送失败", orderId, notifyErr?.message || notifyErr);
         }
-      } else {
-        console.log("🔁 B0 跳过：非首次 paid", orderId);
       }
     }
 
@@ -261,7 +257,7 @@ export default async function handler(req, res) {
       if (orderId) {
         const { data: order } = await supabase
           .from("orders")
-          .select("car_model_id, start_date")
+          .select("car_model_id, start_date, driver_lang")
           .eq("order_id", orderId)
           .maybeSingle();
 
@@ -269,6 +265,7 @@ export default async function handler(req, res) {
           await supabase.rpc("release_inventory_lock", {
             p_car_model_id: order.car_model_id,
             p_date: order.start_date,
+            p_driver_lang: order.driver_lang, // ⭐ 同步
           });
 
           console.log("⏰ 会话过期，库存锁已释放:", orderId);
