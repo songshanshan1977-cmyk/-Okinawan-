@@ -25,6 +25,34 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
+/**
+ * ✅ 新增：在 Vercel Production / Preview 最稳的 baseUrl 获取
+ * 优先：NEXT_PUBLIC_SITE_URL（你手动配置）
+ * 其次：VERCEL_URL（Vercel 自动注入，通常是 xxx.vercel.app，不带协议）
+ * 最后：你的固定域名
+ */
+function getBaseUrl() {
+  const site = process.env.NEXT_PUBLIC_SITE_URL;
+  if (site && /^https?:\/\//i.test(site)) return site.replace(/\/$/, "");
+
+  const vercelUrl = process.env.VERCEL_URL;
+  if (vercelUrl) return `https://${vercelUrl}`.replace(/\/$/, "");
+
+  return "https://okinawan.vercel.app";
+}
+
+/**
+ * ✅ 新增：容错读取响应（有些错误响应不是 JSON）
+ */
+async function readResponseSafe(resp) {
+  const text = await resp.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch (_) {}
+  return { text, json };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).send("Method Not Allowed");
@@ -149,32 +177,33 @@ export default async function handler(req, res) {
        */
       if (!wasPaid && order.email_status !== "sent") {
         try {
-          const baseUrl =
-            process.env.NEXT_PUBLIC_SITE_URL ||
-            "https://okinawan.vercel.app";
+          const baseUrl = getBaseUrl();
 
-          const resp = await fetch(
-            `${baseUrl}/api/send-confirmation-email`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ order_id: orderId }),
-            }
-          );
+          const resp = await fetch(`${baseUrl}/api/send-confirmation-email`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order_id: orderId }),
+          });
 
-          const result = await resp.json();
+          const { text, json } = await readResponseSafe(resp);
 
           if (!resp.ok) {
-            throw new Error(JSON.stringify(result));
+            console.error("❌ B3 确认邮件接口返回非 200", {
+              order_id: orderId,
+              status: resp.status,
+              body: json || text,
+              baseUrl,
+            });
+            throw new Error(`B3 non-200: ${resp.status}`);
           }
 
-          console.log("📧 B3 确认邮件触发成功（首次 paid）:", orderId);
+          console.log("📧 B3 确认邮件触发成功（首次 paid）:", {
+            order_id: orderId,
+            baseUrl,
+            result: json || text,
+          });
         } catch (mailErr) {
-          console.error(
-            "❌ B3 邮件发送失败",
-            orderId,
-            mailErr?.message || mailErr
-          );
+          console.error("❌ B3 邮件发送失败", orderId, mailErr?.message || mailErr);
         }
       } else {
         console.log("🔁 B3 跳过：非首次 paid 或邮件已处理", orderId);
@@ -182,15 +211,12 @@ export default async function handler(req, res) {
 
       /**
        * ======================
-       * ✅ 新增：B0 新订单提醒邮件（只在「第一次 paid」时触发）
-       * 不影响原有逻辑：独立 try/catch
+       * ✅ B0 新订单提醒邮件（只在「第一次 paid」时触发）
        * ======================
        */
       if (!wasPaid) {
         try {
-          const baseUrl =
-            process.env.NEXT_PUBLIC_SITE_URL ||
-            "https://okinawan.vercel.app";
+          const baseUrl = getBaseUrl();
 
           const resp = await fetch(`${baseUrl}/api/send-notify-new-order`, {
             method: "POST",
@@ -198,18 +224,25 @@ export default async function handler(req, res) {
             body: JSON.stringify({ order_id: orderId }),
           });
 
-          const result = await resp.json();
+          const { text, json } = await readResponseSafe(resp);
+
           if (!resp.ok) {
-            throw new Error(JSON.stringify(result));
+            console.error("❌ B0 新订单提醒接口返回非 200", {
+              order_id: orderId,
+              status: resp.status,
+              body: json || text,
+              baseUrl,
+            });
+            throw new Error(`B0 non-200: ${resp.status}`);
           }
 
-          console.log("📩 B0 新订单提醒邮件触发成功（首次 paid）:", orderId);
+          console.log("📩 B0 新订单提醒邮件触发成功（首次 paid）:", {
+            order_id: orderId,
+            baseUrl,
+            result: json || text,
+          });
         } catch (notifyErr) {
-          console.error(
-            "❌ B0 新订单提醒邮件发送失败",
-            orderId,
-            notifyErr?.message || notifyErr
-          );
+          console.error("❌ B0 新订单提醒邮件发送失败", orderId, notifyErr?.message || notifyErr);
         }
       } else {
         console.log("🔁 B0 跳过：非首次 paid", orderId);
