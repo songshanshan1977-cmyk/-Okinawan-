@@ -67,7 +67,7 @@ export default async function handler(req, res) {
   const days = rangeDays(start, end);
 
   const { data, error } = await supabase
-    .from("inventory_rules_v")
+    .from("inventory_rules_v2")
     .select("date, remaining_qty_calc")
     .eq("car_model_id", car_model_id)
     .eq("driver_lang", driver_lang)
