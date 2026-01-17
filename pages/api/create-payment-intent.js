@@ -32,7 +32,7 @@ export default async function handler(req, res) {
 
     console.log("🔍 create-payment-intent 查询订单：", orderId);
 
-    // ✅ 用 order_id 查询订单（只取最新 1 条，避免重复订单导致 PGRST116）
+    // ✅ 用 order_id 查询订单（只取最新 1 条，避免重复订单）
     const { data: orders, error } = await supabase
       .from("orders")
       .select("*")
@@ -59,14 +59,21 @@ export default async function handler(req, res) {
 
     /**
      * =================================================
-     * ⭐⭐ 新增：最终库存硬校验（真正“锁死”的关键）
+     * ⭐⭐ 最终库存硬校验（最小修复版）
      * =================================================
      */
+
+    // ⭐ 最小兼容：订单里没 driver_lang 时，默认 ZH
+    const rawLang = order.driver_lang ?? "ZH";
+    const driver_lang =
+      String(rawLang).toUpperCase() === "JP" ? "JP" : "ZH";
+
     const { data: rule, error: ruleError } = await supabase
       .from("inventory_rules_v")
       .select("remaining_qty_calc")
       .eq("date", order.start_date)
       .eq("car_model_id", order.car_model_id)
+      .eq("driver_lang", driver_lang) // ⭐ 关键修复：保证只返回 1 行
       .maybeSingle();
 
     if (ruleError) {
@@ -81,7 +88,8 @@ export default async function handler(req, res) {
         "⛔ 库存不足，阻止创建支付：",
         order.order_id,
         order.car_model_id,
-        order.start_date
+        order.start_date,
+        driver_lang
       );
       return res.status(409).json({ error: "库存不足，无法继续支付" });
     }
@@ -93,6 +101,7 @@ export default async function handler(req, res) {
       car_model_id: order.car_model_id,
       start_date: order.start_date,
       end_date: order.end_date,
+      driver_lang, // ⭐ 保留，给 webhook / 后续用
       type: "deposit",
     };
 
@@ -123,7 +132,6 @@ export default async function handler(req, res) {
 
       metadata,
 
-      // ⭐⭐⭐ 正确的回跳地址 ⭐⭐⭐
       success_url: `${FRONTEND_URL}/booking?step=5&order_id=${order.order_id}`,
       cancel_url: `${FRONTEND_URL}/booking?step=4&order_id=${order.order_id}&cancel=1`,
     });
@@ -132,6 +140,7 @@ export default async function handler(req, res) {
     await supabase.rpc("lock_inventory", {
       p_car_model_id: order.car_model_id,
       p_date: order.start_date,
+      p_driver_lang: driver_lang, // ⭐ 最小修复：防止锁错语言库存
     });
 
     return res.status(200).json({ url: session.url });
@@ -140,6 +149,7 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
+
 
 
 
