@@ -36,8 +36,8 @@ export default async function handler(req, res) {
   const car_model_id = body.car_model_id;
 
   // ✅ 司机语言（库存维度的一部分）
-  // 兼容：ZH / JP / zh / jp
-  const rawLang = body.driver_lang;
+  // ⭐ 最小修复：当未传 driver_lang 时，默认 ZH（兼容线上旧请求）
+  const rawLang = body.driver_lang ?? "ZH";
   const driver_lang = rawLang
     ? String(rawLang).toUpperCase() === "ZH"
       ? "ZH"
