@@ -33,17 +33,33 @@ export default async function handler(req, res) {
   const body = req.body || {};
   const car_model_id = body.car_model_id;
 
+  // ✅ 新增：司机语言（库存维度的一部分）
+  // 兼容：ZH/JP 或 zh/jp
+  const rawLang = body.driver_lang;
+  const driver_lang = rawLang
+    ? String(rawLang).toUpperCase() === "ZH"
+      ? "ZH"
+      : String(rawLang).toUpperCase() === "JP"
+      ? "JP"
+      : null
+    : null;
+
   // ✅ 兼容两套参数：
   // 旧：date
   // 新：start_date/end_date
   const start = body.start_date || body.date;
   const end = body.end_date || body.date;
 
-  if (!car_model_id || !start || !end) {
+  if (!car_model_id || !start || !end || !driver_lang) {
     return res.status(400).json({
       ok: false,
       error: "missing params",
-      got: { car_model_id: !!car_model_id, start: !!start, end: !!end },
+      got: {
+        car_model_id: !!car_model_id,
+        start: !!start,
+        end: !!end,
+        driver_lang: !!driver_lang,
+      },
     });
   }
 
@@ -54,6 +70,7 @@ export default async function handler(req, res) {
     .from("inventory_rules_v")
     .select("date, remaining_qty_calc")
     .eq("car_model_id", car_model_id)
+    .eq("driver_lang", driver_lang)
     .in("date", days);
 
   if (error) {
@@ -62,7 +79,9 @@ export default async function handler(req, res) {
   }
 
   // ✅ 缺日当 0（避免“中间没记录还能下”的漏洞）
-  const map = new Map((data || []).map((r) => [r.date, Number(r.remaining_qty_calc ?? 0)]));
+  const map = new Map(
+    (data || []).map((r) => [r.date, Number(r.remaining_qty_calc ?? 0)])
+  );
 
   let min = Infinity;
   let firstBad = null;
