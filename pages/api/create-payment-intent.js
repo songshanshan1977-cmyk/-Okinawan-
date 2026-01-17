@@ -1,3 +1,5 @@
+// pages/api/create-payment-intent.js
+
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 
@@ -30,12 +32,15 @@ export default async function handler(req, res) {
 
     console.log("🔍 create-payment-intent 查询订单：", orderId);
 
-    // 👉 用 order_id 查询订单
-    const { data: order, error } = await supabase
+    // ✅ 用 order_id 查询订单（只取最新 1 条，避免重复订单导致 PGRST116）
+    const { data: orders, error } = await supabase
       .from("orders")
       .select("*")
       .eq("order_id", orderId.trim())
-      .maybeSingle();
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    const order = orders?.[0] ?? null;
 
     if (error) {
       console.error("❌ 查询 orders 出错：", error);
@@ -130,11 +135,11 @@ export default async function handler(req, res) {
     });
 
     return res.status(200).json({ url: session.url });
-
   } catch (err) {
     console.error("🔥 create-payment-intent 未捕获异常：", err);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
+
 
 
