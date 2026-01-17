@@ -19,6 +19,28 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing order_id" });
     }
 
+    // ✅ [仅新增] 幂等：同一个 order_id 已存在 → 直接返回，不再重复 insert
+    const { data: existing, error: existingErr } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("order_id", String(data.order_id).trim())
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existingErr) {
+      console.error("❌ Supabase select existing order error:", existingErr);
+      return res.status(500).json({ error: existingErr.message });
+    }
+
+    if (existing) {
+      return res.status(200).json({
+        success: true,
+        order: existing,
+        reused: true, // ✅ 标记：本次是复用旧订单（不影响前端）
+      });
+    }
+
     // ✅ 所有 NOT NULL 字段做防御校验
     const requiredFields = [
       "car_model_id",
