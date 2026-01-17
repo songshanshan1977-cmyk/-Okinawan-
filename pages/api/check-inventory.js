@@ -28,13 +28,15 @@ function rangeDays(start, end) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ ok: false });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false });
+  }
 
   const body = req.body || {};
   const car_model_id = body.car_model_id;
 
-  // ✅ 新增：司机语言（库存维度的一部分）
-  // 兼容：ZH/JP 或 zh/jp
+  // ✅ 司机语言（库存维度的一部分）
+  // 兼容：ZH / JP / zh / jp
   const rawLang = body.driver_lang;
   const driver_lang = rawLang
     ? String(rawLang).toUpperCase() === "ZH"
@@ -45,25 +47,26 @@ export default async function handler(req, res) {
     : null;
 
   // ✅ 兼容两套参数：
-  // 旧：date
-  // 新：start_date/end_date
+  // 单日：date
+  // 多日：start_date / end_date
   const start = body.start_date || body.date;
   const end = body.end_date || body.date;
 
-  if (!car_model_id || !start || !end || !driver_lang) {
+  // ❗ 这里只校验「必须存在的维度」
+  if (!car_model_id || !driver_lang || !start || !end) {
+    console.warn("check-inventory missing params", {
+      car_model_id,
+      driver_lang,
+      start,
+      end,
+    });
     return res.status(400).json({
       ok: false,
       error: "missing params",
-      got: {
-        car_model_id: !!car_model_id,
-        start: !!start,
-        end: !!end,
-        driver_lang: !!driver_lang,
-      },
     });
   }
 
-  // ✅ 多日：任意一天剩余<=0 => 无库存
+  // ✅ 多日规则：只要有一天 <= 0 就算无库存
   const days = rangeDays(start, end);
 
   const { data, error } = await supabase
@@ -74,11 +77,11 @@ export default async function handler(req, res) {
     .in("date", days);
 
   if (error) {
-    console.error("inventory_rules_v error:", error);
+    console.error("inventory_rules_v2 error:", error);
     return res.status(500).json({ ok: false });
   }
 
-  // ✅ 缺日当 0（避免“中间没记录还能下”的漏洞）
+  // ✅ 缺日视为 0（防止“没生成库存却能下单”）
   const map = new Map(
     (data || []).map((r) => [r.date, Number(r.remaining_qty_calc ?? 0)])
   );
@@ -96,7 +99,11 @@ export default async function handler(req, res) {
     ok: min > 0,
     remaining_qty: Number.isFinite(min) ? min : 0,
     first_bad_date: firstBad,
-    checked: { start_date: start, end_date: end, days_count: days.length },
+    checked: {
+      start_date: start,
+      end_date: end,
+      days_count: days.length,
+    },
   });
 }
 
