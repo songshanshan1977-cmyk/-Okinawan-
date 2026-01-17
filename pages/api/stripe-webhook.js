@@ -46,6 +46,18 @@ async function readResponseSafe(resp) {
   return { text, json };
 }
 
+// ✅ 最小必要：把订单里的 zh/jp 规范成 ZH/JP（匹配 inventory / inventory_rules_v）
+function normalizeDriverLang(lang) {
+  if (!lang) return "ZH";
+  const s = String(lang).trim();
+  const lower = s.toLowerCase();
+  if (lower === "zh") return "ZH";
+  if (lower === "jp") return "JP";
+  const upper = s.toUpperCase();
+  if (upper === "ZH" || upper === "JP") return upper;
+  return "ZH";
+}
+
 // =======================
 // webhook handler
 // =======================
@@ -69,10 +81,8 @@ export default async function handler(req, res) {
     // =========================
     // ✅ 支付成功主入口（关键）
     // =========================
-    const isCheckoutCompleted =
-      event.type === "checkout.session.completed";
-    const isPaymentSucceeded =
-      event.type === "payment_intent.succeeded";
+    const isCheckoutCompleted = event.type === "checkout.session.completed";
+    const isPaymentSucceeded = event.type === "payment_intent.succeeded";
 
     if (isCheckoutCompleted || isPaymentSucceeded) {
       const obj = event.data.object;
@@ -80,29 +90,29 @@ export default async function handler(req, res) {
       const orderId = obj.metadata?.order_id;
 
       if (!orderId) {
-        console.warn(
-          "⚠️ 支付成功事件但没有 order_id",
-          event.type
-        );
+        console.warn("⚠️ 支付成功事件但没有 order_id", event.type);
         return res.json({ received: true });
       }
 
       /**
        * 1️⃣ 读取订单
+       * ✅ 只改字段：status -> payment_status
        */
       const { data: order, error: orderErr } = await supabase
         .from("orders")
-        .select(`
+        .select(
+          `
           id,
           order_id,
-          status,
+          payment_status,
           car_model_id,
           start_date,
           end_date,
           driver_lang,
           inventory_locked,
           email_status
-        `)
+        `
+        )
         .eq("order_id", orderId)
         .single();
 
@@ -111,31 +121,34 @@ export default async function handler(req, res) {
         return res.json({ received: true });
       }
 
-      const wasPaid = order.status === "paid";
+      const wasPaid = order.payment_status === "paid";
+      const driverLang = normalizeDriverLang(order.driver_lang);
 
       /**
        * ======================
        * A1：订单 + payments
+       * ✅ 只改字段：status -> payment_status
+       * ✅ 移除 paid_at（你库里没有这个字段）
        * ======================
        */
       if (!wasPaid) {
-        await supabase
+        const upd = await supabase
           .from("orders")
           .update({
-            status: "paid",
-            paid_at: new Date().toISOString(),
+            payment_status: "paid",
           })
           .eq("order_id", orderId)
-          .eq("status", "pending");
+          .eq("payment_status", "pending");
 
-        await supabase.from("payments").upsert(
+        if (upd.error) {
+          console.error("❌ A1 更新 orders.payment_status 失败", orderId, upd.error);
+        }
+
+        const pay = await supabase.from("payments").upsert(
           {
             order_id: orderId,
-            stripe_session_id: obj.id,
-            amount:
-              obj.amount_total ??
-              obj.amount_received ??
-              null,
+            stripe_session_id: obj.id, // checkout.session.id 或 payment_intent.id（保持你原逻辑）
+            amount: obj.amount_total ?? obj.amount_received ?? null,
             currency: obj.currency ?? null,
             car_model_id: order.car_model_id,
             paid: true,
@@ -143,32 +156,45 @@ export default async function handler(req, res) {
           { onConflict: "stripe_session_id" }
         );
 
+        if (pay.error) {
+          console.error("❌ A1 payments upsert 失败", orderId, pay.error);
+        }
+
         console.log("✅ A1 完成：订单已 paid", orderId);
       }
 
       /**
        * ======================
        * A2：库存锁定（幂等）
+       * ✅ 只改：driver_lang 传标准化后的 ZH/JP
        * ======================
        */
       if (order.inventory_locked !== true) {
-        await supabase.rpc("increment_locked_qty", {
+        const rpc = await supabase.rpc("increment_locked_qty", {
           p_date: order.start_date,
-          p_end_date: order.end_date || order.start_date,
+          p_end_date: order.end_date || order.start_date, // ✅ 多日逻辑不动
           p_car_model_id: order.car_model_id,
-          p_driver_lang: order.driver_lang,
+          p_driver_lang: driverLang, // ✅ 最小必要修复
         });
 
-        await supabase
-          .from("orders")
-          .update({ inventory_locked: true })
-          .eq("order_id", orderId);
+        if (rpc.error) {
+          console.error("❌ A2 扣库存 RPC 失败", orderId, rpc.error);
+        } else {
+          const lockUpd = await supabase
+            .from("orders")
+            .update({ inventory_locked: true })
+            .eq("order_id", orderId);
 
-        console.log("✅ A2 完成：库存已锁定", {
-          order_id: orderId,
-          car_model_id: order.car_model_id,
-          driver_lang: order.driver_lang,
-        });
+          if (lockUpd.error) {
+            console.error("❌ A2 写回 inventory_locked 失败", orderId, lockUpd.error);
+          }
+
+          console.log("✅ A2 完成：库存已锁定", {
+            order_id: orderId,
+            car_model_id: order.car_model_id,
+            driver_lang: driverLang,
+          });
+        }
       } else {
         console.log("🔁 A2 幂等命中，跳过库存扣减", orderId);
       }
@@ -176,27 +202,23 @@ export default async function handler(req, res) {
       /**
        * ======================
        * B3：确认邮件
+       * （逻辑不动）
        * ======================
        */
       if (!wasPaid && order.email_status !== "sent") {
         try {
           const baseUrl = getBaseUrl();
 
-          const resp = await fetch(
-            `${baseUrl}/api/send-confirmation-email`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ order_id: orderId }),
-            }
-          );
+          const resp = await fetch(`${baseUrl}/api/send-confirmation-email`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order_id: orderId }),
+          });
 
           const { text, json } = await readResponseSafe(resp);
 
           if (!resp.ok) {
-            throw new Error(
-              `B3 non-200 ${resp.status} ${json || text}`
-            );
+            throw new Error(`B3 non-200 ${resp.status} ${json || text}`);
           }
 
           console.log("📧 B3 确认邮件已触发", orderId);
@@ -208,27 +230,23 @@ export default async function handler(req, res) {
       /**
        * ======================
        * B0：新订单提醒
+       * （逻辑不动）
        * ======================
        */
       if (!wasPaid) {
         try {
           const baseUrl = getBaseUrl();
 
-          const resp = await fetch(
-            `${baseUrl}/api/send-notify-new-order`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ order_id: orderId }),
-            }
-          );
+          const resp = await fetch(`${baseUrl}/api/send-notify-new-order`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order_id: orderId }),
+          });
 
           const { text, json } = await readResponseSafe(resp);
 
           if (!resp.ok) {
-            throw new Error(
-              `B0 non-200 ${resp.status} ${json || text}`
-            );
+            throw new Error(`B0 non-200 ${resp.status} ${json || text}`);
           }
 
           console.log("📩 B0 新订单提醒已触发", orderId);
@@ -241,6 +259,7 @@ export default async function handler(req, res) {
     /**
      * =========================
      * checkout.session.expired
+     * ✅ 只改：driver_lang 规范化
      * =========================
      */
     if (event.type === "checkout.session.expired") {
@@ -258,7 +277,7 @@ export default async function handler(req, res) {
           await supabase.rpc("release_inventory_lock", {
             p_car_model_id: order.car_model_id,
             p_date: order.start_date,
-            p_driver_lang: order.driver_lang,
+            p_driver_lang: normalizeDriverLang(order.driver_lang),
           });
 
           console.log("⏰ 会话过期，库存锁已释放", orderId);
