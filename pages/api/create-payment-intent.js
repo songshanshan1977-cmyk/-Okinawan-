@@ -94,7 +94,7 @@ export default async function handler(req, res) {
     // ⭐ 创建 Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      payment_method_types: ["card"],
+      payment_method_types: ["card", "alipay"],
 
       line_items: [
         {
