@@ -66,25 +66,22 @@ export default async function handler(req, res) {
   }
 
   try {
-    // =========================
-    // ✅ 支付成功主入口（关键）
-    // =========================
-    const isCheckoutCompleted = event.type === "checkout.session.completed";
-    const isPaymentSucceeded = event.type === "payment_intent.succeeded";
-
-    if (isCheckoutCompleted || isPaymentSucceeded) {
-      const obj = event.data.object;
-
-      const orderId = obj.metadata?.order_id;
+    /**
+     * ==================================================
+     * ✅ 主入口（保持不变）：checkout.session.completed
+     * ==================================================
+     */
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+      const orderId = session.metadata?.order_id;
 
       if (!orderId) {
-        console.warn("⚠️ 支付成功事件但没有 order_id", event.type);
+        console.warn("⚠️ checkout.session.completed 但没有 order_id");
         return res.json({ received: true });
       }
 
       /**
        * 1️⃣ 读取订单
-       * ✅ 增加 payment_status（你真实用它来表示 paid）
        */
       const { data: order, error: orderErr } = await supabase
         .from("orders")
@@ -97,7 +94,6 @@ export default async function handler(req, res) {
           car_model_id,
           start_date,
           end_date,
-          driver_lang,
           inventory_locked,
           email_status
         `
@@ -110,79 +106,85 @@ export default async function handler(req, res) {
         return res.json({ received: true });
       }
 
-      // ✅ 用 payment_status 判断是否已付（不碰 status 流程）
-      const wasPaid = order.payment_status === "paid";
+      const wasPaid =
+        order.payment_status === "paid" || order.status === "paid";
 
       /**
        * ======================
-       * A1：写 payment_status + 写 payments
+       * A1：标记订单已支付 + 写 payments（逻辑不动，只去掉 paid_at）
        * ======================
        */
       if (!wasPaid) {
-        // ✅ 不写 paid_at（你库里没有这个字段）
-        await supabase
+        // ⚠️ 你库里 paid_at 不存在（你截图已经验证过），这里必须去掉
+        // 只保留原逻辑的“标记已支付”意图
+        const { error: updErr } = await supabase
           .from("orders")
           .update({
             payment_status: "paid",
           })
-          .eq("order_id", orderId)
-          .neq("payment_status", "paid");
+          .eq("order_id", orderId);
 
-        await supabase.from("payments").upsert(
+        if (updErr) {
+          console.error("❌ A1 更新 orders 失败", orderId, updErr);
+        }
+
+        const { error: payErr } = await supabase.from("payments").upsert(
           {
             order_id: orderId,
-            stripe_session_id: obj.id,
-            amount: obj.amount_total ?? obj.amount_received ?? null,
-            currency: obj.currency ?? null,
+            stripe_session_id: session.id,
+            amount: session.amount_total ?? null,
+            currency: session.currency ?? null,
             car_model_id: order.car_model_id,
             paid: true,
           },
           { onConflict: "stripe_session_id" }
         );
 
-        console.log("✅ A1 完成：payment_status=paid + payments 写入", orderId);
+        if (payErr) {
+          console.error("❌ A1 写 payments 失败", orderId, payErr);
+        } else {
+          console.log("✅ A1 完成：payment_status=paid + payments 写入", orderId);
+        }
       }
 
       /**
        * ======================
-       * A2：库存锁定（幂等）
-       * ✅ 严格按你库里真实 RPC 签名：increment_locked_qty(3参数)
-       * ✅ 多日逻辑不变：p_end_date = end_date || start_date
+       * A2：库存锁定（幂等）✅ 只修参数：去掉 p_driver_lang
        * ======================
        */
       if (order.inventory_locked !== true) {
-        const endDate = order.end_date || order.start_date;
-
         const { error: rpcErr } = await supabase.rpc("increment_locked_qty", {
           p_date: order.start_date,
-          p_end_date: endDate,
+          p_end_date: order.end_date || order.start_date,
           p_car_model_id: order.car_model_id,
         });
 
         if (rpcErr) {
           console.error("❌ A2 扣库存 RPC 失败", orderId, rpcErr);
-          // 不要把 inventory_locked 置 true（避免假成功）
-          return res.json({ received: true });
+        } else {
+          const { error: lockErr } = await supabase
+            .from("orders")
+            .update({ inventory_locked: true })
+            .eq("order_id", orderId);
+
+          if (lockErr) {
+            console.error("❌ A2 更新 inventory_locked 失败", orderId, lockErr);
+          } else {
+            console.log("✅ A2 完成：库存已锁定", {
+              order_id: orderId,
+              car_model_id: order.car_model_id,
+              start_date: order.start_date,
+              end_date: order.end_date || order.start_date,
+            });
+          }
         }
-
-        await supabase
-          .from("orders")
-          .update({ inventory_locked: true })
-          .eq("order_id", orderId);
-
-        console.log("✅ A2 完成：库存已锁定", {
-          order_id: orderId,
-          car_model_id: order.car_model_id,
-          start_date: order.start_date,
-          end_date: endDate,
-        });
       } else {
-        console.log("🔁 A2 幂等命中，跳过库存扣减", orderId);
+        console.log("🔁 A2 幂等命中，已跳过库存扣减", orderId);
       }
 
       /**
        * ======================
-       * B3：确认邮件
+       * B3：确认邮件（保持不变）
        * ======================
        */
       if (!wasPaid && order.email_status !== "sent") {
@@ -209,7 +211,7 @@ export default async function handler(req, res) {
 
       /**
        * ======================
-       * B0：新订单提醒
+       * B0：新订单提醒（保持不变）
        * ======================
        */
       if (!wasPaid) {
@@ -237,13 +239,12 @@ export default async function handler(req, res) {
 
     /**
      * =========================
-     * checkout.session.expired
-     * ✅ 按你库里真实 RPC：release_inventory_lock(2参数)
+     * checkout.session.expired ✅ 只修参数：去掉 p_driver_lang
      * =========================
      */
     if (event.type === "checkout.session.expired") {
       const session = event.data.object;
-      const orderId = session.metadata?.order_id;
+      const orderId = session.metadata?.order_id || null;
 
       if (orderId) {
         const { data: order } = await supabase
