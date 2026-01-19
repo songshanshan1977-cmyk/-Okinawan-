@@ -107,7 +107,7 @@ async function sendCustomerEmailOnce(order) {
 
   try {
     await resend.emails.send({
-      from: RESEND_FROM, // ⭐ 必须有
+      from: RESEND_FROM,
       to: order.email,
       subject: mail.subject,
       html: mail.html,
@@ -141,7 +141,7 @@ async function sendOpsEmailOnce(order) {
 
   try {
     await resend.emails.send({
-      from: RESEND_FROM, // ⭐ 必须有
+      from: RESEND_FROM,
       to: opsTo,
       subject: mail.subject,
       html: mail.html,
@@ -154,6 +154,54 @@ async function sendOpsEmailOnce(order) {
       .eq("order_id", order.order_id);
     return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
   }
+}
+
+// ====================== ⭐新增：driver_lang 统一成库存用的 ZH / JP ======================
+function normalizeDriverLang(lang) {
+  const v = String(lang || "ZH").trim().toUpperCase();
+  return v === "JP" ? "JP" : "ZH";
+}
+
+// ====================== ⭐新增：支付成功后“最终扣库存” ======================
+async function finalizeInventoryAfterPaid(order) {
+  // 你库存是按：date + car_model_id + driver_lang
+  const date = order.start_date;
+  const car_model_id = order.car_model_id;
+  const driver_lang = normalizeDriverLang(order.driver_lang);
+
+  if (!date || !car_model_id) {
+    return { skipped: true, reason: "missing_date_or_model" };
+  }
+
+  // 1) 先读出当前库存行
+  const { data: inv, error: invErr } = await supabase
+    .from("inventory")
+    .select("date, car_model_id, driver_lang, total_qty, booked_qty, locked_qty")
+    .eq("date", date)
+    .eq("car_model_id", car_model_id)
+    .eq("driver_lang", driver_lang)
+    .maybeSingle();
+
+  if (invErr) return { skipped: true, reason: "inventory_read_failed", error: invErr.message };
+  if (!inv) return { skipped: true, reason: "inventory_row_not_found" };
+
+  const bookedNext = (inv.booked_qty || 0) + 1;
+
+  // locked_qty 如果本来就是 0，也不要减成负数（你之前遇到 locked_qty=0 的情况）
+  const lockedNow = inv.locked_qty || 0;
+  const lockedNext = lockedNow > 0 ? lockedNow - 1 : 0;
+
+  // 2) 写回（最小可用：不依赖 RPC）
+  const { error: upInvErr } = await supabase
+    .from("inventory")
+    .update({ booked_qty: bookedNext, locked_qty: lockedNext })
+    .eq("date", date)
+    .eq("car_model_id", car_model_id)
+    .eq("driver_lang", driver_lang);
+
+  if (upInvErr) return { skipped: true, reason: "inventory_update_failed", error: upInvErr.message };
+
+  return { ok: true, driver_lang, before: inv, after: { booked_qty: bookedNext, locked_qty: lockedNext } };
 }
 
 export default async function handler(req, res) {
@@ -186,12 +234,13 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, skipped: "missing_orderId" });
       }
 
-      // ========= ① 读取订单（字段严格按你表结构） =========
+      // ========= ① 读取订单（加上 payment_status 用于幂等） =========
       const { data: order, error: orderErr } = await supabase
         .from("orders")
         .select(
           [
             "order_id",
+            "payment_status",
             "start_date",
             "car_model_id",
             "driver_lang",
@@ -215,19 +264,47 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, skipped: "order_not_found" });
       }
 
-      // ========= ② 你已封板成功的库存锁定逻辑：保持原样 =========
-      // ✅ 把你现在线上“已经成功”的 lock_inventory_v2 代码原封不动粘回这里
+      // ========= ② ⭐新增：先把订单推进到 paid（幂等） =========
+      let orderPaidResult = { skipped: true, reason: "already_paid" };
+
+      if (order.payment_status !== "paid") {
+        const { error: payErr } = await supabase
+          .from("orders")
+          .update({ payment_status: "paid" })
+          .eq("order_id", order.order_id);
+
+        if (payErr) {
+          console.error("update order payment_status failed:", payErr.message);
+          // 这里不要 throw，避免 Stripe 不断重试导致更乱
+          orderPaidResult = { skipped: true, reason: "order_update_failed", error: payErr.message };
+        } else {
+          orderPaidResult = { ok: true };
+        }
+      }
+
+      // ========= ③ 你已封板成功的库存锁定逻辑：保持原样（不动） =========
+      // ✅ 如果你之前线上真的有 “lock_inventory_v2” 就把原封不动代码放回这里
       // if (!order.inventory_locked) {
       //   await supabase.rpc("lock_inventory_v2", { ... });
       // }
 
-      // ========= ③ 邮件幂等：只发一次（单日 start_date） =========
+      // ========= ④ ⭐新增：支付成功后“最终扣库存” =========
+      // 只在首次 paid 时扣一次（避免重复 webhook 把 booked_qty 加爆）
+      let invResult = { skipped: true, reason: "not_first_paid" };
+      if (orderPaidResult.ok) {
+        invResult = await finalizeInventoryAfterPaid(order);
+      }
+
+      // ========= ⑤ 邮件幂等：只发一次（单日 start_date） =========
       const r1 = await sendCustomerEmailOnce(order);
       const r2 = await sendOpsEmailOnce(order);
 
       return res.status(200).json({
         ok: true,
+        event: event.type,
         order_id: orderId,
+        order_paid: orderPaidResult,
+        inventory: invResult,
         email_customer: r1,
         email_ops: r2,
       });
@@ -239,4 +316,5 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, error: String(e?.message || e) });
   }
 }
+
 
