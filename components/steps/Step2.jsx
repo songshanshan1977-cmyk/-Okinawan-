@@ -293,12 +293,18 @@ export default function Step2({ initialData, onNext, onBack }) {
             onChange={(e) => setWechat(e.target.value)}
           />
 
-          <input
-            style={input}
-            placeholder="邮箱（必填）"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
+          {/* ✅✅ 方案一：邮箱输入框下面加提示（不影响输入，一直可见） */}
+          <div style={{ display: "grid", gap: 6 }}>
+            <input
+              style={input}
+              placeholder="邮箱（必填）"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+            <div style={{ fontSize: 12, color: "#6b7280" }}>
+              请填写正确邮箱，付款成功后将发送订单确认邮件
+            </div>
+          </div>
 
           {/* ✅ 已有：行程（可选） */}
           <input
