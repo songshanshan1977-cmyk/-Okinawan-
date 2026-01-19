@@ -11,18 +11,10 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ✅ 统一拿站点域名（你 Vercel 里已经加了 NEXT_PUBLIC_SITE_URL）
-function getSiteUrl(req) {
-  const fromEnv =
-    process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "";
-  if (fromEnv) return fromEnv.replace(/\/$/, "");
-
-  // 兜底：用当前请求 host（防止环境变量没生效）
-  const proto =
-    (req.headers["x-forwarded-proto"] || "https").toString().split(",")[0];
-  const host =
-    (req.headers["x-forwarded-host"] || req.headers.host || "").toString();
-  return `${proto}://${host}`.replace(/\/$/, "");
+// ✅ 只允许用环境变量拿站点域名（防止手机端/代理导致 host 推断错误）
+function getSiteUrlFromEnv() {
+  const u = (process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "").trim();
+  return u ? u.replace(/\/$/, "") : "";
 }
 
 export default async function handler(req, res) {
@@ -33,7 +25,15 @@ export default async function handler(req, res) {
     const { orderId } = req.body || {};
     if (!orderId) return res.status(400).json({ error: "orderId missing" });
 
-    // 1) 读取订单（用于校验/补充信息；不改你的库存逻辑）
+    const siteUrl = getSiteUrlFromEnv();
+    if (!siteUrl) {
+      return res.status(500).json({
+        error:
+          "SITE_URL missing. Please set NEXT_PUBLIC_SITE_URL (or SITE_URL) in Vercel Production env.",
+      });
+    }
+
+    // 1) 读取订单（不改库存逻辑）
     const { data: order, error: orderErr } = await supabase
       .from("orders")
       .select("order_id, deposit_amount")
@@ -44,9 +44,7 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    const siteUrl = getSiteUrl(req);
-
-    // ✅ 关键：手机端支付完成后必须回跳到 Step5
+    // ✅ 手机端支付完成后必须回跳到 Step5
     const successUrl = `${siteUrl}/booking?step=5&order_id=${encodeURIComponent(
       order.order_id
     )}`;
@@ -54,13 +52,12 @@ export default async function handler(req, res) {
       order.order_id
     )}`;
 
-    // 2) 创建 Stripe Checkout Session
     const deposit = Number(order.deposit_amount || 500);
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
 
-      // ✅【仅新增】明确声明支付方式（解决手机端支付宝页不回跳/无返回商家按钮）
+      // ✅【仅新增】明确声明支付方式（提高支付宝可用性）
       payment_method_types: ["card", "alipay"],
 
       line_items: [
@@ -68,17 +65,16 @@ export default async function handler(req, res) {
           quantity: 1,
           price_data: {
             currency: "cny",
-            unit_amount: Math.round(deposit * 100), // 分
+            unit_amount: Math.round(deposit * 100),
             product_data: { name: "冲绳包车押金" },
           },
         },
       ],
 
-      // ✅ 这俩就是手机端回不来的核心
       success_url: successUrl,
       cancel_url: cancelUrl,
 
-      // ✅ 让 webhook 能拿到订单号（不改你现有流程）
+      // ✅ 让 webhook 能拿到订单号
       client_reference_id: order.order_id,
       metadata: { order_id: order.order_id },
     });
@@ -91,5 +87,6 @@ export default async function handler(req, res) {
       .json({ error: e?.message || "Internal Server Error" });
   }
 }
+
 
 
