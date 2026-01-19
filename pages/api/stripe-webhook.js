@@ -32,12 +32,18 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// =============== 邮件模板（单日：只用 start_date） ===============
+// =============== 邮件模板（单日：只用 start_date 展示；多日你现在也可以改成 dateText） ===============
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
   const balance =
     order.balance_due ??
     (order.total_price ? order.total_price - deposit : null);
+
+  // ✅ 用车日期展示（支持多日显示）
+  const dateText =
+    order.end_date && order.end_date !== order.start_date
+      ? `${order.start_date} → ${order.end_date}`
+      : order.start_date || "-";
 
   return {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
@@ -45,7 +51,7 @@ function buildCustomerEmail(order) {
       <div style="font-family:Arial,sans-serif;line-height:1.6">
         <h2>预约已确认（押金已支付）</h2>
         <p><b>订单号：</b>${order.order_id}</p>
-        <p><b>用车日期：</b>${order.start_date || "-"}</p>
+        <p><b>用车日期：</b>${dateText}</p>
         <p><b>车型ID：</b>${order.car_model_id || "-"}</p>
         <p><b>司机语言：</b>${order.driver_lang || "-"}</p>
         <p><b>时长：</b>${order.duration || "-"}</p>
@@ -64,13 +70,18 @@ function buildCustomerEmail(order) {
 }
 
 function buildOpsEmail(order) {
+  const dateText =
+    order.end_date && order.end_date !== order.start_date
+      ? `${order.start_date} → ${order.end_date}`
+      : order.start_date || "-";
+
   return {
-    subject: `【新订单】${order.order_id}｜${order.start_date || "-"}`,
+    subject: `【新订单】${order.order_id}｜${dateText}`,
     html: `
       <div style="font-family:Arial,sans-serif;line-height:1.6">
         <h2>新订单提醒</h2>
         <p><b>订单号：</b>${order.order_id}</p>
-        <p><b>用车日期：</b>${order.start_date || "-"}</p>
+        <p><b>用车日期：</b>${dateText}</p>
         <p><b>车型ID：</b>${order.car_model_id || "-"}</p>
         <p><b>司机语言：</b>${order.driver_lang || "-"}</p>
         <p><b>时长：</b>${order.duration || "-"}</p>
@@ -83,11 +94,10 @@ function buildOpsEmail(order) {
   };
 }
 
-// =============== 幂等：只允许“首次”发送 ===============
+// =============== 幂等：只允许“首次”发送（客户） ===============
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return { skipped: true, reason: "no_customer_email" };
-  if (order.email_customer_sent)
-    return { skipped: true, reason: "already_sent" };
+  if (order.email_customer_sent) return { skipped: true, reason: "already_sent" };
 
   // 先抢占：把 false -> true（并发/重复 webhook 时可防重复）
   const { data: updated, error: upErr } = await supabase
@@ -120,14 +130,12 @@ async function sendCustomerEmailOnce(order) {
       .from("orders")
       .update({ email_customer_sent: false })
       .eq("order_id", order.order_id);
-    return {
-      skipped: true,
-      reason: "send_failed",
-      error: e?.message || String(e),
-    };
+
+    return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
   }
 }
 
+// =============== 幂等：只允许“首次”发送（运营） ===============
 async function sendOpsEmailOnce(order) {
   const opsTo = "songshanshan1977@gmail.com";
   if (order.email_ops_sent) return { skipped: true, reason: "already_sent" };
@@ -139,10 +147,8 @@ async function sendOpsEmailOnce(order) {
     .eq("email_ops_sent", false)
     .select("order_id");
 
-  if (upErr)
-    return { skipped: true, reason: "db_update_failed", error: upErr.message };
-  if (!updated || updated.length === 0)
-    return { skipped: true, reason: "already_sent_race" };
+  if (upErr) return { skipped: true, reason: "db_update_failed", error: upErr.message };
+  if (!updated || updated.length === 0) return { skipped: true, reason: "already_sent_race" };
 
   const mail = buildOpsEmail(order);
 
@@ -159,15 +165,12 @@ async function sendOpsEmailOnce(order) {
       .from("orders")
       .update({ email_ops_sent: false })
       .eq("order_id", order.order_id);
-    return {
-      skipped: true,
-      reason: "send_failed",
-      error: e?.message || String(e),
-    };
+
+    return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
   }
 }
 
-// ⭐ 最小必要：driver_lang 统一成库存用的 ZH / JP（避免 orders 里是 zh/jp 导致对不上 inventory）
+// ⭐ 最小必要：orders.driver_lang (zh/jp) → inventory.driver_lang (ZH/JP)
 function normalizeDriverLang(lang) {
   const v = String(lang || "ZH").trim().toUpperCase();
   return v === "JP" ? "JP" : "ZH";
@@ -188,7 +191,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ✅ 只处理 checkout.session.completed
+    // ✅ 只处理 checkout.session.completed（付款完成）
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
@@ -202,14 +205,14 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, skipped: "missing_orderId" });
       }
 
-      // ========= ① 读取订单（只加 end_date 用于 lock_inventory_v2） =========
+      // ① 读取订单（加 end_date，用于 lock_inventory_v2）
       const { data: order, error: orderErr } = await supabase
         .from("orders")
         .select(
           [
             "order_id",
             "start_date",
-            "end_date", // ✅ 仅为 lock_inventory_v2 参数
+            "end_date",
             "car_model_id",
             "driver_lang",
             "duration",
@@ -228,14 +231,11 @@ export default async function handler(req, res) {
         .single();
 
       if (orderErr || !order) {
-        console.error(
-          "load order error:",
-          orderErr?.message || "order not found"
-        );
+        console.error("load order error:", orderErr?.message || "order not found");
         return res.status(200).json({ ok: true, skipped: "order_not_found" });
       }
 
-      // ========= ② ✅执行 lock_inventory_v2（仅把注释变成真执行，幂等靠 inventory_locked） =========
+      // ② ✅ 付款后执行 lock_inventory_v2（原封不动调用；幂等靠 inventory_locked）
       let invLock = { skipped: true, reason: "already_locked" };
 
       if (!order.inventory_locked) {
@@ -253,29 +253,52 @@ export default async function handler(req, res) {
 
         if (rpcErr) {
           console.error("lock_inventory_v2 failed:", rpcErr.message);
-          // 仍返回 200，避免 Stripe 重试风暴
-          invLock = {
-            skipped: true,
-            reason: "lock_failed",
-            error: rpcErr.message,
-          };
+          // 返回 200，避免 Stripe 重试风暴
+          invLock = { skipped: true, reason: "lock_failed", error: rpcErr.message };
         } else {
-          // ✅ 标记已锁，保证幂等（下一次 webhook 直接跳过）
+          // ✅ 标记已处理，保证幂等（下一次 webhook 直接跳过）
           const { error: markErr } = await supabase
             .from("orders")
             .update({ inventory_locked: true })
             .eq("order_id", order.order_id)
             .eq("inventory_locked", false);
 
-          if (markErr) {
-            console.error("mark inventory_locked failed:", markErr.message);
-          }
+          if (markErr) console.error("mark inventory_locked failed:", markErr.message);
 
           invLock = { ok: true };
         }
       }
 
-      // ========= ③ 邮件幂等：只发一次 =========
+      // ②-b 可选：如果你未来有 confirm_inventory_v2（start/end + model + lang）
+      // 有就执行，没有就跳过，不影响线上
+      let invConfirm = { skipped: true, reason: "not_enabled" };
+      try {
+        // 只有当 lock 成功，才尝试 confirm（避免乱扣）
+        if (invLock.ok) {
+          const p_start_date = order.start_date;
+          const p_end_date = order.end_date || order.start_date;
+          const p_car_model_id = order.car_model_id;
+          const p_driver_lang = normalizeDriverLang(order.driver_lang);
+
+          // ✅ 如果你创建了 confirm_inventory_v2，就会在这里自动执行
+          const { error: cErr } = await supabase.rpc("confirm_inventory_v2", {
+            p_start_date,
+            p_end_date,
+            p_car_model_id,
+            p_driver_lang,
+          });
+
+          if (cErr) {
+            invConfirm = { skipped: true, reason: "confirm_failed_or_not_exist", error: cErr.message };
+          } else {
+            invConfirm = { ok: true };
+          }
+        }
+      } catch (e) {
+        invConfirm = { skipped: true, reason: "confirm_exception", error: e?.message || String(e) };
+      }
+
+      // ③ 邮件幂等：只发一次
       const r1 = await sendCustomerEmailOnce(order);
       const r2 = await sendOpsEmailOnce(order);
 
@@ -283,6 +306,7 @@ export default async function handler(req, res) {
         ok: true,
         order_id: orderId,
         inventory_lock: invLock,
+        inventory_confirm: invConfirm,
         email_customer: r1,
         email_ops: r2,
       });
@@ -291,9 +315,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, ignored: event.type });
   } catch (e) {
     console.error("webhook handler error:", e);
-    return res
-      .status(200)
-      .json({ ok: true, error: String(e?.message || e) });
+    return res.status(200).json({ ok: true, error: String(e?.message || e) });
   }
 }
 
