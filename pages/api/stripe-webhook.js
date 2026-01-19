@@ -19,6 +19,11 @@ const supabase = createClient(
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// ⭐ 兜底：避免 Missing 'from' field (422)
+const RESEND_FROM =
+  process.env.RESEND_FROM || "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
+
+// 读取 raw body
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -27,9 +32,131 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-export default async function handler(req, res) {
-  console.log("stripe-webhook version = 2026-01-19-v3-FROM-FIX");
+// =============== 邮件模板（单日：只用 start_date） ===============
+function buildCustomerEmail(order) {
+  const deposit = order.deposit_amount ?? 500;
+  const balance =
+    order.balance_due ??
+    (order.total_price ? order.total_price - deposit : null);
 
+  return {
+    subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.6">
+        <h2>预约已确认（押金已支付）</h2>
+        <p><b>订单号：</b>${order.order_id}</p>
+        <p><b>用车日期：</b>${order.start_date || "-"}</p>
+        <p><b>车型ID：</b>${order.car_model_id || "-"}</p>
+        <p><b>司机语言：</b>${order.driver_lang || "-"}</p>
+        <p><b>时长：</b>${order.duration || "-"}</p>
+        <hr/>
+        <p><b>押金：</b>${deposit} RMB（已支付）</p>
+        <p><b>尾款：</b>${
+          balance !== null
+            ? `${balance} RMB（用车当日支付司机）`
+            : "用车当日支付司机"
+        }</p>
+        <hr/>
+        <p>如需修改行程或咨询，请直接回复此邮件。</p>
+      </div>
+    `,
+  };
+}
+
+function buildOpsEmail(order) {
+  return {
+    subject: `【新订单】${order.order_id}｜${order.start_date || "-"}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.6">
+        <h2>新订单提醒</h2>
+        <p><b>订单号：</b>${order.order_id}</p>
+        <p><b>用车日期：</b>${order.start_date || "-"}</p>
+        <p><b>车型ID：</b>${order.car_model_id || "-"}</p>
+        <p><b>司机语言：</b>${order.driver_lang || "-"}</p>
+        <p><b>时长：</b>${order.duration || "-"}</p>
+        <hr/>
+        <p><b>客户：</b>${order.name || "-"}</p>
+        <p><b>电话：</b>${order.phone || "-"}</p>
+        <p><b>Email：</b>${order.email || "-"}</p>
+      </div>
+    `,
+  };
+}
+
+// =============== 幂等：只允许“首次”发送 ===============
+async function sendCustomerEmailOnce(order) {
+  if (!order?.email) return { skipped: true, reason: "no_customer_email" };
+  if (order.email_customer_sent) return { skipped: true, reason: "already_sent" };
+
+  // 先抢占：把 false -> true（并发/重复 webhook 时可防重复）
+  const { data: updated, error: upErr } = await supabase
+    .from("orders")
+    .update({ email_customer_sent: true })
+    .eq("order_id", order.order_id)
+    .eq("email_customer_sent", false)
+    .select("order_id");
+
+  if (upErr) {
+    return { skipped: true, reason: "db_update_failed", error: upErr.message };
+  }
+  if (!updated || updated.length === 0) {
+    return { skipped: true, reason: "already_sent_race" };
+  }
+
+  const mail = buildCustomerEmail(order);
+
+  try {
+    await resend.emails.send({
+      from: RESEND_FROM, // ⭐ 必须有
+      to: order.email,
+      subject: mail.subject,
+      html: mail.html,
+    });
+    return { ok: true };
+  } catch (e) {
+    // 发送失败回滚，避免“锁死”
+    await supabase
+      .from("orders")
+      .update({ email_customer_sent: false })
+      .eq("order_id", order.order_id);
+    return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
+  }
+}
+
+async function sendOpsEmailOnce(order) {
+  const opsTo = "songshanshan1977@gmail.com";
+  if (order.email_ops_sent) return { skipped: true, reason: "already_sent" };
+
+  const { data: updated, error: upErr } = await supabase
+    .from("orders")
+    .update({ email_ops_sent: true })
+    .eq("order_id", order.order_id)
+    .eq("email_ops_sent", false)
+    .select("order_id");
+
+  if (upErr) return { skipped: true, reason: "db_update_failed", error: upErr.message };
+  if (!updated || updated.length === 0) return { skipped: true, reason: "already_sent_race" };
+
+  const mail = buildOpsEmail(order);
+
+  try {
+    await resend.emails.send({
+      from: RESEND_FROM, // ⭐ 必须有
+      to: opsTo,
+      subject: mail.subject,
+      html: mail.html,
+    });
+    return { ok: true };
+  } catch (e) {
+    await supabase
+      .from("orders")
+      .update({ email_ops_sent: false })
+      .eq("order_id", order.order_id);
+    return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
+  }
+}
+
+export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   let event;
@@ -37,6 +164,7 @@ export default async function handler(req, res) {
   try {
     const buf = await buffer(req);
     const sig = req.headers["stripe-signature"];
+
     event = stripe.webhooks.constructEvent(buf, sig, webhookSecret);
   } catch (err) {
     console.error("Webhook signature verification failed.", err.message);
@@ -44,56 +172,71 @@ export default async function handler(req, res) {
   }
 
   try {
-    if (event.type !== "checkout.session.completed") {
-      return res.status(200).json({ ok: true });
-    }
+    // ✅ 只处理 checkout.session.completed
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
 
-    const session = event.data.object;
-    const orderId =
-      session?.metadata?.order_id ||
-      session?.metadata?.orderId ||
-      session?.client_reference_id;
+      const orderId =
+        session?.metadata?.order_id ||
+        session?.metadata?.orderId ||
+        session?.client_reference_id;
 
-    if (!orderId) {
-      return res.status(200).json({ ok: true, skipped: "missing_orderId" });
-    }
+      if (!orderId) {
+        console.error("missing orderId in session metadata");
+        return res.status(200).json({ ok: true, skipped: "missing_orderId" });
+      }
 
-    const { data: order } = await supabase
-      .from("orders")
-      .select(
-        "order_id,start_date,car_model_id,driver_lang,duration,name,phone,email"
-      )
-      .eq("order_id", orderId)
-      .single();
+      // ========= ① 读取订单（字段严格按你表结构） =========
+      const { data: order, error: orderErr } = await supabase
+        .from("orders")
+        .select(
+          [
+            "order_id",
+            "start_date",
+            "car_model_id",
+            "driver_lang",
+            "duration",
+            "name",
+            "phone",
+            "email",
+            "total_price",
+            "deposit_amount",
+            "balance_due",
+            "inventory_locked",
+            "email_customer_sent",
+            "email_ops_sent",
+          ].join(",")
+        )
+        .eq("order_id", orderId)
+        .single();
 
-    if (!order) {
-      return res.status(200).json({ ok: true, skipped: "order_not_found" });
-    }
+      if (orderErr || !order) {
+        console.error("load order error:", orderErr?.message || "order not found");
+        return res.status(200).json({ ok: true, skipped: "order_not_found" });
+      }
 
-    const FROM = process.env.RESEND_FROM;
+      // ========= ② 你已封板成功的库存锁定逻辑：保持原样 =========
+      // ✅ 把你现在线上“已经成功”的 lock_inventory_v2 代码原封不动粘回这里
+      // if (!order.inventory_locked) {
+      //   await supabase.rpc("lock_inventory_v2", { ... });
+      // }
 
-    // === 客人确认邮件 ===
-    if (order.email) {
-      await resend.emails.send({
-        from: FROM,
-        to: order.email,
-        subject: `HonestOki 预约确认｜${order.order_id}`,
-        html: `<p>您的订单已确认：${order.order_id}</p>`,
+      // ========= ③ 邮件幂等：只发一次（单日 start_date） =========
+      const r1 = await sendCustomerEmailOnce(order);
+      const r2 = await sendOpsEmailOnce(order);
+
+      return res.status(200).json({
+        ok: true,
+        order_id: orderId,
+        email_customer: r1,
+        email_ops: r2,
       });
     }
 
-    // === 运营新订单提醒 ===
-    await resend.emails.send({
-      from: FROM,
-      to: "songshanshan1977@gmail.com",
-      subject: `【新订单】${order.order_id}｜${order.start_date}`,
-      html: `<p>新订单 ${order.order_id}</p>`,
-    });
-
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true, ignored: event.type });
   } catch (e) {
-    console.error("webhook error:", e);
-    return res.status(200).json({ ok: true });
+    console.error("webhook handler error:", e);
+    return res.status(200).json({ ok: true, error: String(e?.message || e) });
   }
 }
 
