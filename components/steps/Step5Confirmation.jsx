@@ -7,6 +7,17 @@ const carIdNameMap = {
   "453df662-d350-4ab9-b811-61ffcda40d4b": "舒适 10 座海狮",
 };
 
+// ✅ 司机语言展示：兼容 ZH/JP + zh/jp
+function renderDriverLang(v) {
+  const x = String(v || "").toUpperCase();
+  if (x === "JP") return "日文司机";
+  if (x === "ZH") return "中文司机";
+  // 兼容旧值（万一有）
+  if (String(v || "").toLowerCase() === "jp") return "日文司机";
+  if (String(v || "").toLowerCase() === "zh") return "中文司机";
+  return "—";
+}
+
 export default function Step5Confirmation({ onNext }) {
   const [loading, setLoading] = useState(true);
   const [order, setOrder] = useState(null);
@@ -57,8 +68,12 @@ export default function Step5Confirmation({ onNext }) {
 
   const balance = Math.max((order.total_price || 0) - 500, 0);
 
+  // ✅ 关键：联系人兜底（避免 get-order 少字段时页面看起来“没显示”）
+  const contactName = order.name || order.contact_name || order.customer_name || "—";
+  const contactPhone = order.phone || "—";
+
   return (
-    <div className="max-w-3xl mx-auto space-y-6 py-8">
+    <div className="max-w-3xl mx-auto space-y-6 py-8 px-4 md:px-0">
       <h2 className="text-2xl font-bold">✅ 押金支付成功</h2>
       <p>您的订单已确认，我们已为您锁定车辆，请核对以下信息：</p>
 
@@ -76,11 +91,11 @@ export default function Step5Confirmation({ onNext }) {
         </p>
         <p>
           <strong>出发酒店：</strong>
-          {order.departure_hotel}
+          {order.departure_hotel || "—"}
         </p>
         <p>
           <strong>回程酒店：</strong>
-          {order.end_hotel}
+          {order.end_hotel || "—"}
         </p>
 
         <hr />
@@ -90,7 +105,6 @@ export default function Step5Confirmation({ onNext }) {
           {carIdNameMap[order.car_model_id] || "未选择"}
         </p>
 
-        {/* ✅ 只新增：行程（可选）放在车型下面 */}
         {order.itinerary && (
           <p>
             <strong>行程：</strong>
@@ -100,7 +114,7 @@ export default function Step5Confirmation({ onNext }) {
 
         <p>
           <strong>司机语言：</strong>
-          {order.driver_lang === "jp" ? "日文司机" : "中文司机"}
+          {renderDriverLang(order.driver_lang)}
         </p>
         <p>
           <strong>包车时长：</strong>
@@ -129,14 +143,13 @@ export default function Step5Confirmation({ onNext }) {
 
         <p>
           <strong>联系人：</strong>
-          {order.name}
+          {contactName}
         </p>
         <p>
           <strong>电话：</strong>
-          {order.phone}
+          {contactPhone}
         </p>
 
-        {/* ✅ 只新增：微信（可选）放在电话下面 */}
         {order.wechat && (
           <p>
             <strong>微信：</strong>
@@ -152,13 +165,12 @@ export default function Step5Confirmation({ onNext }) {
 
       <button
         onClick={onNext}
-        className="px-6 py-2 bg-black text-white rounded-md"
+        className="w-full md:w-auto px-6 py-3 bg-black text-white rounded-md"
       >
         下一步
       </button>
     </div>
   );
 }
-
 
 
