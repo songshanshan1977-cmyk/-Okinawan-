@@ -86,7 +86,8 @@ function buildOpsEmail(order) {
 // =============== 幂等：只允许“首次”发送 ===============
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return { skipped: true, reason: "no_customer_email" };
-  if (order.email_customer_sent) return { skipped: true, reason: "already_sent" };
+  if (order.email_customer_sent)
+    return { skipped: true, reason: "already_sent" };
 
   // 先抢占：把 false -> true（并发/重复 webhook 时可防重复）
   const { data: updated, error: upErr } = await supabase
@@ -119,7 +120,11 @@ async function sendCustomerEmailOnce(order) {
       .from("orders")
       .update({ email_customer_sent: false })
       .eq("order_id", order.order_id);
-    return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
+    return {
+      skipped: true,
+      reason: "send_failed",
+      error: e?.message || String(e),
+    };
   }
 }
 
@@ -134,8 +139,10 @@ async function sendOpsEmailOnce(order) {
     .eq("email_ops_sent", false)
     .select("order_id");
 
-  if (upErr) return { skipped: true, reason: "db_update_failed", error: upErr.message };
-  if (!updated || updated.length === 0) return { skipped: true, reason: "already_sent_race" };
+  if (upErr)
+    return { skipped: true, reason: "db_update_failed", error: upErr.message };
+  if (!updated || updated.length === 0)
+    return { skipped: true, reason: "already_sent_race" };
 
   const mail = buildOpsEmail(order);
 
@@ -152,56 +159,18 @@ async function sendOpsEmailOnce(order) {
       .from("orders")
       .update({ email_ops_sent: false })
       .eq("order_id", order.order_id);
-    return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
+    return {
+      skipped: true,
+      reason: "send_failed",
+      error: e?.message || String(e),
+    };
   }
 }
 
-// ====================== ⭐新增：driver_lang 统一成库存用的 ZH / JP ======================
+// ⭐ 最小必要：driver_lang 统一成库存用的 ZH / JP（避免 orders 里是 zh/jp 导致对不上 inventory）
 function normalizeDriverLang(lang) {
   const v = String(lang || "ZH").trim().toUpperCase();
   return v === "JP" ? "JP" : "ZH";
-}
-
-// ====================== ⭐新增：支付成功后“最终扣库存” ======================
-async function finalizeInventoryAfterPaid(order) {
-  // 你库存是按：date + car_model_id + driver_lang
-  const date = order.start_date;
-  const car_model_id = order.car_model_id;
-  const driver_lang = normalizeDriverLang(order.driver_lang);
-
-  if (!date || !car_model_id) {
-    return { skipped: true, reason: "missing_date_or_model" };
-  }
-
-  // 1) 先读出当前库存行
-  const { data: inv, error: invErr } = await supabase
-    .from("inventory")
-    .select("date, car_model_id, driver_lang, total_qty, booked_qty, locked_qty")
-    .eq("date", date)
-    .eq("car_model_id", car_model_id)
-    .eq("driver_lang", driver_lang)
-    .maybeSingle();
-
-  if (invErr) return { skipped: true, reason: "inventory_read_failed", error: invErr.message };
-  if (!inv) return { skipped: true, reason: "inventory_row_not_found" };
-
-  const bookedNext = (inv.booked_qty || 0) + 1;
-
-  // locked_qty 如果本来就是 0，也不要减成负数（你之前遇到 locked_qty=0 的情况）
-  const lockedNow = inv.locked_qty || 0;
-  const lockedNext = lockedNow > 0 ? lockedNow - 1 : 0;
-
-  // 2) 写回（最小可用：不依赖 RPC）
-  const { error: upInvErr } = await supabase
-    .from("inventory")
-    .update({ booked_qty: bookedNext, locked_qty: lockedNext })
-    .eq("date", date)
-    .eq("car_model_id", car_model_id)
-    .eq("driver_lang", driver_lang);
-
-  if (upInvErr) return { skipped: true, reason: "inventory_update_failed", error: upInvErr.message };
-
-  return { ok: true, driver_lang, before: inv, after: { booked_qty: bookedNext, locked_qty: lockedNext } };
 }
 
 export default async function handler(req, res) {
@@ -212,7 +181,6 @@ export default async function handler(req, res) {
   try {
     const buf = await buffer(req);
     const sig = req.headers["stripe-signature"];
-
     event = stripe.webhooks.constructEvent(buf, sig, webhookSecret);
   } catch (err) {
     console.error("Webhook signature verification failed.", err.message);
@@ -234,14 +202,14 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, skipped: "missing_orderId" });
       }
 
-      // ========= ① 读取订单（加上 payment_status 用于幂等） =========
+      // ========= ① 读取订单（只加 end_date 用于 lock_inventory_v2） =========
       const { data: order, error: orderErr } = await supabase
         .from("orders")
         .select(
           [
             "order_id",
-            "payment_status",
             "start_date",
+            "end_date", // ✅ 仅为 lock_inventory_v2 参数
             "car_model_id",
             "driver_lang",
             "duration",
@@ -260,51 +228,61 @@ export default async function handler(req, res) {
         .single();
 
       if (orderErr || !order) {
-        console.error("load order error:", orderErr?.message || "order not found");
+        console.error(
+          "load order error:",
+          orderErr?.message || "order not found"
+        );
         return res.status(200).json({ ok: true, skipped: "order_not_found" });
       }
 
-      // ========= ② ⭐新增：先把订单推进到 paid（幂等） =========
-      let orderPaidResult = { skipped: true, reason: "already_paid" };
+      // ========= ② ✅执行 lock_inventory_v2（仅把注释变成真执行，幂等靠 inventory_locked） =========
+      let invLock = { skipped: true, reason: "already_locked" };
 
-      if (order.payment_status !== "paid") {
-        const { error: payErr } = await supabase
-          .from("orders")
-          .update({ payment_status: "paid" })
-          .eq("order_id", order.order_id);
+      if (!order.inventory_locked) {
+        const p_start_date = order.start_date;
+        const p_end_date = order.end_date || order.start_date; // 单日兜底
+        const p_car_model_id = order.car_model_id;
+        const p_driver_lang = normalizeDriverLang(order.driver_lang);
 
-        if (payErr) {
-          console.error("update order payment_status failed:", payErr.message);
-          // 这里不要 throw，避免 Stripe 不断重试导致更乱
-          orderPaidResult = { skipped: true, reason: "order_update_failed", error: payErr.message };
+        const { error: rpcErr } = await supabase.rpc("lock_inventory_v2", {
+          p_start_date,
+          p_end_date,
+          p_car_model_id,
+          p_driver_lang,
+        });
+
+        if (rpcErr) {
+          console.error("lock_inventory_v2 failed:", rpcErr.message);
+          // 仍返回 200，避免 Stripe 重试风暴
+          invLock = {
+            skipped: true,
+            reason: "lock_failed",
+            error: rpcErr.message,
+          };
         } else {
-          orderPaidResult = { ok: true };
+          // ✅ 标记已锁，保证幂等（下一次 webhook 直接跳过）
+          const { error: markErr } = await supabase
+            .from("orders")
+            .update({ inventory_locked: true })
+            .eq("order_id", order.order_id)
+            .eq("inventory_locked", false);
+
+          if (markErr) {
+            console.error("mark inventory_locked failed:", markErr.message);
+          }
+
+          invLock = { ok: true };
         }
       }
 
-      // ========= ③ 你已封板成功的库存锁定逻辑：保持原样（不动） =========
-      // ✅ 如果你之前线上真的有 “lock_inventory_v2” 就把原封不动代码放回这里
-      // if (!order.inventory_locked) {
-      //   await supabase.rpc("lock_inventory_v2", { ... });
-      // }
-
-      // ========= ④ ⭐新增：支付成功后“最终扣库存” =========
-      // 只在首次 paid 时扣一次（避免重复 webhook 把 booked_qty 加爆）
-      let invResult = { skipped: true, reason: "not_first_paid" };
-      if (orderPaidResult.ok) {
-        invResult = await finalizeInventoryAfterPaid(order);
-      }
-
-      // ========= ⑤ 邮件幂等：只发一次（单日 start_date） =========
+      // ========= ③ 邮件幂等：只发一次 =========
       const r1 = await sendCustomerEmailOnce(order);
       const r2 = await sendOpsEmailOnce(order);
 
       return res.status(200).json({
         ok: true,
-        event: event.type,
         order_id: orderId,
-        order_paid: orderPaidResult,
-        inventory: invResult,
+        inventory_lock: invLock,
         email_customer: r1,
         email_ops: r2,
       });
@@ -313,8 +291,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, ignored: event.type });
   } catch (e) {
     console.error("webhook handler error:", e);
-    return res.status(200).json({ ok: true, error: String(e?.message || e) });
+    return res
+      .status(200)
+      .json({ ok: true, error: String(e?.message || e) });
   }
 }
-
 
