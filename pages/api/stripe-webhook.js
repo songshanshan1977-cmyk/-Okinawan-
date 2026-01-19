@@ -16,9 +16,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// =======================
-// utils
-// =======================
+// 读取 raw body
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -27,251 +25,156 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-function getBaseUrl() {
-  const site = process.env.NEXT_PUBLIC_SITE_URL;
-  if (site && /^https?:\/\//i.test(site)) return site.replace(/\/$/, "");
-
-  const vercelUrl = process.env.VERCEL_URL;
-  if (vercelUrl) return `https://${vercelUrl}`.replace(/\/$/, "");
-
-  return "https://okinawan.vercel.app";
+// 小工具：driver_lang 统一成 ZH / JP
+function normalizeDriverLang(v) {
+  const s = String(v || "").trim().toUpperCase();
+  if (s === "ZH" || s === "JP") return s;
+  // 兼容你历史可能写过 zh/jp
+  if (s === "Z H" || s === "CH" || s === "CN") return "ZH";
+  if (s === "J P" || s === "JA" || s === "JP") return "JP";
+  return "ZH";
 }
 
-async function readResponseSafe(resp) {
-  const text = await resp.text();
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch (_) {}
-  return { text, json };
-}
-
-// =======================
-// webhook handler
-// =======================
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).send("Method Not Allowed");
-  }
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   const sig = req.headers["stripe-signature"];
-  const buf = await buffer(req);
+  if (!sig) return res.status(400).json({ error: "Missing stripe-signature" });
 
   let event;
   try {
+    const buf = await buffer(req);
     event = stripe.webhooks.constructEvent(buf, sig, webhookSecret);
   } catch (err) {
-    console.error("❌ Webhook 签名校验失败:", err.message);
-    return res.status(400).send("Webhook Error");
+    console.error("❌ Webhook signature verify failed:", err?.message || err);
+    return res.status(400).json({ error: "Webhook signature verification failed" });
+  }
+
+  // ✅ 只处理：checkout.session.completed
+  if (event.type !== "checkout.session.completed") {
+    return res.status(200).json({ received: true, ignored: event.type });
+  }
+
+  const session = event.data.object;
+
+  // 你下单时写进去的 metadata.order_id（必须有）
+  const orderId = session?.metadata?.order_id;
+  if (!orderId) {
+    console.error("❌ Missing metadata.order_id in session:", session?.id);
+    return res.status(400).json({ error: "Missing metadata.order_id" });
   }
 
   try {
-    /**
-     * ==================================================
-     * ✅ 主入口（保持不变）：checkout.session.completed
-     * ==================================================
-     */
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-      const orderId = session.metadata?.order_id;
+    // 1) 读取订单（拿 start_date/end_date/car_model_id/driver_lang 等）
+    const { data: order, error: orderErr } = await supabase
+      .from("orders")
+      .select(
+        "order_id, payment_status, inventory_locked, car_model_id, start_date, end_date, driver_lang"
+      )
+      .eq("order_id", orderId)
+      .single();
 
-      if (!orderId) {
-        console.warn("⚠️ checkout.session.completed 但没有 order_id");
-        return res.json({ received: true });
-      }
+    if (orderErr || !order) {
+      console.error("❌ Order not found:", orderId, orderErr);
+      return res.status(500).json({ error: "Order not found in DB" });
+    }
 
-      /**
-       * 1️⃣ 读取订单
-       */
-      const { data: order, error: orderErr } = await supabase
+    // ✅ 幂等：如果已经锁过库存，就直接返回（防重复扣）
+    if (order.inventory_locked === true) {
+      console.log("✅ Inventory already locked, skip:", orderId);
+      return res.status(200).json({ received: true, alreadyLocked: true });
+    }
+
+    const startDate = order.start_date;
+    const endDate = order.end_date || order.start_date;
+    const carModelId = order.car_model_id;
+    const driverLang = normalizeDriverLang(order.driver_lang);
+
+    if (!startDate || !carModelId) {
+      console.error("❌ Order missing start_date/car_model_id:", orderId, order);
+      return res.status(500).json({ error: "Order missing required fields" });
+    }
+
+    // 2) 先把订单标记为已付款（不影响库存锁，但属于关键状态）
+    {
+      const { error: payErr } = await supabase
         .from("orders")
-        .select(
-          `
-          id,
-          order_id,
-          status,
-          payment_status,
-          car_model_id,
-          start_date,
-          end_date,
-          inventory_locked,
-          email_status
-        `
-        )
-        .eq("order_id", orderId)
-        .single();
+        .update({
+          payment_status: "paid",
+        })
+        .eq("order_id", orderId);
 
-      if (orderErr || !order) {
-        console.error("❌ 订单不存在:", orderId, orderErr);
-        return res.json({ received: true });
+      if (payErr) {
+        console.error("❌ Update payment_status failed:", orderId, payErr);
+        return res.status(500).json({ error: "Update payment_status failed" });
       }
+    }
 
-      const wasPaid =
-        order.payment_status === "paid" || order.status === "paid";
+    // 3) ✅ 调用你确认过的 RPC：lock_inventory_v2（关键）
+    {
+      const { error: rpcErr } = await supabase.rpc("lock_inventory_v2", {
+        p_start_date: startDate,
+        p_end_date: endDate,
+        p_car_model_id: carModelId,
+        p_driver_lang: driverLang,
+      });
 
-      /**
-       * ======================
-       * A1：标记订单已支付 + 写 payments（逻辑不动，只去掉 paid_at）
-       * ======================
-       */
-      if (!wasPaid) {
-        // ⚠️ 你库里 paid_at 不存在（你截图已经验证过），这里必须去掉
-        // 只保留原逻辑的“标记已支付”意图
-        const { error: updErr } = await supabase
-          .from("orders")
-          .update({
-            payment_status: "paid",
-          })
-          .eq("order_id", orderId);
-
-        if (updErr) {
-          console.error("❌ A1 更新 orders 失败", orderId, updErr);
-        }
-
-        const { error: payErr } = await supabase.from("payments").upsert(
-          {
-            order_id: orderId,
-            stripe_session_id: session.id,
-            amount: session.amount_total ?? null,
-            currency: session.currency ?? null,
-            car_model_id: order.car_model_id,
-            paid: true,
-          },
-          { onConflict: "stripe_session_id" }
+      if (rpcErr) {
+        console.error(
+          "❌ A2 扣库存 RPC 失败",
+          orderId,
+          rpcErr
         );
-
-        if (payErr) {
-          console.error("❌ A1 写 payments 失败", orderId, payErr);
-        } else {
-          console.log("✅ A1 完成：payment_status=paid + payments 写入", orderId);
-        }
-      }
-
-      /**
-       * ======================
-       * A2：库存锁定（幂等）✅ 只修参数：去掉 p_driver_lang
-       * ======================
-       */
-      if (order.inventory_locked !== true) {
-        const { error: rpcErr } = await supabase.rpc("increment_locked_qty", {
-          p_date: order.start_date,
-          p_end_date: order.end_date || order.start_date,
-          p_car_model_id: order.car_model_id,
-        });
-
-        if (rpcErr) {
-          console.error("❌ A2 扣库存 RPC 失败", orderId, rpcErr);
-        } else {
-          const { error: lockErr } = await supabase
-            .from("orders")
-            .update({ inventory_locked: true })
-            .eq("order_id", orderId);
-
-          if (lockErr) {
-            console.error("❌ A2 更新 inventory_locked 失败", orderId, lockErr);
-          } else {
-            console.log("✅ A2 完成：库存已锁定", {
-              order_id: orderId,
-              car_model_id: order.car_model_id,
-              start_date: order.start_date,
-              end_date: order.end_date || order.start_date,
-            });
-          }
-        }
-      } else {
-        console.log("🔁 A2 幂等命中，已跳过库存扣减", orderId);
-      }
-
-      /**
-       * ======================
-       * B3：确认邮件（保持不变）
-       * ======================
-       */
-      if (!wasPaid && order.email_status !== "sent") {
-        try {
-          const baseUrl = getBaseUrl();
-
-          const resp = await fetch(`${baseUrl}/api/send-confirmation-email`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ order_id: orderId }),
-          });
-
-          const { text, json } = await readResponseSafe(resp);
-
-          if (!resp.ok) {
-            throw new Error(`B3 non-200 ${resp.status} ${json || text}`);
-          }
-
-          console.log("📧 B3 确认邮件已触发", orderId);
-        } catch (err) {
-          console.error("❌ B3 邮件发送失败", orderId, err);
-        }
-      }
-
-      /**
-       * ======================
-       * B0：新订单提醒（保持不变）
-       * ======================
-       */
-      if (!wasPaid) {
-        try {
-          const baseUrl = getBaseUrl();
-
-          const resp = await fetch(`${baseUrl}/api/send-notify-new-order`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ order_id: orderId }),
-          });
-
-          const { text, json } = await readResponseSafe(resp);
-
-          if (!resp.ok) {
-            throw new Error(`B0 non-200 ${resp.status} ${json || text}`);
-          }
-
-          console.log("📩 B0 新订单提醒已触发", orderId);
-        } catch (err) {
-          console.error("❌ B0 新订单提醒失败", orderId, err);
-        }
+        // 这里必须 500，让 Stripe 重试（库存没锁成功不能放过）
+        return res.status(500).json({ error: "Lock inventory failed", detail: rpcErr });
       }
     }
 
-    /**
-     * =========================
-     * checkout.session.expired ✅ 只修参数：去掉 p_driver_lang
-     * =========================
-     */
-    if (event.type === "checkout.session.expired") {
-      const session = event.data.object;
-      const orderId = session.metadata?.order_id || null;
+    // 4) 锁成功后：写回 orders.inventory_locked = true（关键）
+    {
+      const { error: lockFlagErr } = await supabase
+        .from("orders")
+        .update({
+          inventory_locked: true,
+        })
+        .eq("order_id", orderId);
 
-      if (orderId) {
-        const { data: order } = await supabase
-          .from("orders")
-          .select("car_model_id, start_date")
-          .eq("order_id", orderId)
-          .maybeSingle();
-
-        if (order) {
-          const { error: relErr } = await supabase.rpc("release_inventory_lock", {
-            p_car_model_id: order.car_model_id,
-            p_date: order.start_date,
-          });
-
-          if (relErr) {
-            console.error("❌ expired 释放库存 RPC 失败", orderId, relErr);
-          } else {
-            console.log("⏰ 会话过期，库存锁已释放", orderId);
-          }
-        }
+      if (lockFlagErr) {
+        console.error("❌ Update inventory_locked failed:", orderId, lockFlagErr);
+        return res.status(500).json({ error: "Update inventory_locked failed" });
       }
     }
 
-    return res.json({ received: true });
+    // 5) 下面是“非关键动作”：邮件/新订单提醒 —— 失败不阻断 webhook
+    //    （避免你截图里那种：notify 失败 → webhook 500 → Stripe 反复重试）
+    try {
+      // 订单确认邮件（你已有 /api/send-confirmation-email）
+      await fetch(`${process.env.NEXT_PUBLIC_SITE_URL || ""}/api/send-confirmation-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order_id: orderId }),
+      });
+    } catch (e) {
+      console.error("⚠️ send-confirmation-email failed (non-blocking):", orderId, e);
+    }
+
+    try {
+      // 新订单提醒（你已有 /api/send-notify-new-order）
+      await fetch(`${process.env.NEXT_PUBLIC_SITE_URL || ""}/api/send-notify-new-order`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order_id: orderId }),
+      });
+    } catch (e) {
+      console.error("⚠️ send-notify-new-order failed (non-blocking):", orderId, e);
+    }
+
+    // ✅ 一切关键动作完成
+    console.log("✅ Webhook done:", orderId);
+    return res.status(200).json({ received: true });
   } catch (err) {
-    console.error("❌ Webhook 处理异常:", err);
-    return res.status(500).send("Internal Server Error");
+    console.error("❌ Webhook handler fatal error:", orderId, err);
+    return res.status(500).json({ error: "Webhook handler error" });
   }
 }
 
