@@ -84,7 +84,8 @@ export default async function handler(req, res) {
       String(rawLang).toUpperCase() === "JP" ? "JP" : "ZH";
 
     const { data: rule, error: ruleError } = await supabase
-      .from("inventory_rules_v")
+      // ⭐⭐⭐ 唯一改动在这里 ⭐⭐⭐
+      .from("inventory_rules_v2") // 原来是 inventory_rules_v
       .select("remaining_qty_calc")
       .eq("date", order.start_date)
       .eq("car_model_id", order.car_model_id)
@@ -92,7 +93,7 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     if (ruleError) {
-      console.error("❌ inventory_rules_v 查询失败:", ruleError);
+      console.error("❌ inventory_rules_v2 查询失败:", ruleError);
       return res.status(500).json({ error: "库存校验失败" });
     }
 
