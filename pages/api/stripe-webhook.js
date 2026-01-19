@@ -31,12 +31,7 @@ async function buffer(readable) {
 // =============== 邮件模板（单日：只用 start_date） ===============
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
-  const balance =
-    order.balance_due ?? (order.total_price ? order.total_price - deposit : null);
-
-  // ✅ 兼容字段名（不改变逻辑，只是避免 undefined）
-  const driverLang = order.driver_lang ?? order.driver_language ?? "-";
-  const durationHours = order.duration_hours ?? order.duration ?? "-";
+  const balance = order.balance_due ?? (order.total_price ? order.total_price - deposit : null);
 
   return {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
@@ -46,13 +41,11 @@ function buildCustomerEmail(order) {
         <p><b>订单号：</b>${order.order_id}</p>
         <p><b>用车日期：</b>${order.start_date || "-"}</p>
         <p><b>车型ID：</b>${order.car_model_id || "-"}</p>
-        <p><b>司机语言：</b>${driverLang}</p>
-        <p><b>时长：</b>${durationHours}</p>
+        <p><b>司机语言：</b>${order.driver_lang || "-"}</p>
+        <p><b>时长：</b>${order.duration || "-"}</p>
         <hr/>
         <p><b>押金：</b>${deposit} RMB（已支付）</p>
-        <p><b>尾款：</b>${
-          balance !== null ? `${balance} RMB（用车当日支付司机）` : "用车当日支付司机"
-        }</p>
+        <p><b>尾款：</b>${balance !== null ? `${balance} RMB（用车当日支付司机）` : "用车当日支付司机"}</p>
         <hr/>
         <p>如需修改行程或咨询，请直接回复此邮件。</p>
       </div>
@@ -61,10 +54,6 @@ function buildCustomerEmail(order) {
 }
 
 function buildOpsEmail(order) {
-  // ✅ 兼容字段名（不改变逻辑，只是避免 undefined）
-  const driverLang = order.driver_lang ?? order.driver_language ?? "-";
-  const durationHours = order.duration_hours ?? order.duration ?? "-";
-
   return {
     subject: `【新订单】${order.order_id}｜${order.start_date || "-"}`,
     html: `
@@ -73,8 +62,8 @@ function buildOpsEmail(order) {
         <p><b>订单号：</b>${order.order_id}</p>
         <p><b>用车日期：</b>${order.start_date || "-"}</p>
         <p><b>车型ID：</b>${order.car_model_id || "-"}</p>
-        <p><b>司机语言：</b>${driverLang}</p>
-        <p><b>时长：</b>${durationHours}</p>
+        <p><b>司机语言：</b>${order.driver_lang || "-"}</p>
+        <p><b>时长：</b>${order.duration || "-"}</p>
         <hr/>
         <p><b>客户：</b>${order.name || "-"}</p>
         <p><b>电话：</b>${order.phone || "-"}</p>
@@ -116,10 +105,7 @@ async function sendCustomerEmailOnce(order) {
     return { ok: true };
   } catch (e) {
     // 如果发送失败，为了不“锁死”，把标记回滚成 false（避免额度问题时永远无法再发）
-    await supabase
-      .from("orders")
-      .update({ email_customer_sent: false })
-      .eq("order_id", order.order_id);
+    await supabase.from("orders").update({ email_customer_sent: false }).eq("order_id", order.order_id);
     return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
   }
 }
@@ -149,10 +135,7 @@ async function sendOpsEmailOnce(order) {
     });
     return { ok: true };
   } catch (e) {
-    await supabase
-      .from("orders")
-      .update({ email_ops_sent: false })
-      .eq("order_id", order.order_id);
+    await supabase.from("orders").update({ email_ops_sent: false }).eq("order_id", order.order_id);
     return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
   }
 }
@@ -188,8 +171,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, skipped: "missing_orderId" });
       }
 
-      // ========= ① 读取订单（字段收敛：不要再读 ops_*） =========
-      // ✅ 关键：select 只取“真实需要”的最小字段；并兼容你可能存在的字段名差异
+      // ========= ① 读取订单（严格只取真实存在字段） =========
       const { data: order, error: orderErr } = await supabase
         .from("orders")
         .select(
@@ -197,11 +179,7 @@ export default async function handler(req, res) {
             "order_id",
             "start_date",
             "car_model_id",
-            // 兼容：driver_lang / driver_language
             "driver_lang",
-            "driver_language",
-            // 兼容：duration_hours / duration
-            "duration_hours",
             "duration",
             "name",
             "phone",
