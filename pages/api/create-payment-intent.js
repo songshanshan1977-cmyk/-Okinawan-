@@ -15,22 +15,16 @@ const supabase = createClient(
 // 押金：人民币 500 元（Stripe 用“分”）
 const DEPOSIT_AMOUNT = 50000;
 
-// ✅ 统一回跳域名：优先用 SITE_URL（你刚刚在 Vercel 加的）
-// - 支付回跳（success_url / cancel_url）必须和你真实对外域名一致
-// - 否则支付宝/微信内置浏览器经常不显示“返回商家”
-function getFrontendBaseUrl(req) {
-  const siteUrl = (process.env.SITE_URL || "").trim();
-  if (siteUrl) return siteUrl.replace(/\/+$/, "");
+// ✅ 关键：不要写死域名，自动使用当前访问的域名（适配手机/自定义域名/多环境）
+function getBaseUrl(req) {
+  const proto = req.headers["x-forwarded-proto"] || "https";
+  const host =
+    req.headers["x-forwarded-host"] ||
+    req.headers["host"];
 
-  const publicUrl = (process.env.NEXT_PUBLIC_SITE_URL || "").trim();
-  if (publicUrl) return publicUrl.replace(/\/+$/, "");
-
-  // 最后兜底：根据当前请求 host 拼出来（不推荐，但防止直接挂）
-  const host = req?.headers?.host;
-  if (host) return `https://${host}`;
-
-  // 如果连 host 都拿不到，就给一个空字符串（Stripe 会报错，便于定位）
-  return "";
+  // host 可能包含逗号（极少数代理链场景），取第一个
+  const cleanHost = String(host).split(",")[0].trim();
+  return `${proto}://${cleanHost}`;
 }
 
 export default async function handler(req, res) {
@@ -74,7 +68,7 @@ export default async function handler(req, res) {
 
     /**
      * =================================================
-     * ⭐⭐ 最终库存硬校验（最小修复版）
+     * ⭐⭐ 最终库存硬校验（保持你的逻辑不变）
      * =================================================
      */
 
@@ -84,8 +78,7 @@ export default async function handler(req, res) {
       String(rawLang).toUpperCase() === "JP" ? "JP" : "ZH";
 
     const { data: rule, error: ruleError } = await supabase
-      // ⭐⭐⭐ 唯一改动在这里 ⭐⭐⭐
-      .from("inventory_rules_v2") // 原来是 inventory_rules_v
+      .from("inventory_rules_v")
       .select("remaining_qty_calc")
       .eq("date", order.start_date)
       .eq("car_model_id", order.car_model_id)
@@ -93,7 +86,7 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     if (ruleError) {
-      console.error("❌ inventory_rules_v2 查询失败:", ruleError);
+      console.error("❌ inventory_rules_v 查询失败:", ruleError);
       return res.status(500).json({ error: "库存校验失败" });
     }
 
@@ -121,12 +114,8 @@ export default async function handler(req, res) {
       type: "deposit",
     };
 
-    // ✅ 统一回跳域名（关键）
-    const FRONTEND_URL = getFrontendBaseUrl(req);
-    if (!FRONTEND_URL) {
-      console.error("❌ SITE_URL / NEXT_PUBLIC_SITE_URL 未配置，无法生成回跳地址");
-      return res.status(500).json({ error: "站点回跳地址未配置（SITE_URL）" });
-    }
+    // ✅ 动态站点 URL（这就是本次唯一修复点）
+    const FRONTEND_URL = getBaseUrl(req);
 
     // ⭐ 创建 Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
@@ -155,14 +144,12 @@ export default async function handler(req, res) {
 
       metadata,
 
-      // ✅ 支付成功回到 Step5（同域名）
+      // ✅ 回跳到“同一个域名”的 /booking
       success_url: `${FRONTEND_URL}/booking?step=5&order_id=${order.order_id}`,
-
-      // ✅ 取消回到 Step4（同域名）
       cancel_url: `${FRONTEND_URL}/booking?step=4&order_id=${order.order_id}&cancel=1`,
     });
 
-    // ⭐⭐ 锁库存（create-payment-intent 阶段）
+    // ⭐⭐ 锁库存（create-payment-intent 阶段）——保持你的逻辑
     await supabase.rpc("lock_inventory", {
       p_car_model_id: order.car_model_id,
       p_date: order.start_date,
@@ -175,5 +162,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
-
 
