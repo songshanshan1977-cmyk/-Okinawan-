@@ -12,20 +12,15 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// ✅ 不写死域名：用你在 Vercel 里配置的 SITE_URL / NEXT_PUBLIC_SITE_URL
+const FRONTEND_URL = (
+  process.env.NEXT_PUBLIC_SITE_URL ||
+  process.env.SITE_URL ||
+  "https://okinawan.vercel.app"
+).replace(/\/$/, "");
+
 // 押金：人民币 500 元（Stripe 用“分”）
 const DEPOSIT_AMOUNT = 50000;
-
-// ✅ 关键：不要写死域名，自动使用当前访问的域名（适配手机/自定义域名/多环境）
-function getBaseUrl(req) {
-  const proto = req.headers["x-forwarded-proto"] || "https";
-  const host =
-    req.headers["x-forwarded-host"] ||
-    req.headers["host"];
-
-  // host 可能包含逗号（极少数代理链场景），取第一个
-  const cleanHost = String(host).split(",")[0].trim();
-  return `${proto}://${cleanHost}`;
-}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -41,7 +36,6 @@ export default async function handler(req, res) {
 
     console.log("🔍 create-payment-intent 查询订单：", orderId);
 
-    // ✅ 用 order_id 查询订单（只取最新 1 条，避免重复订单）
     const { data: orders, error } = await supabase
       .from("orders")
       .select("*")
@@ -61,22 +55,16 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "订单不存在" });
     }
 
-    // 防止重复支付
     if (order.payment_status === "paid") {
       return res.status(400).json({ error: "订单已支付" });
     }
-
-    /**
-     * =================================================
-     * ⭐⭐ 最终库存硬校验（保持你的逻辑不变）
-     * =================================================
-     */
 
     // ⭐ 最小兼容：订单里没 driver_lang 时，默认 ZH
     const rawLang = order.driver_lang ?? "ZH";
     const driver_lang =
       String(rawLang).toUpperCase() === "JP" ? "JP" : "ZH";
 
+    // ✅ 库存硬校验（保持你现有逻辑）
     const { data: rule, error: ruleError } = await supabase
       .from("inventory_rules_v")
       .select("remaining_qty_calc")
@@ -103,7 +91,6 @@ export default async function handler(req, res) {
       return res.status(409).json({ error: "库存不足，无法继续支付" });
     }
 
-    // ⭐ webhook / 回跳 / 后续逻辑统一使用 order_id
     const metadata = {
       order_id: order.order_id,
       order_uuid: order.id,
@@ -114,14 +101,9 @@ export default async function handler(req, res) {
       type: "deposit",
     };
 
-    // ✅ 动态站点 URL（这就是本次唯一修复点）
-    const FRONTEND_URL = getBaseUrl(req);
-
-    // ⭐ 创建 Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card", "alipay"],
-
       line_items: [
         {
           price_data: {
@@ -135,21 +117,17 @@ export default async function handler(req, res) {
           quantity: 1,
         },
       ],
-
       customer_email: order.email || undefined,
-
-      payment_intent_data: {
-        metadata,
-      },
-
+      payment_intent_data: { metadata },
       metadata,
 
-      // ✅ 回跳到“同一个域名”的 /booking
-      success_url: `${FRONTEND_URL}/booking?step=5&order_id=${order.order_id}`,
+      // ✅ 关键：用 FRONTEND_URL（不写死）
+      // ✅ 多带 session_id 做兜底，不影响正常流程
+      success_url: `${FRONTEND_URL}/booking?step=5&order_id=${order.order_id}&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${FRONTEND_URL}/booking?step=4&order_id=${order.order_id}&cancel=1`,
     });
 
-    // ⭐⭐ 锁库存（create-payment-intent 阶段）——保持你的逻辑
+    // ✅ 锁库存（保持你现有逻辑）
     await supabase.rpc("lock_inventory", {
       p_car_model_id: order.car_model_id,
       p_date: order.start_date,
