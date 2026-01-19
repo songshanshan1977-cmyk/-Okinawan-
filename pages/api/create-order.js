@@ -7,6 +7,13 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// ✅【仅新增】把前端 zh/jp 统一成库存用的 ZH/JP（不改其它任何逻辑）
+function normalizeDriverLang(lang) {
+  const v = String(lang || "").trim().toLowerCase();
+  if (v === "jp" || v === "ja" || v === "jpn") return "JP";
+  return "ZH"; // 兜底：任何非 JP 都当中文
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method Not Allowed" });
@@ -34,6 +41,19 @@ export default async function handler(req, res) {
     }
 
     if (existing) {
+      // ✅【仅新增】如果复用旧订单，但 driver_lang 不是 ZH/JP，则“轻量纠正一次”
+      // 这不影响任何业务流程，只是让后续 lock_inventory_v2 不踩坑
+      const normalized = normalizeDriverLang(existing.driver_lang);
+      const existingUpper = String(existing.driver_lang || "").trim().toUpperCase();
+
+      if (existingUpper !== "ZH" && existingUpper !== "JP") {
+        await supabase
+          .from("orders")
+          .update({ driver_lang: normalized })
+          .eq("order_id", existing.order_id);
+        existing.driver_lang = normalized; // 返回给前端也同步一下
+      }
+
       return res.status(200).json({
         success: true,
         order: existing,
@@ -63,13 +83,18 @@ export default async function handler(req, res) {
       }
     }
 
+    // ✅【仅新增】统一 driver_lang 写入 ZH/JP
+    const driverLangNormalized = normalizeDriverLang(data.driver_lang);
+
     const { data: order, error } = await supabase
       .from("orders")
       .insert([
         {
           order_id: data.order_id,
           car_model_id: data.car_model_id,
-          driver_lang: data.driver_lang,
+
+          // ✅ 原来是 data.driver_lang：现在只做标准化，不改字段含义
+          driver_lang: driverLangNormalized,
 
           duration: data.duration, // ✅ 关键修复
           pax: data.pax, // ✅
