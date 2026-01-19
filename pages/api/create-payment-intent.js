@@ -26,7 +26,8 @@ function getSiteUrl(req) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST")
+    return res.status(405).json({ error: "Method not allowed" });
 
   try {
     const { orderId } = req.body || {};
@@ -58,8 +59,10 @@ export default async function handler(req, res) {
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      // ✅ RMB
-      currency: "cny",
+
+      // ✅【仅新增】明确声明支付方式（解决手机端支付宝页不回跳/无返回商家按钮）
+      payment_method_types: ["card", "alipay"],
+
       line_items: [
         {
           quantity: 1,
@@ -83,7 +86,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ url: session.url });
   } catch (e) {
     console.error("create-payment-intent error:", e);
-    return res.status(500).json({ error: e?.message || "Internal Server Error" });
+    return res
+      .status(500)
+      .json({ error: e?.message || "Internal Server Error" });
   }
 }
 
