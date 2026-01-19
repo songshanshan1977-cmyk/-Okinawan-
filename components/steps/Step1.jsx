@@ -35,9 +35,7 @@ export default function Step1({ initialData, onNext }) {
   const [departureHotel, setDepartureHotel] = useState(
     initialData.departure_hotel || ""
   );
-  const [endHotel, setEndHotel] = useState(
-    initialData.end_hotel || ""
-  );
+  const [endHotel, setEndHotel] = useState(initialData.end_hotel || "");
 
   const [error, setError] = useState("");
 
@@ -52,8 +50,7 @@ export default function Step1({ initialData, onNext }) {
 
   const disabledDays = useMemo(() => [{ before: tomorrow }], [tomorrow]);
 
-  const formatCaption = (date) =>
-    format(date, "yyyy年M月", { locale: zhCN });
+  const formatCaption = (date) => format(date, "yyyy年M月", { locale: zhCN });
 
   const isWeekend = (date) => {
     const d = date.getDay();
@@ -100,6 +97,12 @@ export default function Step1({ initialData, onNext }) {
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "24px 16px" }}>
       <style>{`
+        /* =========================
+           ✅ 手机端适配：只改布局
+           - 手机：上下排列
+           - PC：左右并排
+           ========================= */
+
         .calWrap {
           display: flex;
           gap: 56px;
@@ -163,6 +166,41 @@ export default function Step1({ initialData, onNext }) {
           color: #d00;
           margin-top: 12px;
           text-align: center;
+        }
+
+        /* ✅ 手机端：纵向排版 + 宽度自适应 */
+        @media (max-width: 768px) {
+          .calWrap {
+            flex-direction: column;
+            gap: 18px;
+            align-items: center;
+            margin: 16px 0 18px;
+          }
+
+          .calBox {
+            width: 100%;
+            max-width: 420px;
+          }
+
+          .fieldRow {
+            flex-direction: column;
+            gap: 14px;
+            align-items: center;
+          }
+
+          .field {
+            width: 100%;
+            max-width: 420px;
+          }
+
+          .btnRow {
+            justify-content: center;
+          }
+
+          .btn {
+            width: 100%;
+            max-width: 420px;
+          }
         }
 
         /* ===== DayPicker 视觉优化 ===== */
@@ -265,10 +303,9 @@ export default function Step1({ initialData, onNext }) {
               mode="single"
               selected={end}
               onSelect={(d) => setEnd(d || null)}
-              disabled={[
-                ...disabledDays,
-                start ? { before: start } : null,
-              ].filter(Boolean)}
+              disabled={[...disabledDays, start ? { before: start } : null].filter(
+                Boolean
+              )}
               locale={zhCN}
               formatters={{ formatCaption }}
               weekStartsOn={1}
@@ -281,9 +318,7 @@ export default function Step1({ initialData, onNext }) {
 
       <div className="fieldRow">
         <div className="field">
-          <label style={{ display: "block", marginBottom: 8 }}>
-            出发酒店
-          </label>
+          <label style={{ display: "block", marginBottom: 8 }}>出发酒店</label>
           <input
             className="input"
             value={departureHotel}
@@ -292,9 +327,7 @@ export default function Step1({ initialData, onNext }) {
         </div>
 
         <div className="field">
-          <label style={{ display: "block", marginBottom: 8 }}>
-            回程酒店
-          </label>
+          <label style={{ display: "block", marginBottom: 8 }}>回程酒店</label>
           <input
             className="input"
             value={endHotel}
@@ -313,3 +346,4 @@ export default function Step1({ initialData, onNext }) {
     </div>
   );
 }
+
