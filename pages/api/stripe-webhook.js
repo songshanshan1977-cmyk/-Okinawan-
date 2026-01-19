@@ -15,7 +15,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// 读取 raw body（Stripe 签名校验必须用 raw body）
+// ============ helpers ============
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -40,56 +40,97 @@ function pickOrderId(session) {
   );
 }
 
-async function markPaid(orderId) {
-  // 幂等：重复写 paid 没问题
-  const { error } = await supabase
-    .from("orders")
-    .update({ payment_status: "paid" })
-    .eq("order_id", orderId);
+async function resendSend({ to, subject, html }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_FROM;
 
-  if (error) {
-    console.error("⚠️ update payment_status failed:", orderId, error);
+  if (!apiKey) throw new Error("Missing RESEND_API_KEY");
+  if (!from) throw new Error("Missing EMAIL_FROM");
+  if (!to) throw new Error("Missing recipient");
+
+  const resp = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ from, to, subject, html }),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const msg = data?.message || data?.error || JSON.stringify(data);
+    throw new Error(`Resend send failed: ${resp.status} ${msg}`);
+  }
+  return data; // { id: ... }
+}
+
+function customerEmailTemplate(order) {
+  const site = process.env.NEXT_PUBLIC_SITE_URL || "";
+  const orderId = order.order_id;
+  const date = order.start_date;
+  const driverLang = normalizeLang(order.driver_lang);
+
+  return {
+    subject: `HonestOki 预约确认｜订单 ${orderId}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <h2>预约已确认（押金已支付）</h2>
+        <p>订单号：<b>${orderId}</b></p>
+        <p>用车日期：<b>${date}</b></p>
+        <p>司机语言：<b>${driverLang}</b></p>
+        <p>我们已收到您的押金支付，工作人员将尽快与您确认行程细节。</p>
+        <hr/>
+        <p style="color:#666;font-size:12px;">
+          查看订单：${site ? `<a href="${site}/booking?order_id=${orderId}">${site}/booking?order_id=${orderId}</a>` : "(未设置站点链接)"}
+        </p>
+      </div>
+    `,
+  };
+}
+
+function opsEmailTemplate(order) {
+  const orderId = order.order_id;
+  const date = order.start_date;
+  const phone = order.phone || "";
+  const name = order.name || "";
+  const driverLang = normalizeLang(order.driver_lang);
+
+  return {
+    subject: `🟢 新订单已支付押金｜${orderId}｜${date}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <h2>新订单提醒（押金已支付）</h2>
+        <p>订单号：<b>${orderId}</b></p>
+        <p>用车日期：<b>${date}</b></p>
+        <p>客户：<b>${name}</b> ${phone ? `（${phone}）` : ""}</p>
+        <p>司机语言：<b>${driverLang}</b></p>
+        <hr/>
+        <p style="color:#666;font-size:12px;">
+          请到 Appsmith 中控台进行“确认订单 → 待派单”。
+        </p>
+      </div>
+    `,
+  };
+}
+
+async function safeUpdateOrder(orderId, patch) {
+  // 写库失败不影响主流程（避免因为字段不存在导致 webhook 500）
+  try {
+    const { error } = await supabase.from("orders").update(patch).eq("order_id", orderId);
+    if (error) console.error("⚠️ update order patch failed:", orderId, error);
+  } catch (e) {
+    console.error("⚠️ update order patch fatal:", orderId, e?.message);
   }
 }
 
-async function markLocked(orderId) {
-  const { error } = await supabase
-    .from("orders")
-    .update({ inventory_locked: true })
-    .eq("order_id", orderId);
-
-  if (error) {
-    console.error("⚠️ mark inventory_locked failed:", orderId, error);
-    return { ok: false, error };
-  }
-  return { ok: true };
-}
-
-// 用 inventory 表兜底判断：是否已经锁过（locked_qty > 0）
-async function alreadyLockedInInventory({ date, carModelId, driverLang }) {
-  const { data, error } = await supabase
-    .from("inventory")
-    .select("locked_qty")
-    .eq("date", date)
-    .eq("car_model_id", carModelId)
-    .eq("driver_lang", driverLang)
-    .maybeSingle();
-
-  if (error) {
-    console.error("⚠️ read inventory failed:", error);
-    return { ok: false, locked: false, error };
-  }
-
-  const lockedQty = Number(data?.locked_qty ?? 0);
-  return { ok: true, locked: lockedQty > 0, lockedQty };
-}
-
+// ============ handler ============
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   let event;
 
-  // 1) Stripe 签名校验
+  // 1) signature verify
   try {
     const rawBody = await buffer(req);
     const sig = req.headers["stripe-signature"];
@@ -99,9 +140,8 @@ export default async function handler(req, res) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // 2) 业务处理
   try {
-    // ✅ 只处理最关键事件
+    // only handle checkout.session.completed
     if (event.type !== "checkout.session.completed") {
       return res.status(200).json({ received: true, ignored: event.type });
     }
@@ -111,114 +151,106 @@ export default async function handler(req, res) {
 
     if (!orderId) {
       console.error("❌ missing order_id in session metadata");
-      return res
-        .status(200)
-        .json({ received: true, ok: false, reason: "missing_order_id" });
+      return res.status(200).json({ received: true, ok: false, reason: "missing_order_id" });
     }
 
-    // 读订单（拿锁库存必需字段）
+    // load order
     const { data: order, error: orderErr } = await supabase
       .from("orders")
       .select(
-        "order_id, payment_status, inventory_locked, car_model_id, start_date, end_date, driver_lang"
+        "order_id, payment_status, inventory_locked, car_model_id, start_date, end_date, driver_lang, email, name, phone, email_status, ops_email_status"
       )
       .eq("order_id", orderId)
       .maybeSingle();
 
     if (orderErr) {
       console.error("❌ load order error:", orderErr);
-      // 这里返回 200，避免 Stripe 无限重试打爆（你现在要稳）
-      return res
-        .status(200)
-        .json({ received: true, ok: false, error: "load_order_failed", detail: orderErr });
+      return res.status(200).json({ received: true, ok: false, error: "load_order_failed", detail: orderErr });
     }
-
     if (!order) {
       console.error("❌ order not found:", orderId);
-      return res
-        .status(200)
-        .json({ received: true, ok: false, reason: "order_not_found" });
+      return res.status(200).json({ received: true, ok: false, reason: "order_not_found" });
     }
 
-    // 先标记 paid（幂等）
-    await markPaid(orderId);
+    // mark paid (idempotent)
+    await safeUpdateOrder(orderId, { payment_status: "paid" });
 
-    // ✅ 幂等保护：已经标记 locked 的直接跳过
+    // 2) inventory lock (idempotent)
     if (order.inventory_locked === true) {
       console.log("✅ inventory already locked, skip. order_id=", orderId);
-      return res
-        .status(200)
-        .json({ received: true, ok: true, skipped: "already_locked" });
-    }
+    } else {
+      const startDate = order.start_date;
+      const endDate = order.end_date || order.start_date;
+      const carModelId = order.car_model_id;
+      const driverLang = normalizeLang(order.driver_lang);
 
-    // 组装锁库存参数（目前你只用 1/18 这种单日也 OK）
-    const startDate = order.start_date;
-    const endDate = order.end_date || order.start_date;
-    const carModelId = order.car_model_id;
-    const driverLang = normalizeLang(order.driver_lang);
+      const { error: lockErr } = await supabase.rpc("lock_inventory_v2", {
+        p_start_date: startDate,
+        p_end_date: endDate,
+        p_car_model_id: carModelId,
+        p_driver_lang: driverLang,
+      });
 
-    // 先尝试锁库存
-    const { error: lockErr } = await supabase.rpc("lock_inventory_v2", {
-      p_start_date: startDate,
-      p_end_date: endDate,
-      p_car_model_id: carModelId,
-      p_driver_lang: driverLang,
-    });
-
-    if (lockErr) {
-      console.error("❌ A2 扣库存 RPC 失败", orderId, lockErr);
-
-      // ⭐⭐ 关键兜底：P0001 常见于 “已锁成功 + Stripe 重发/你点重发” 或 “锁成功但来不及写 inventory_locked”
-      if (lockErr?.code === "P0001") {
-        const check = await alreadyLockedInInventory({
-          date: startDate, // 你现在用单日，range 也先按 startDate 兜底足够
-          carModelId,
-          driverLang,
+      if (lockErr) {
+        console.error("❌ A2 扣库存 RPC 失败", orderId, lockErr);
+        // 不让 Stripe 重试（返回 200）
+        return res.status(200).json({
+          received: true,
+          ok: false,
+          error: "lock_inventory_failed",
+          detail: lockErr,
         });
-
-        if (check.ok && check.locked) {
-          // 说明 inventory 已经锁过 → 把 orders.inventory_locked 补写成 true
-          await markLocked(orderId);
-          return res.status(200).json({
-            received: true,
-            ok: true,
-            skipped: "already_locked_in_inventory",
-            locked_qty: check.lockedQty,
-          });
-        }
       }
 
-      // 不让 Stripe 重试（返回 200），并保留失败信息给你排查
-      return res.status(200).json({
-        received: true,
-        ok: false,
-        error: "lock_inventory_failed",
-        detail: lockErr,
-      });
+      await safeUpdateOrder(orderId, { inventory_locked: true });
     }
 
-    // 锁成功 → 写回订单 inventory_locked=true
-    const mark = await markLocked(orderId);
-    if (!mark.ok) {
-      // 锁成功了，不要让 Stripe 重试导致二次锁
-      return res.status(200).json({
-        received: true,
-        ok: true,
-        warn: "locked_but_mark_failed",
-        detail: mark.error,
-      });
+    // 3) send emails (idempotent)
+    // 3-1 customer confirmation
+    if (String(order.email_status || "").toLowerCase() === "sent") {
+      console.log("✅ customer email already sent, skip. order_id=", orderId);
+    } else {
+      try {
+        const tpl = customerEmailTemplate(order);
+        await resendSend({
+          to: order.email,
+          subject: tpl.subject,
+          html: tpl.html,
+        });
+        await safeUpdateOrder(orderId, { email_status: "sent", email_sent_at: new Date().toISOString() });
+        console.log("✅ customer email sent. order_id=", orderId);
+      } catch (e) {
+        console.error("❌ customer email failed:", orderId, e?.message);
+        await safeUpdateOrder(orderId, { email_status: "failed", email_error: String(e?.message || e) });
+        // 邮件失败也不阻断 webhook
+      }
+    }
+
+    // 3-2 ops new order notification
+    const opsTo = "songshanshan1977@gmail.com";
+    if (String(order.ops_email_status || "").toLowerCase() === "sent") {
+      console.log("✅ ops email already sent, skip. order_id=", orderId);
+    } else {
+      try {
+        const tpl = opsEmailTemplate(order);
+        await resendSend({
+          to: opsTo,
+          subject: tpl.subject,
+          html: tpl.html,
+        });
+        await safeUpdateOrder(orderId, { ops_email_status: "sent", ops_email_sent_at: new Date().toISOString() });
+        console.log("✅ ops email sent. order_id=", orderId);
+      } catch (e) {
+        console.error("❌ ops email failed:", orderId, e?.message);
+        await safeUpdateOrder(orderId, { ops_email_status: "failed", ops_email_error: String(e?.message || e) });
+      }
     }
 
     return res.status(200).json({ received: true, ok: true });
   } catch (err) {
     console.error("❌ webhook handler fatal error:", err);
-    // 你现在最需要“稳”，这里也返回 200 避免 Stripe 重试风暴
-    return res.status(200).json({
-      received: true,
-      ok: false,
-      error: "handler_fatal",
-      message: err?.message,
-    });
+    // 不让 Stripe 重试风暴
+    return res.status(200).json({ received: true, ok: false, error: "handler_fatal", message: err?.message });
   }
 }
 
