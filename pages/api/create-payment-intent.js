@@ -12,11 +12,26 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ⭐⭐⭐ 关键：Stripe 支付完成后回到【Vercel 下单系统】⭐⭐⭐
-const FRONTEND_URL = "https://okinawan.vercel.app";
-
 // 押金：人民币 500 元（Stripe 用“分”）
 const DEPOSIT_AMOUNT = 50000;
+
+// ✅ 统一回跳域名：优先用 SITE_URL（你刚刚在 Vercel 加的）
+// - 支付回跳（success_url / cancel_url）必须和你真实对外域名一致
+// - 否则支付宝/微信内置浏览器经常不显示“返回商家”
+function getFrontendBaseUrl(req) {
+  const siteUrl = (process.env.SITE_URL || "").trim();
+  if (siteUrl) return siteUrl.replace(/\/+$/, "");
+
+  const publicUrl = (process.env.NEXT_PUBLIC_SITE_URL || "").trim();
+  if (publicUrl) return publicUrl.replace(/\/+$/, "");
+
+  // 最后兜底：根据当前请求 host 拼出来（不推荐，但防止直接挂）
+  const host = req?.headers?.host;
+  if (host) return `https://${host}`;
+
+  // 如果连 host 都拿不到，就给一个空字符串（Stripe 会报错，便于定位）
+  return "";
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -73,7 +88,7 @@ export default async function handler(req, res) {
       .select("remaining_qty_calc")
       .eq("date", order.start_date)
       .eq("car_model_id", order.car_model_id)
-      .eq("driver_lang", driver_lang) // ⭐ 关键修复：保证只返回 1 行
+      .eq("driver_lang", driver_lang)
       .maybeSingle();
 
     if (ruleError) {
@@ -101,9 +116,16 @@ export default async function handler(req, res) {
       car_model_id: order.car_model_id,
       start_date: order.start_date,
       end_date: order.end_date,
-      driver_lang, // ⭐ 保留，给 webhook / 后续用
+      driver_lang,
       type: "deposit",
     };
+
+    // ✅ 统一回跳域名（关键）
+    const FRONTEND_URL = getFrontendBaseUrl(req);
+    if (!FRONTEND_URL) {
+      console.error("❌ SITE_URL / NEXT_PUBLIC_SITE_URL 未配置，无法生成回跳地址");
+      return res.status(500).json({ error: "站点回跳地址未配置（SITE_URL）" });
+    }
 
     // ⭐ 创建 Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
@@ -132,7 +154,10 @@ export default async function handler(req, res) {
 
       metadata,
 
+      // ✅ 支付成功回到 Step5（同域名）
       success_url: `${FRONTEND_URL}/booking?step=5&order_id=${order.order_id}`,
+
+      // ✅ 取消回到 Step4（同域名）
       cancel_url: `${FRONTEND_URL}/booking?step=4&order_id=${order.order_id}&cancel=1`,
     });
 
@@ -140,7 +165,7 @@ export default async function handler(req, res) {
     await supabase.rpc("lock_inventory", {
       p_car_model_id: order.car_model_id,
       p_date: order.start_date,
-      p_driver_lang: driver_lang, // ⭐ 最小修复：防止锁错语言库存
+      p_driver_lang: driver_lang,
     });
 
     return res.status(200).json({ url: session.url });
@@ -149,7 +174,5 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
-
-
 
 
