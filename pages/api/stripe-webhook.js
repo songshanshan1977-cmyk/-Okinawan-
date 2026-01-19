@@ -31,7 +31,8 @@ async function buffer(readable) {
 // =============== 邮件模板（单日：只用 start_date） ===============
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
-  const balance = order.balance_due ?? (order.total_price ? order.total_price - deposit : null);
+  const balance =
+    order.balance_due ?? (order.total_price ? order.total_price - deposit : null);
 
   return {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
@@ -45,7 +46,9 @@ function buildCustomerEmail(order) {
         <p><b>时长：</b>${order.duration || "-"}</p>
         <hr/>
         <p><b>押金：</b>${deposit} RMB（已支付）</p>
-        <p><b>尾款：</b>${balance !== null ? `${balance} RMB（用车当日支付司机）` : "用车当日支付司机"}</p>
+        <p><b>尾款：</b>${
+          balance !== null ? `${balance} RMB（用车当日支付司机）` : "用车当日支付司机"
+        }</p>
         <hr/>
         <p>如需修改行程或咨询，请直接回复此邮件。</p>
       </div>
@@ -78,12 +81,11 @@ async function sendCustomerEmailOnce(order) {
   if (!order?.email) return { skipped: true, reason: "no_customer_email" };
   if (order.email_customer_sent) return { skipped: true, reason: "already_sent" };
 
-  // 先抢占：把 false -> true（并发/重复 webhook 时可防重复）
   const { data: updated, error: upErr } = await supabase
     .from("orders")
     .update({ email_customer_sent: true })
     .eq("order_id", order.order_id)
-    .eq("email_customer_sent", false) // 关键：只抢第一次
+    .eq("email_customer_sent", false)
     .select("order_id");
 
   if (upErr) {
@@ -104,8 +106,10 @@ async function sendCustomerEmailOnce(order) {
     });
     return { ok: true };
   } catch (e) {
-    // 如果发送失败，为了不“锁死”，把标记回滚成 false（避免额度问题时永远无法再发）
-    await supabase.from("orders").update({ email_customer_sent: false }).eq("order_id", order.order_id);
+    await supabase
+      .from("orders")
+      .update({ email_customer_sent: false })
+      .eq("order_id", order.order_id);
     return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
   }
 }
@@ -135,12 +139,18 @@ async function sendOpsEmailOnce(order) {
     });
     return { ok: true };
   } catch (e) {
-    await supabase.from("orders").update({ email_ops_sent: false }).eq("order_id", order.order_id);
+    await supabase
+      .from("orders")
+      .update({ email_ops_sent: false })
+      .eq("order_id", order.order_id);
     return { skipped: true, reason: "send_failed", error: e?.message || String(e) };
   }
 }
 
 export default async function handler(req, res) {
+  // ✅ 版本号确认（用于确认线上到底跑的是不是这份代码）
+  console.log("stripe-webhook version = 2026-01-19-v1");
+
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   let event;
@@ -148,7 +158,6 @@ export default async function handler(req, res) {
   try {
     const buf = await buffer(req);
     const sig = req.headers["stripe-signature"];
-
     event = stripe.webhooks.constructEvent(buf, sig, webhookSecret);
   } catch (err) {
     console.error("Webhook signature verification failed.", err.message);
@@ -156,11 +165,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ✅ 只处理 checkout.session.completed
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      // 你原来怎么取 order_id 就怎么取（metadata 优先）
       const orderId =
         session?.metadata?.order_id ||
         session?.metadata?.orderId ||
@@ -171,7 +178,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, skipped: "missing_orderId" });
       }
 
-      // ========= ① 读取订单（严格只取真实存在字段） =========
+      // ✅ 只 select 你库里真实存在字段（根据你发的 column_name 列表）
       const { data: order, error: orderErr } = await supabase
         .from("orders")
         .select(
@@ -197,19 +204,13 @@ export default async function handler(req, res) {
 
       if (orderErr || !order) {
         console.error("load order error:", orderErr?.message || "order not found");
-        // 仍返回 200，避免 Stripe 重试
         return res.status(200).json({ ok: true, skipped: "order_not_found" });
       }
 
       // ========= ② 你已封板成功的库存锁定逻辑：保持原样 =========
-      // 这里示意：你原来调用 lock_inventory_v2 的代码放这里
-      // IMPORTANT：不要改你已经成功的参数与幂等判断
-      //
-      // if (!order.inventory_locked) {
-      //   await supabase.rpc("lock_inventory_v2", { ... });
-      // }
+      // 你原来 lock_inventory_v2 的代码放这里（不要改）
+      // if (!order.inventory_locked) { ... }
 
-      // ========= ③ 邮件幂等：只发一次（单日 start_date） =========
       const r1 = await sendCustomerEmailOnce(order);
       const r2 = await sendOpsEmailOnce(order);
 
@@ -221,11 +222,9 @@ export default async function handler(req, res) {
       });
     }
 
-    // 其它事件直接 200
     return res.status(200).json({ ok: true, ignored: event.type });
   } catch (e) {
     console.error("webhook handler error:", e);
-    // 仍返回 200，避免 Stripe 重试风暴
     return res.status(200).json({ ok: true, error: String(e?.message || e) });
   }
 }
