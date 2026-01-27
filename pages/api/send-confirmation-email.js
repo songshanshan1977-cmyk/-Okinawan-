@@ -9,6 +9,30 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+/**
+ * ✅ 仅新增：best-effort 防重复（不改业务逻辑）
+ * 60 秒内，同一个 order_id 的发送请求只处理一次。
+ * - 返回 200，不报错（避免 Appsmith 连点导致重复邮件）
+ * - 这是内存级去重：不同实例/冷启动时会重置，但配合前端锁已足够
+ */
+global.__EMAIL_DEDUPE__ = global.__EMAIL_DEDUPE__ || new Map();
+
+function shouldBlockDuplicate(key, ttlMs = 60 * 1000) {
+  const now = Date.now();
+  const hit = global.__EMAIL_DEDUPE__.get(key);
+
+  // 轻量清理：避免 Map 无限增长
+  if (global.__EMAIL_DEDUPE__.size > 500) {
+    for (const [k, v] of global.__EMAIL_DEDUPE__.entries()) {
+      if (now - v > ttlMs) global.__EMAIL_DEDUPE__.delete(k);
+    }
+  }
+
+  if (hit && now - hit < ttlMs) return true;
+  global.__EMAIL_DEDUPE__.set(key, now);
+  return false;
+}
+
 // ✅ 恢复“人话”显示（按你前端 Step3/Step4 的风格）
 const carNameMap = {
   car1: "经济 5 座轿车",
@@ -35,7 +59,9 @@ function getCarDisplay(order) {
   if (order.car_model && carNameMap[order.car_model]) return carNameMap[order.car_model];
   if (order.car_model_id && CAR_MODEL_ID_NAME_MAP[order.car_model_id])
     return CAR_MODEL_ID_NAME_MAP[order.car_model_id];
-  return order.car_model || order.car_model_id || "-";
+  return order.car_model
+    ? order.car_model || order.car_model_id || "-"
+    : "-";
 }
 
 function getDriverLangDisplay(order) {
@@ -50,6 +76,16 @@ export default async function handler(req, res) {
   try {
     const { order_id } = req.body || {};
     if (!order_id) return res.status(400).json({ error: "order_id missing" });
+
+    // ✅ 仅新增：防重复（同 order_id 60 秒内只发送一次）
+    const dedupeKey = `send-confirmation-email:${order_id}`;
+    if (shouldBlockDuplicate(dedupeKey)) {
+      return res.status(200).json({
+        ok: true,
+        deduped: true,
+        message: "Duplicate request blocked (within 60s)",
+      });
+    }
 
     // 1) 读订单
     const { data: order, error } = await supabase
@@ -183,4 +219,5 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
+
 
