@@ -9,11 +9,16 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// ✅ CORS（修复 OPTIONS 405 噪音）
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
 /**
- * ✅ 仅新增：best-effort 防重复（不改业务逻辑）
- * 60 秒内，同一个 order_id 的发送请求只处理一次。
- * - 返回 200，不报错（避免 Appsmith 连点导致重复邮件）
- * - 这是内存级去重：不同实例/冷启动时会重置，但配合前端锁已足够
+ * ✅（保留）内存级去重：只能当“加分项”，不能当主方案
+ * Vercel 多实例/冷启动会失效，所以主方案用 DB 幂等（见下方）
  */
 global.__EMAIL_DEDUPE__ = global.__EMAIL_DEDUPE__ || new Map();
 
@@ -21,7 +26,6 @@ function shouldBlockDuplicate(key, ttlMs = 60 * 1000) {
   const now = Date.now();
   const hit = global.__EMAIL_DEDUPE__.get(key);
 
-  // 轻量清理：避免 Map 无限增长
   if (global.__EMAIL_DEDUPE__.size > 500) {
     for (const [k, v] of global.__EMAIL_DEDUPE__.entries()) {
       if (now - v > ttlMs) global.__EMAIL_DEDUPE__.delete(k);
@@ -55,13 +59,10 @@ const CAR_MODEL_ID_NAME_MAP = {
 };
 
 function getCarDisplay(order) {
-  // 优先用 car_model (car1/2/3)，否则用 car_model_id (uuid)
   if (order.car_model && carNameMap[order.car_model]) return carNameMap[order.car_model];
   if (order.car_model_id && CAR_MODEL_ID_NAME_MAP[order.car_model_id])
     return CAR_MODEL_ID_NAME_MAP[order.car_model_id];
-  return order.car_model
-    ? order.car_model || order.car_model_id || "-"
-    : "-";
+  return order.car_model ? order.car_model || order.car_model_id || "-" : "-";
 }
 
 function getDriverLangDisplay(order) {
@@ -69,22 +70,33 @@ function getDriverLangDisplay(order) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  // ✅ OPTIONS 预检请求直接放行（修复 405）
+  if (req.method === "OPTIONS") {
+    return res.status(200).setHeader("Access-Control-Allow-Origin", corsHeaders["Access-Control-Allow-Origin"])
+      .setHeader("Access-Control-Allow-Methods", corsHeaders["Access-Control-Allow-Methods"])
+      .setHeader("Access-Control-Allow-Headers", corsHeaders["Access-Control-Allow-Headers"])
+      .send("ok");
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).setHeader("Access-Control-Allow-Origin", corsHeaders["Access-Control-Allow-Origin"])
+      .json({ error: "Method not allowed" });
+  }
 
   const startedAt = new Date().toISOString();
 
   try {
-    const { order_id } = req.body || {};
-    if (!order_id) return res.status(400).json({ error: "order_id missing" });
+    const { order_id, force } = req.body || {};
+    if (!order_id) {
+      return res.status(400).setHeader("Access-Control-Allow-Origin", corsHeaders["Access-Control-Allow-Origin"])
+        .json({ error: "order_id missing" });
+    }
 
-    // ✅ 仅新增：防重复（同 order_id 60 秒内只发送一次）
+    // ✅ 仅新增：内存防抖（加分项）
     const dedupeKey = `send-confirmation-email:${order_id}`;
-    if (shouldBlockDuplicate(dedupeKey)) {
-      return res.status(200).json({
-        ok: true,
-        deduped: true,
-        message: "Duplicate request blocked (within 60s)",
-      });
+    if (shouldBlockDuplicate(dedupeKey) && !force) {
+      return res.status(200).setHeader("Access-Control-Allow-Origin", corsHeaders["Access-Control-Allow-Origin"])
+        .json({ ok: true, deduped: true, message: "Duplicate request blocked (memory, 60s)" });
     }
 
     // 1) 读订单
@@ -96,14 +108,26 @@ export default async function handler(req, res) {
 
     if (error || !order) {
       console.error("❌ Order fetch error:", error);
-      return res.status(404).json({ error: "Order not found" });
+      return res.status(404).setHeader("Access-Control-Allow-Origin", corsHeaders["Access-Control-Allow-Origin"])
+        .json({ error: "Order not found" });
+    }
+
+    /**
+     * ✅ 核心修复：DB 幂等（只发一次）
+     * - 默认（force != true）：如果 email_status 已经 sent，就直接返回成功，不再发
+     * - 你后台要“补发/改价后重发” → 传 force:true 才会真的再发一封
+     */
+    if (!force && order.email_status === "sent") {
+      return res.status(200).setHeader("Access-Control-Allow-Origin", corsHeaders["Access-Control-Allow-Origin"])
+        .json({
+          ok: true,
+          deduped: true,
+          message: "Already sent (orders.email_status = sent). No-op.",
+        });
     }
 
     // 2) 尾款
-    const balance = Math.max(
-      (order.total_price || 0) - (order.deposit_amount || 500),
-      0
-    );
+    const balance = Math.max((order.total_price || 0) - (order.deposit_amount || 500), 0);
 
     // 3) 日期显示（多日/单日）
     const dateText =
@@ -113,7 +137,6 @@ export default async function handler(req, res) {
 
     const subject = `HonestOki 预约确认｜订单 ${order.order_id}`;
 
-    // ✅ 邮件内容恢复“信息齐全、像订单确认单”
     const html = `
       <div style="font-family: Arial, sans-serif; line-height:1.7; max-width:680px; margin:0 auto;">
         <h2 style="margin:0 0 10px;">押金支付成功｜订单已确认</h2>
@@ -134,16 +157,8 @@ export default async function handler(req, res) {
           <p style="margin:6px 0;"><b>包车时长：</b>${order.duration || "-"} 小时</p>
           <p style="margin:6px 0;"><b>人数：</b>${order.pax ?? "-"}</p>
           <p style="margin:6px 0;"><b>行李：</b>${order.luggage ?? "-"}</p>
-          ${
-            order.itinerary
-              ? `<p style="margin:6px 0;"><b>行程：</b>${order.itinerary}</p>`
-              : ""
-          }
-          ${
-            order.remark
-              ? `<p style="margin:6px 0;"><b>备注：</b>${order.remark}</p>`
-              : ""
-          }
+          ${order.itinerary ? `<p style="margin:6px 0;"><b>行程：</b>${order.itinerary}</p>` : ""}
+          ${order.remark ? `<p style="margin:6px 0;"><b>备注：</b>${order.remark}</p>` : ""}
 
           <hr style="border:none;border-top:1px solid #eee;margin:14px 0;" />
 
@@ -171,6 +186,9 @@ export default async function handler(req, res) {
       </div>
     `;
 
+    // ✅ 先把状态置为 sending（可选但建议）
+    await supabase.from("orders").update({ email_status: "sending" }).eq("order_id", order_id);
+
     // 发送邮件
     let resendResp;
     try {
@@ -190,11 +208,7 @@ export default async function handler(req, res) {
         created_at: startedAt,
       });
 
-      await supabase
-        .from("orders")
-        .update({ email_status: "failed" })
-        .eq("order_id", order_id);
-
+      await supabase.from("orders").update({ email_status: "failed" }).eq("order_id", order_id);
       throw mailErr;
     }
 
@@ -208,15 +222,14 @@ export default async function handler(req, res) {
       created_at: startedAt,
     });
 
-    await supabase
-      .from("orders")
-      .update({ email_status: "sent" })
-      .eq("order_id", order_id);
+    await supabase.from("orders").update({ email_status: "sent" }).eq("order_id", order_id);
 
-    return res.status(200).json({ ok: true, resend: resendResp });
+    return res.status(200).setHeader("Access-Control-Allow-Origin", corsHeaders["Access-Control-Allow-Origin"])
+      .json({ ok: true, resend: resendResp, forced: !!force });
   } catch (err) {
     console.error("❌ Send email error:", err);
-    return res.status(500).json({ error: "Internal Server Error" });
+    return res.status(500).setHeader("Access-Control-Allow-Origin", corsHeaders["Access-Control-Allow-Origin"])
+      .json({ error: "Internal Server Error" });
   }
 }
 
