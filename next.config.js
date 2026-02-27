@@ -5,8 +5,11 @@ const nextConfig = {
   async headers() {
     return [
       {
-        source: "/booking/:path*",
-        headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow" }],
+        // ✅ 覆盖全站：/ 以及所有路径
+        source: "/:path*",
+        headers: [
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
       },
     ];
   },
