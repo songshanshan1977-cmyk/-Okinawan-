@@ -14,6 +14,13 @@ export default function Home() {
           name="description"
           content="冲绳当地华人正规包车服务 · 官方在线预约系统 · 押金仅 500 RMB"
         />
+
+        {/* ✅ 仅新增：让该根页不参与索引（不影响用户访问） */}
+        <meta name="robots" content="noindex, nofollow" />
+        <meta name="googlebot" content="noindex, nofollow" />
+
+        {/* ✅ 仅新增：把“规范入口”指向真正预约页，避免 / 抢入口 */}
+        <link rel="canonical" href="https://okinawan.vercel.app/booking" />
       </Head>
 
       <main
@@ -99,9 +106,15 @@ export default function Home() {
                 textAlign: "left",
               }}
             >
-              <div>✔ 押金仅 <strong>500 RMB</strong>，其余费用用车当日直接支付司机</div>
-              <div>✔ 支付成功后，系统自动发送 <strong>订单确认邮件</strong></div>
-              <div>✔ <strong>中文 / 日文司机</strong> 可选，行程沟通无障碍</div>
+              <div>
+                ✔ 押金仅 <strong>500 RMB</strong>，其余费用用车当日直接支付司机
+              </div>
+              <div>
+                ✔ 支付成功后，系统自动发送 <strong>订单确认邮件</strong>
+              </div>
+              <div>
+                ✔ <strong>中文 / 日文司机</strong> 可选，行程沟通无障碍
+              </div>
             </div>
           </div>
 
@@ -109,8 +122,7 @@ export default function Home() {
           <button
             onClick={() => router.push("/booking")}
             style={{
-              background:
-                "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)",
+              background: "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)",
               color: "#ffffff",
               border: "none",
               borderRadius: "14px",
@@ -143,4 +155,3 @@ export default function Home() {
     </>
   );
 }
-
