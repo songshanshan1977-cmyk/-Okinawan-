@@ -10,8 +10,7 @@ const supabase = createClient(
 );
 
 /**
- * ✅ 仅新增：best-effort 防重复（不改业务逻辑）
- * 60 秒内，同一个 order_id 的发送请求只处理一次。
+ * 防重复发送（60 秒）
  */
 global.__EMAIL_DEDUPE__ = global.__EMAIL_DEDUPE__ || new Map();
 
@@ -30,6 +29,9 @@ function shouldBlockDuplicate(key, ttlMs = 60 * 1000) {
   return false;
 }
 
+/**
+ * 车型显示
+ */
 const carNameMap = {
   car1: "经济 5 座轿车",
   car2: "豪华 7 座阿尔法",
@@ -53,9 +55,7 @@ function getCarDisplay(order) {
   if (order.car_model && carNameMap[order.car_model]) return carNameMap[order.car_model];
   if (order.car_model_id && CAR_MODEL_ID_NAME_MAP[order.car_model_id])
     return CAR_MODEL_ID_NAME_MAP[order.car_model_id];
-  return order.car_model
-    ? order.car_model || order.car_model_id || "-"
-    : "-";
+  return order.car_model || order.car_model_id || "-";
 }
 
 function getDriverLangDisplay(order) {
@@ -64,7 +64,7 @@ function getDriverLangDisplay(order) {
 
 export default async function handler(req, res) {
 
-  // ✅ ===== 仅新增：CORS + OPTIONS 支持 =====
+  // CORS
   const allowedOrigins = [
     "https://华人okinawa.com",
     "https://www.华人okinawa.com",
@@ -85,7 +85,6 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
-  // ===== CORS 结束 =====
 
   if (req.method !== "POST")
     return res.status(405).json({ error: "Method not allowed" });
@@ -93,6 +92,7 @@ export default async function handler(req, res) {
   const startedAt = new Date().toISOString();
 
   try {
+
     const { order_id } = req.body || {};
     if (!order_id) return res.status(400).json({ error: "order_id missing" });
 
@@ -101,7 +101,7 @@ export default async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         deduped: true,
-        message: "Duplicate request blocked (within 60s)",
+        message: "Duplicate request blocked",
       });
     }
 
@@ -112,9 +112,12 @@ export default async function handler(req, res) {
       .single();
 
     if (error || !order) {
-      console.error("❌ Order fetch error:", error);
+      console.error("Order fetch error:", error);
       return res.status(404).json({ error: "Order not found" });
     }
+
+    const carDisplay = getCarDisplay(order);
+    const driverDisplay = getDriverLangDisplay(order);
 
     const balance = Math.max(
       (order.total_price || 0) - (order.deposit_amount || 500),
@@ -129,14 +132,67 @@ export default async function handler(req, res) {
     const subject = `HonestOki 预约确认｜订单 ${order.order_id}`;
 
     const html = `
-      <div style="font-family: Arial, sans-serif; line-height:1.7; max-width:680px; margin:0 auto;">
-        <h2 style="margin:0 0 10px;">押金支付成功｜订单已确认</h2>
-        <p style="margin:0 0 18px; color:#333;">请核对以下订单信息（与订单表一致）：</p>
-        ...
-      </div>
-    `;
+<div style="font-family: Arial, sans-serif; line-height:1.7; max-width:680px; margin:0 auto; padding:20px">
+
+<h2 style="margin-bottom:10px;">押金支付成功｜订单已确认</h2>
+
+<p style="color:#333;margin-bottom:20px;">
+请核对以下订单信息（与订单表一致）
+</p>
+
+<hr/>
+
+<p><b>订单编号：</b> ${order.order_id}</p>
+
+<hr/>
+
+<p><b>行程：</b> ${order.trip_route || "-"}</p>
+<p><b>车型：</b> ${carDisplay}</p>
+<p><b>司机语言：</b> ${driverDisplay}</p>
+<p><b>包车时长：</b> ${order.duration || "-"} 小时</p>
+<p><b>人数：</b> ${order.passengers || "-"} 人</p>
+<p><b>行李：</b> ${order.luggage || "0"} 件</p>
+
+<hr/>
+
+<p><b>用车日期：</b> ${dateText}</p>
+<p><b>出发酒店：</b> ${order.departure_hotel || "-"}</p>
+<p><b>结束酒店：</b> ${order.end_hotel || "-"}</p>
+
+<hr/>
+
+<p><b>姓名：</b> ${order.customer_name || "-"}</p>
+<p><b>电话：</b> ${order.phone || "-"}</p>
+<p><b>微信：</b> ${order.wechat || "-"}</p>
+<p><b>邮箱：</b> ${order.email || "-"}</p>
+
+<hr/>
+
+<p><b>包车总费用：</b> ¥${order.total_price || "-"}</p>
+
+<p style="margin-top:10px;">
+尾款 <b>¥${balance}</b> 请于用车当天支付司机
+</p>
+
+<hr/>
+
+<p style="text-align:center;margin-top:20px;">
+如需售后或咨询，请扫描微信二维码
+</p>
+
+<div style="text-align:center;margin-top:10px;">
+<img src="https://华人okinawa.com/wechat-qrcode.jpg" width="180"/>
+</div>
+
+<p style="text-align:center;color:#666;margin-top:20px;">
+HonestOki 冲绳包车服务
+</p>
+
+</div>
+`;
 
     let resendResp;
+
     try {
       resendResp = await resend.emails.send({
         from: "HonestOki <no-reply@xn--okinawa-n14kh45a.com>",
@@ -145,6 +201,7 @@ export default async function handler(req, res) {
         html,
       });
     } catch (mailErr) {
+
       await supabase.from("send_logs").insert({
         order_id: order.order_id,
         email: order.email,
@@ -177,9 +234,10 @@ export default async function handler(req, res) {
       .update({ email_status: "sent" })
       .eq("order_id", order_id);
 
-    return res.status(200).json({ ok: true, resend: resendResp });
+    return res.status(200).json({ ok: true });
+
   } catch (err) {
-    console.error("❌ Send email error:", err);
+    console.error("Send email error:", err);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 }
