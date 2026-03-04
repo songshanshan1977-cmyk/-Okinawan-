@@ -31,7 +31,7 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// ================= 邮件模板（不改逻辑） =================
+// ================= 邮件模板（保持不动） =================
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
   const balance =
@@ -76,7 +76,7 @@ function buildOpsEmail(order) {
   };
 }
 
-// =============== 邮件幂等（字段不动） ===============
+// =============== 邮件幂等（保持不动） ===============
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return;
   if (order.email_customer_sent) return;
@@ -165,7 +165,6 @@ export default async function handler(req, res) {
 
       if (!orderId) return res.status(200).json({ ok: true });
 
-      // ✅ 关键：inventory_locked 字段已对齐
       const { data: order } = await supabase
         .from("orders")
         .select(
@@ -190,7 +189,6 @@ export default async function handler(req, res) {
 
       if (!order) return res.status(200).json({ ok: true });
 
-      // ✅ 唯一库存幂等判断
       if (!order.inventory_locked) {
         const { error } = await supabase.rpc("lock_inventory_v2", {
           p_start_date: order.start_date,
@@ -208,8 +206,19 @@ export default async function handler(req, res) {
         }
       }
 
-      await sendCustomerEmailOnce(order);
-      await sendOpsEmailOnce(order);
+      // ================= 唯一修改的地方 =================
+
+      await fetch("https://华人okinawa.com/api/send-confirmation-email", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          order_id: order.order_id,
+        }),
+      });
+
+      // ================= 修改结束 =================
 
       return res.status(200).json({ ok: true });
     }
