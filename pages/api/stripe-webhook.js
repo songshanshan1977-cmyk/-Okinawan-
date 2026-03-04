@@ -76,7 +76,7 @@ function buildOpsEmail(order) {
   };
 }
 
-// =============== 邮件幂等（保持不动） ===============
+// ================= 原邮件函数保持不动 =================
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return;
   if (order.email_customer_sent) return;
@@ -206,19 +206,22 @@ export default async function handler(req, res) {
         }
       }
 
-      // ================= 唯一修改的地方 =================
+      // ====== 新逻辑：先触发 send-confirmation-email ======
 
-      await fetch("https://华人okinawa.com/api/send-confirmation-email", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          order_id: order.order_id,
-        }),
-      });
-
-      // ================= 修改结束 =================
+      try {
+        await fetch(
+          "https://xn--okinawa-n14kh45a.com/api/send-confirmation-email",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order_id: order.order_id }),
+          }
+        );
+      } catch (e) {
+        // 如果触发失败，回退到原来的邮件逻辑
+        await sendCustomerEmailOnce(order);
+        await sendOpsEmailOnce(order);
+      }
 
       return res.status(200).json({ ok: true });
     }
