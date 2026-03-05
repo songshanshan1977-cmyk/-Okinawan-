@@ -31,97 +31,93 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// ================= 中文显示映射（只用于邮件显示，不改任何业务逻辑） =================
+// ================== 显示映射（只用于邮件展示） ==================
 
-// 车型：兼容 car1/car2/car3 + 你固定的 UUID
+// 你系统固定的 3 个车型 UUID
 const CAR_MODEL_ID_NAME_MAP = {
-  car1: "经济型 5 座轿车",
-  car2: "豪华 7 座阿尔法",
-  car3: "舒适 10 座海狮",
-
-  // ✅ 你系统里用过的固定 UUID（之前你给过）
   "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型 5 座轿车",
   "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
   "453df662-d350-4ab9-b811-61ffcda40d4b": "舒适 10 座海狮",
 };
 
 function carNameMap(id) {
+  if (!id) return "-";
+  // 兼容 car1/car2/car3
+  if (id === "car1") return "经济型 5 座轿车";
+  if (id === "car2") return "豪华 7 座阿尔法";
+  if (id === "car3") return "舒适 10 座海狮";
+  // 兼容 UUID
   return CAR_MODEL_ID_NAME_MAP[id] || id;
 }
 
 function driverLangMap(lang) {
   const v = String(lang || "").toUpperCase();
-  if (v === "ZH" || v === "ZH-CN" || v === "CH" || v === "CN") return "中文司机";
+  if (v === "ZH" || v === "ZH-CN" || v === "CN") return "中文司机";
   if (v === "JP" || v === "JA" || v === "JPN") return "日文司机";
-  // 兼容你库里可能出现的 zh/jp
-  if (String(lang).toLowerCase() === "zh") return "中文司机";
-  if (String(lang).toLowerCase() === "jp") return "日文司机";
-  return lang;
+  if (lang === "zh") return "中文司机";
+  if (lang === "jp") return "日文司机";
+  return lang || "-";
 }
 
-// ================= 邮件模板（只补内容，不改发送逻辑） =================
+// ================= 邮件模板（只补内容） =================
+
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
   const balance =
     order.balance_due ??
     (order.total_price ? order.total_price - deposit : null);
 
-  const carName = carNameMap(order.car_model_id);
-  const driverName = driverLangMap(order.driver_lang);
-
-  // ✅ 手机端按钮：跳转到你图1的感谢页（success）
-  // ⚠️ 这里不嵌图片，只负责“按钮跳转到感谢页”，感谢页里再显示二维码
-  const successUrl = `https://xn--okinawa-n14kh45a.com/success?order_id=${order.order_id}`;
+  const successUrl = `https://xn--okinawa-n14kh45a.com/success?order_id=${encodeURIComponent(
+    order.order_id
+  )}`;
 
   return {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
     html: `
-      <div style="font-family:Arial,sans-serif;line-height:1.7">
-        <h2>预约已确认（押金已支付）</h2>
+<div style="font-family:Arial,sans-serif;line-height:1.6">
+  <h2>预约已确认（押金已支付）</h2>
 
-        <p><b>订单号：</b>${order.order_id}</p>
-        <p><b>用车日期：</b>${order.start_date}</p>
-        <p><b>车型：</b>${carName}</p>
-        <p><b>司机语言：</b>${driverName}</p>
-        <p><b>包车时长：</b>${order.duration} 小时</p>
+  <p><b>订单号：</b>${order.order_id ?? "-"}</p>
+  <p><b>用车日期：</b>${order.start_date ?? "-"}</p>
+  <p><b>车型：</b>${carNameMap(order.car_model_id)}</p>
+  <p><b>司机语言：</b>${driverLangMap(order.driver_lang)}</p>
+  <p><b>包车时长：</b>${order.duration ?? "-"} 小时</p>
 
-        <hr/>
+  <p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
+  <p><b>押金：</b>${deposit} RMB</p>
+  <p><b>尾款：</b>${
+    balance !== null
+      ? `${balance} RMB（用车当日支付司机）`
+      : "用车当日支付司机"
+  }</p>
 
-        <p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
-        <p><b>押金：</b>${deposit} RMB（已支付）</p>
-        <p><b>尾款：</b>${
-          balance !== null
-            ? `${balance} RMB（用车当日支付司机）`
-            : "用车当日支付司机"
-        }</p>
+  <hr/>
 
-        <hr/>
+  <p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
+  <p><b>电话：</b>${order.phone ?? "-"}</p>
+  <p><b>微信：</b>${order.wechat ?? "-"}</p>
+  <p><b>邮箱：</b>${order.email ?? "-"}</p>
 
-        <p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
-        <p><b>电话：</b>${order.phone ?? "-"}</p>
-        <p><b>微信：</b>${order.wechat ?? "-"}</p>
-        <p><b>邮箱：</b>${order.email ?? "-"}</p>
+  <hr/>
 
-        <hr/>
+  <p>若手机端支付宝未自动跳回，请点击下方按钮查看确认单（含感谢页与二维码）。</p>
 
-        <p>若手机端支付宝未自动跳回，请点击下方按钮查看「感谢页 + 二维码」。</p>
-
-        <div style="margin-top:18px;">
-          <a href="${successUrl}"
-             style="
-               display:inline-block;
-               padding:14px 22px;
-               background:#2563eb;
-               color:#ffffff;
-               text-decoration:none;
-               border-radius:8px;
-               font-size:16px;
-               font-weight:bold;
-             ">
-            查看新订单确认单
-          </a>
-        </div>
-      </div>
+  <div style="margin-top:18px;text-align:center">
+    <a href="${successUrl}"
+      style="
+        display:inline-block;
+        padding:14px 24px;
+        background:#2563eb;
+        color:#ffffff;
+        text-decoration:none;
+        border-radius:6px;
+        font-size:16px;
+        font-weight:bold;
+      ">
+      查看新订单确认单
+    </a>
+  </div>
+</div>
     `,
   };
 }
@@ -132,41 +128,34 @@ function buildOpsEmail(order) {
     order.balance_due ??
     (order.total_price ? order.total_price - deposit : null);
 
-  const carName = carNameMap(order.car_model_id);
-  const driverName = driverLangMap(order.driver_lang);
-
   return {
     subject: `【新订单】${order.order_id}`,
     html: `
-      <div style="font-family:Arial,sans-serif;line-height:1.7">
-        <h3>新订单邮件确认</h3>
+<div style="font-family:Arial,sans-serif;line-height:1.6">
+  <h3>新订单通知</h3>
 
-        <p><b>订单号：</b>${order.order_id}</p>
-        <p><b>用车日期：</b>${order.start_date}</p>
-        <p><b>车型：</b>${carName}</p>
-        <p><b>司机语言：</b>${driverName}</p>
-        <p><b>包车时长：</b>${order.duration} 小时</p>
+  <p><b>订单号：</b>${order.order_id ?? "-"}</p>
+  <p><b>用车日期：</b>${order.start_date ?? "-"}</p>
+  <p><b>车型：</b>${carNameMap(order.car_model_id)}</p>
+  <p><b>司机语言：</b>${driverLangMap(order.driver_lang)}</p>
+  <p><b>包车时长：</b>${order.duration ?? "-"} 小时</p>
 
-        <hr/>
+  <p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
+  <p><b>押金：</b>${deposit} RMB</p>
+  <p><b>尾款：</b>${balance ?? "-"} RMB</p>
 
-        <p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
-        <p><b>押金：</b>${deposit} RMB</p>
-        <p><b>尾款：</b>${
-          balance !== null ? `${balance} RMB` : "-"
-        }</p>
+  <hr/>
 
-        <hr/>
-
-        <p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
-        <p><b>电话：</b>${order.phone ?? "-"}</p>
-        <p><b>微信：</b>${order.wechat ?? "-"}</p>
-        <p><b>邮箱：</b>${order.email ?? "-"}</p>
-      </div>
+  <p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
+  <p><b>电话：</b>${order.phone ?? "-"}</p>
+  <p><b>微信：</b>${order.wechat ?? "-"}</p>
+  <p><b>邮箱：</b>${order.email ?? "-"}</p>
+</div>
     `,
   };
 }
 
-// =============== 邮件幂等（字段不动，逻辑不动） ===============
+// =============== 邮件幂等（字段不动） ===============
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return;
   if (order.email_customer_sent) return;
@@ -250,12 +239,16 @@ export default async function handler(req, res) {
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
+      // ✅ 不改变流程：只是兼容更多 metadata key（防止 order_id 拿不到直接 return）
       const orderId =
-        session?.metadata?.order_id || session?.client_reference_id;
+        session?.metadata?.order_id ||
+        session?.metadata?.orderId ||
+        session?.metadata?.orderID ||
+        session?.metadata?.ORDER_ID ||
+        session?.client_reference_id;
 
       if (!orderId) return res.status(200).json({ ok: true });
 
-      // ✅ 只为“补邮件内容”多取 3 个字段：customer_name / phone / wechat
       const { data: order } = await supabase
         .from("orders")
         .select(
@@ -283,7 +276,6 @@ export default async function handler(req, res) {
 
       if (!order) return res.status(200).json({ ok: true });
 
-      // ✅ 唯一库存幂等判断
       if (!order.inventory_locked) {
         const { error } = await supabase.rpc("lock_inventory_v2", {
           p_start_date: order.start_date,
