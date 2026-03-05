@@ -31,12 +31,11 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// ===== 新增：中文映射（只用于显示） =====
-
+// ===== 车型 UUID 映射 =====
 const carNameMap = {
-  car1: "经济型 5 座轿车",
-  car2: "豪华 7 座阿尔法",
-  car3: "舒适 10 座海狮",
+  "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型 5 座轿车",
+  "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
+  "453df662-d350-4ab9-b811-61ffcda40d4b": "舒适 10 座海狮",
 };
 
 const driverLangMap = {
@@ -46,7 +45,13 @@ const driverLangMap = {
   JP: "日文司机",
 };
 
-// ================= 邮件模板 =================
+// ===== 微信二维码（放这里即可）=====
+const WECHAT_QR =
+  "https://xn--okinawa-n14kh45a.com/wechat-qr.png"; 
+// ↑ 这里换成你的二维码图片地址
+
+
+// ================= 客人邮件 =================
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
 
@@ -55,6 +60,7 @@ function buildCustomerEmail(order) {
     (order.total_price ? order.total_price - deposit : null);
 
   const carName = carNameMap[order.car_model_id] || order.car_model_id;
+
   const driverLang =
     driverLangMap[order.driver_lang] || order.driver_lang;
 
@@ -63,7 +69,7 @@ function buildCustomerEmail(order) {
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
 
-<h2>预约已确认（押金已支付）</h2>
+<h2>🎉 预约成功！（押金已支付）</h2>
 
 <p><b>订单号：</b>${order.order_id}</p>
 
@@ -85,6 +91,8 @@ function buildCustomerEmail(order) {
     : "用车当日支付司机"
 }</p>
 
+<hr/>
+
 <p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
 
 <p><b>电话：</b>${order.phone ?? "-"}</p>
@@ -93,11 +101,23 @@ function buildCustomerEmail(order) {
 
 <p><b>邮箱：</b>${order.email ?? "-"}</p>
 
-<br/>
+<hr/>
+
+<h3>添加客服微信确认行程</h3>
+
+<div style="text-align:center;margin:20px 0">
+
+<img src="${WECHAT_QR}" width="220"/>
+
+<p>扫码添加客服微信</p>
+
+<p>添加时备注订单号：${order.order_id}</p>
+
+</div>
 
 <div style="text-align:center;margin-top:20px">
 
-<a href="https://xn--okinawa-n14kh45a.com/success?order_id=${order.order_id}"
+<a href="https://okinawan.vercel.app/success?order_id=${order.order_id}"
 style="
 background:#0070f3;
 color:#ffffff;
@@ -119,6 +139,8 @@ font-weight:bold;
   };
 }
 
+
+// ================= 运营邮件 =================
 function buildOpsEmail(order) {
   const deposit = order.deposit_amount ?? 500;
 
@@ -127,6 +149,7 @@ function buildOpsEmail(order) {
     (order.total_price ? order.total_price - deposit : null);
 
   const carName = carNameMap[order.car_model_id] || order.car_model_id;
+
   const driverLang =
     driverLangMap[order.driver_lang] || order.driver_lang;
 
@@ -164,7 +187,8 @@ function buildOpsEmail(order) {
   };
 }
 
-// =============== 邮件幂等（字段不动） ===============
+
+// =============== 邮件幂等 ===============
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return;
   if (order.email_customer_sent) return;
@@ -224,13 +248,15 @@ async function sendOpsEmailOnce(order) {
   }
 }
 
-// ================= driver_lang 规范 =================
+
+// ================= driver_lang =================
 function normalizeDriverLang(lang) {
   const v = String(lang || "ZH").toUpperCase();
   return v === "JP" ? "JP" : "ZH";
 }
 
-// ================= 主 webhook =================
+
+// ================= webhook =================
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
@@ -240,7 +266,7 @@ export default async function handler(req, res) {
     const buf = await buffer(req);
     const sig = req.headers["stripe-signature"];
     event = stripe.webhooks.constructEvent(buf, sig, webhookSecret);
-  } catch (err) {
+  } catch {
     return res.status(400).send("Webhook Error");
   }
 
@@ -263,6 +289,9 @@ export default async function handler(req, res) {
           driver_lang,
           duration,
           email,
+          customer_name,
+          phone,
+          wechat,
           total_price,
           deposit_amount,
           balance_due,
@@ -299,7 +328,7 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json({ ok: true });
-  } catch (e) {
+  } catch {
     return res.status(200).json({ ok: true });
   }
 }
