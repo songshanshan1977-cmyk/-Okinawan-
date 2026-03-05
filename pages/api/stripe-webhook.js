@@ -84,20 +84,15 @@ function buildCustomerEmail(order) {
 <hr/>
 
 <p><b>客人名字：</b>${order.customer_name ?? ""}</p>
-
 <p><b>电话：</b>${order.phone ?? ""}</p>
-
 <p><b>微信：</b>${order.wechat ?? ""}</p>
-
 <p><b>邮箱：</b>${order.email ?? ""}</p>
 
 <hr/>
 
 <div style="margin-top:25px">
 
-<a href="https://xn--okinawa-n14kh45a.com/success?order_id=${
-      order.order_id
-    }"
+<a href="https://xn--okinawa-n14kh45a.com/success?order_id=${order.order_id}"
 style="
 display:inline-block;
 padding:14px 24px;
@@ -111,6 +106,36 @@ font-size:16px;
 查看新订单确认单
 
 </a>
+
+</div>
+
+<hr/>
+
+<div style="margin-top:30px">
+
+<h2>🎉 预订成功！（押金已支付）</h2>
+
+<p>感谢您选择 <b>华人 Okinawan</b>，您的包车已成功锁定。</p>
+
+<p>✅ 客服将第一时间与您确认行程与司机安排</p>
+
+<p>📌 请务必添加我们的售后微信</p>
+
+<p>添加微信时请备注订单号：</p>
+
+<p><b>${order.order_id}</b></p>
+
+<div style="margin-top:15px">
+<img src="https://xn--okinawa-n14kh45a.com/wechat-qr.png" width="220"/>
+</div>
+
+<p>扫码添加客服微信</p>
+
+<p>
+<a href="https://xn--okinawa-n14kh45a.com" style="color:#2563eb;">
+返回首页
+</a>
+</p>
 
 </div>
 
@@ -157,11 +182,8 @@ function buildOpsEmail(order) {
 <hr/>
 
 <p><b>客人名字：</b>${order.customer_name ?? ""}</p>
-
 <p><b>电话：</b>${order.phone ?? ""}</p>
-
 <p><b>微信：</b>${order.wechat ?? ""}</p>
-
 <p><b>邮箱：</b>${order.email ?? ""}</p>
 
 </div>
