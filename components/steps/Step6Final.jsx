@@ -11,7 +11,7 @@ export default function Step6Final({ initialData }) {
             🎉 预订成功！（押金已支付）
           </h1>
           <p className="text-gray-700">
-            感谢您选择 <strong>华人 Okinawan</strong>，您的包车已成功锁定。
+            感谢您选择 <strong>华人 Okinawa</strong>，您的包车已成功锁定。
           </p>
         </div>
 
