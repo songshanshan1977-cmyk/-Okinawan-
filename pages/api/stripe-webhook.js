@@ -45,12 +45,6 @@ const driverLangMap = {
   JP: "日文司机",
 };
 
-// ===== 微信二维码（放这里即可）=====
-const WECHAT_QR =
-  "https://xn--okinawa-n14kh45a.com/wechat-qr.png"; 
-// ↑ 这里换成你的二维码图片地址
-
-
 // ================= 客人邮件 =================
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
@@ -60,7 +54,6 @@ function buildCustomerEmail(order) {
     (order.total_price ? order.total_price - deposit : null);
 
   const carName = carNameMap[order.car_model_id] || order.car_model_id;
-
   const driverLang =
     driverLangMap[order.driver_lang] || order.driver_lang;
 
@@ -69,7 +62,7 @@ function buildCustomerEmail(order) {
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
 
-<h2>🎉 预约成功！（押金已支付）</h2>
+<h2>预约已确认（押金已支付）</h2>
 
 <p><b>订单号：</b>${order.order_id}</p>
 
@@ -101,19 +94,7 @@ function buildCustomerEmail(order) {
 
 <p><b>邮箱：</b>${order.email ?? "-"}</p>
 
-<hr/>
-
-<h3>添加客服微信确认行程</h3>
-
-<div style="text-align:center;margin:20px 0">
-
-<img src="${WECHAT_QR}" width="220"/>
-
-<p>扫码添加客服微信</p>
-
-<p>添加时备注订单号：${order.order_id}</p>
-
-</div>
+<br/>
 
 <div style="text-align:center;margin-top:20px">
 
@@ -139,7 +120,6 @@ font-weight:bold;
   };
 }
 
-
 // ================= 运营邮件 =================
 function buildOpsEmail(order) {
   const deposit = order.deposit_amount ?? 500;
@@ -149,7 +129,6 @@ function buildOpsEmail(order) {
     (order.total_price ? order.total_price - deposit : null);
 
   const carName = carNameMap[order.car_model_id] || order.car_model_id;
-
   const driverLang =
     driverLangMap[order.driver_lang] || order.driver_lang;
 
@@ -186,7 +165,6 @@ function buildOpsEmail(order) {
 `,
   };
 }
-
 
 // =============== 邮件幂等 ===============
 async function sendCustomerEmailOnce(order) {
@@ -248,13 +226,11 @@ async function sendOpsEmailOnce(order) {
   }
 }
 
-
 // ================= driver_lang =================
 function normalizeDriverLang(lang) {
   const v = String(lang || "ZH").toUpperCase();
   return v === "JP" ? "JP" : "ZH";
 }
-
 
 // ================= webhook =================
 export default async function handler(req, res) {
