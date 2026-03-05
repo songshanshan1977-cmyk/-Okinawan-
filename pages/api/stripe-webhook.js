@@ -31,6 +31,27 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
+// ================= 邮件内容补齐专用：中文映射（只影响显示，不改逻辑） =================
+function carNameMap(v) {
+  const id = String(v || "").trim();
+
+  // 常见短码（你旧系统里可能是 car1/car2/car3）
+  if (id === "car1") return "经济型轿车";
+  if (id === "car2") return "豪华阿尔法";
+  if (id === "car3") return "10座海狮";
+
+  // 兜底：如果存的是 UUID / 其它字符串，仍然给个中文兜底（不影响逻辑，只是展示更“人话”）
+  // 你后面如果要精确 UUID 映射，再在这里加 if (id=== 'xxxx') return '...'
+  return id || "";
+}
+
+function driverLangMap(v) {
+  const lang = String(v || "").toUpperCase();
+  if (lang === "ZH" || lang === "CN") return "中文司机";
+  if (lang === "JP" || lang === "JA") return "日文司机";
+  return lang || "";
+}
+
 // ================= 邮件模板（不改逻辑） =================
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
@@ -38,39 +59,109 @@ function buildCustomerEmail(order) {
     order.balance_due ??
     (order.total_price ? order.total_price - deposit : null);
 
+  const carCN = carNameMap(order.car_model_id);
+  const langCN = driverLangMap(order.driver_lang);
+
+  const total = order.total_price ?? "";
+
+  // ✅ 手机端按钮：指向感谢页（图1）
+// 你图1的订单号展示 + 微信二维码，都在 /success 页面里
+  const successUrl = `https://xn--okinawa-n14kh45a.com/success?order_id=${encodeURIComponent(
+    order.order_id
+  )}`;
+
   return {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
     html: `
       <div style="font-family:Arial,sans-serif;line-height:1.6">
+
         <h2>预约已确认（押金已支付）</h2>
+
         <p><b>订单号：</b>${order.order_id}</p>
-        <p><b>用车日期：</b>${order.start_date}</p>
-        <p><b>车型：</b>${order.car_model_id}</p>
-        <p><b>司机语言：</b>${order.driver_lang}</p>
-        <p><b>包车时长：</b>${order.duration} 小时</p>
+        <p><b>用车日期：</b>${order.start_date ?? ""}</p>
+        <p><b>车型：</b>${carCN}</p>
+        <p><b>司机语言：</b>${langCN}</p>
+        <p><b>包车时长：</b>${order.duration ?? ""} 小时</p>
+
         <hr/>
-        <p><b>押金：</b>${deposit} RMB（已支付）</p>
+
+        <p><b>全款：</b>${total} RMB</p>
+        <p><b>押金：</b>${deposit} RMB</p>
         <p><b>尾款：</b>${
           balance !== null
             ? `${balance} RMB（用车当日支付司机）`
             : "用车当日支付司机"
         }</p>
+
         <hr/>
+
+        <p><b>客人名字：</b>${order.customer_name ?? ""}</p>
+        <p><b>电话：</b>${order.phone ?? ""}</p>
+        <p><b>微信：</b>${order.wechat ?? ""}</p>
+        <p><b>邮箱：</b>${order.email ?? ""}</p>
+
+        <hr/>
+
         <p>若手机端支付宝未自动跳回，请点击确认单按钮查看。</p>
+
+        <div style="margin-top:22px;margin-bottom:8px;">
+          <a href="${successUrl}"
+             style="
+               display:inline-block;
+               padding:14px 22px;
+               background:#2563eb;
+               color:#ffffff;
+               text-decoration:none;
+               border-radius:8px;
+               font-size:16px;
+               font-weight:700;
+             ">
+            查看新订单确认单（含感谢页/微信二维码）
+          </a>
+        </div>
+
       </div>
     `,
   };
 }
 
 function buildOpsEmail(order) {
+  const deposit = order.deposit_amount ?? 500;
+  const balance =
+    order.balance_due ??
+    (order.total_price ? order.total_price - deposit : null);
+
+  const carCN = carNameMap(order.car_model_id);
+  const langCN = driverLangMap(order.driver_lang);
+
+  const total = order.total_price ?? "";
+
   return {
     subject: `【新订单】${order.order_id}`,
     html: `
       <div style="font-family:Arial,sans-serif;line-height:1.6">
-        <p>订单号：${order.order_id}</p>
-        <p>日期：${order.start_date}</p>
-        <p>车型：${order.car_model_id}</p>
-        <p>司机语言：${order.driver_lang}</p>
+
+        <h3>新订单邮件确认内容</h3>
+
+        <p><b>订单号：</b>${order.order_id}</p>
+        <p><b>用车日期：</b>${order.start_date ?? ""}</p>
+        <p><b>车型：</b>${carCN}</p>
+        <p><b>司机语言：</b>${langCN}</p>
+        <p><b>包车时长：</b>${order.duration ?? ""} 小时</p>
+
+        <hr/>
+
+        <p><b>全款：</b>${total} RMB</p>
+        <p><b>押金：</b>${deposit} RMB</p>
+        <p><b>尾款：</b>${balance !== null ? `${balance} RMB` : ""}</p>
+
+        <hr/>
+
+        <p><b>客人名字：</b>${order.customer_name ?? ""}</p>
+        <p><b>电话：</b>${order.phone ?? ""}</p>
+        <p><b>微信：</b>${order.wechat ?? ""}</p>
+        <p><b>邮箱：</b>${order.email ?? ""}</p>
+
       </div>
     `,
   };
@@ -182,7 +273,10 @@ export default async function handler(req, res) {
           balance_due,
           inventory_locked,
           email_customer_sent,
-          email_ops_sent
+          email_ops_sent,
+          customer_name,
+          phone,
+          wechat
         `
         )
         .eq("order_id", orderId)
