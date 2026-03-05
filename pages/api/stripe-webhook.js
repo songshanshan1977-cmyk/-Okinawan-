@@ -31,52 +31,140 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// ================= 邮件模板（保持不动） =================
+// ===== 新增：中文映射（只用于显示） =====
+
+const carNameMap = {
+  car1: "经济型 5 座轿车",
+  car2: "豪华 7 座阿尔法",
+  car3: "舒适 10 座海狮",
+};
+
+const driverLangMap = {
+  zh: "中文司机",
+  ZH: "中文司机",
+  jp: "日文司机",
+  JP: "日文司机",
+};
+
+// ================= 邮件模板 =================
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
+
   const balance =
     order.balance_due ??
     (order.total_price ? order.total_price - deposit : null);
 
+  const carName = carNameMap[order.car_model_id] || order.car_model_id;
+  const driverLang =
+    driverLangMap[order.driver_lang] || order.driver_lang;
+
   return {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
     html: `
-      <div style="font-family:Arial,sans-serif;line-height:1.6">
-        <h2>预约已确认（押金已支付）</h2>
-        <p><b>订单号：</b>${order.order_id}</p>
-        <p><b>用车日期：</b>${order.start_date}</p>
-        <p><b>车型：</b>${order.car_model_id}</p>
-        <p><b>司机语言：</b>${order.driver_lang}</p>
-        <p><b>包车时长：</b>${order.duration} 小时</p>
-        <hr/>
-        <p><b>押金：</b>${deposit} RMB（已支付）</p>
-        <p><b>尾款：</b>${
-          balance !== null
-            ? `${balance} RMB（用车当日支付司机）`
-            : "用车当日支付司机"
-        }</p>
-        <hr/>
-        <p>若手机端支付宝未自动跳回，请点击确认单按钮查看。</p>
-      </div>
-    `,
+<div style="font-family:Arial,sans-serif;line-height:1.6">
+
+<h2>预约已确认（押金已支付）</h2>
+
+<p><b>订单号：</b>${order.order_id}</p>
+
+<p><b>用车日期：</b>${order.start_date}</p>
+
+<p><b>车型：</b>${carName}</p>
+
+<p><b>司机语言：</b>${driverLang}</p>
+
+<p><b>包车时长：</b>${order.duration} 小时</p>
+
+<p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
+
+<p><b>押金：</b>${deposit} RMB</p>
+
+<p><b>尾款：</b>${
+  balance !== null
+    ? `${balance} RMB（用车当日支付司机）`
+    : "用车当日支付司机"
+}</p>
+
+<p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
+
+<p><b>电话：</b>${order.phone ?? "-"}</p>
+
+<p><b>微信：</b>${order.wechat ?? "-"}</p>
+
+<p><b>邮箱：</b>${order.email ?? "-"}</p>
+
+<br/>
+
+<div style="text-align:center;margin-top:20px">
+
+<a href="https://xn--okinawa-n14kh45a.com/success?order_id=${order.order_id}"
+style="
+background:#0070f3;
+color:#ffffff;
+padding:12px 24px;
+text-decoration:none;
+border-radius:6px;
+display:inline-block;
+font-weight:bold;
+">
+
+查看新订单确认单
+
+</a>
+
+</div>
+
+</div>
+`,
   };
 }
 
 function buildOpsEmail(order) {
+  const deposit = order.deposit_amount ?? 500;
+
+  const balance =
+    order.balance_due ??
+    (order.total_price ? order.total_price - deposit : null);
+
+  const carName = carNameMap[order.car_model_id] || order.car_model_id;
+  const driverLang =
+    driverLangMap[order.driver_lang] || order.driver_lang;
+
   return {
     subject: `【新订单】${order.order_id}`,
     html: `
-      <div style="font-family:Arial,sans-serif;line-height:1.6">
-        <p>订单号：${order.order_id}</p>
-        <p>日期：${order.start_date}</p>
-        <p>车型：${order.car_model_id}</p>
-        <p>司机语言：${order.driver_lang}</p>
-      </div>
-    `,
+<div style="font-family:Arial,sans-serif;line-height:1.6">
+
+<p><b>订单号：</b>${order.order_id}</p>
+
+<p><b>用车日期：</b>${order.start_date}</p>
+
+<p><b>车型：</b>${carName}</p>
+
+<p><b>司机语言：</b>${driverLang}</p>
+
+<p><b>包车时长：</b>${order.duration} 小时</p>
+
+<p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
+
+<p><b>押金：</b>${deposit} RMB</p>
+
+<p><b>尾款：</b>${balance ?? "-"} RMB</p>
+
+<p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
+
+<p><b>电话：</b>${order.phone ?? "-"}</p>
+
+<p><b>微信：</b>${order.wechat ?? "-"}</p>
+
+<p><b>邮箱：</b>${order.email ?? "-"}</p>
+
+</div>
+`,
   };
 }
 
-// ================= 原邮件函数保持不动 =================
+// =============== 邮件幂等（字段不动） ===============
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return;
   if (order.email_customer_sent) return;
@@ -167,8 +255,7 @@ export default async function handler(req, res) {
 
       const { data: order } = await supabase
         .from("orders")
-        .select(
-          `
+        .select(`
           order_id,
           start_date,
           end_date,
@@ -182,8 +269,7 @@ export default async function handler(req, res) {
           inventory_locked,
           email_customer_sent,
           email_ops_sent
-        `
-        )
+        `)
         .eq("order_id", orderId)
         .single();
 
@@ -206,22 +292,8 @@ export default async function handler(req, res) {
         }
       }
 
-      // ====== 新逻辑：先触发 send-confirmation-email ======
-
-      try {
-        await fetch(
-          "https://xn--okinawa-n14kh45a.com/api/send-confirmation-email",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ order_id: order.order_id }),
-          }
-        );
-      } catch (e) {
-        // 如果触发失败，回退到原来的邮件逻辑
-        await sendCustomerEmailOnce(order);
-        await sendOpsEmailOnce(order);
-      }
+      await sendCustomerEmailOnce(order);
+      await sendOpsEmailOnce(order);
 
       return res.status(200).json({ ok: true });
     }
@@ -231,4 +303,3 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 }
-
