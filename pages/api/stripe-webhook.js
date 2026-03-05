@@ -31,35 +31,39 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// ================= 显示映射（只用于邮件展示，不影响逻辑） =================
-const CAR_MODEL_ID_NAME_MAP = {
-  "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型 5 座轿车",
-  "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
-  "453df662-d350-4ab9-b811-61ffcda40d4b": "舒适 10 座海狮",
-};
-
+// ======== 车型/语言中文映射（仅展示用，不改业务） ========
 function carNameMap(id) {
-  if (!id) return "-";
-  if (id === "car1") return "经济型 5 座轿车";
-  if (id === "car2") return "豪华 7 座阿尔法";
-  if (id === "car3") return "舒适 10 座海狮";
-  return CAR_MODEL_ID_NAME_MAP[id] || id;
+  // 兼容老值 car1/car2/car3
+  if (id === "car1") return "经济型轿车";
+  if (id === "car2") return "豪华阿尔法";
+  if (id === "car3") return "10座海狮";
+
+  // 兼容 UUID（按你系统固定 UUID）
+  if (id === "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca") return "经济型轿车";
+  if (id === "82cf604f-e688-49fe-aecf-69894a01f6cb") return "豪华阿尔法";
+  if (id === "453df662-d350-4ab9-b811-61ffcda40d4b") return "10座海狮";
+
+  return id ?? "";
 }
 
 function driverLangMap(lang) {
   const v = String(lang || "").toUpperCase();
-  if (v === "ZH" || lang === "zh") return "中文司机";
-  if (v === "JP" || lang === "jp") return "日文司机";
-  return lang || "-";
+  if (v === "ZH" || v === "CH" || v === "CN" || v === "CHINESE") return "中文司机";
+  if (v === "JP" || v === "JA" || v === "JAPANESE") return "日文司机";
+  if (lang === "zh" || lang === "ZH") return "中文司机";
+  if (lang === "jp" || lang === "JP") return "日文司机";
+  return lang ?? "";
 }
 
-// ================= 邮件模板（补齐内容） =================
+// ================= 邮件模板（只补内容） =================
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
+
   const balance =
     order.balance_due ??
     (order.total_price ? order.total_price - deposit : null);
 
+  // 手机端按钮：打开感谢页（你图1那页）
   const successUrl = `https://xn--okinawa-n14kh45a.com/success?order_id=${encodeURIComponent(
     order.order_id
   )}`;
@@ -68,16 +72,19 @@ function buildCustomerEmail(order) {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
+
   <h2>预约已确认（押金已支付）</h2>
 
-  <p><b>订单号：</b>${order.order_id ?? "-"}</p>
-  <p><b>用车日期：</b>${order.start_date ?? "-"}</p>
+  <p><b>订单号：</b>${order.order_id ?? ""}</p>
+  <p><b>用车日期：</b>${order.start_date ?? ""}</p>
   <p><b>车型：</b>${carNameMap(order.car_model_id)}</p>
   <p><b>司机语言：</b>${driverLangMap(order.driver_lang)}</p>
-  <p><b>包车时长：</b>${order.duration ?? "-"} 小时</p>
+  <p><b>包车时长：</b>${order.duration ?? ""} 小时</p>
 
-  <p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
-  <p><b>押金：</b>${deposit} RMB</p>
+  <hr/>
+
+  <p><b>全款：</b>${order.total_price ?? ""} RMB</p>
+  <p><b>押金：</b>${deposit} RMB（已支付）</p>
   <p><b>尾款：</b>${
     balance !== null
       ? `${balance} RMB（用车当日支付司机）`
@@ -86,30 +93,30 @@ function buildCustomerEmail(order) {
 
   <hr/>
 
-  <p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
-  <p><b>电话：</b>${order.phone ?? "-"}</p>
-  <p><b>微信：</b>${order.wechat ?? "-"}</p>
-  <p><b>邮箱：</b>${order.email ?? "-"}</p>
+  <p><b>客人名字：</b>${order.customer_name ?? ""}</p>
+  <p><b>电话：</b>${order.phone ?? ""}</p>
+  <p><b>微信：</b>${order.wechat ?? ""}</p>
+  <p><b>邮箱：</b>${order.email ?? ""}</p>
 
   <hr/>
 
-  <p>若手机端支付宝未自动跳回，请点击下方按钮查看确认单（含感谢页内容）。</p>
+  <p>若手机端支付宝未自动跳回，请点击下方按钮查看确认单（含感谢页与微信二维码）。</p>
 
-  <div style="margin-top:18px;text-align:center">
+  <div style="margin-top:18px">
     <a href="${successUrl}"
-      style="
-        display:inline-block;
-        padding:14px 24px;
-        background:#2563eb;
-        color:#ffffff;
-        text-decoration:none;
-        border-radius:6px;
-        font-size:16px;
-        font-weight:bold;
-      ">
+       style="
+         display:inline-block;
+         padding:14px 22px;
+         background:#2563eb;
+         color:#ffffff;
+         text-decoration:none;
+         border-radius:6px;
+         font-size:16px;
+       ">
       查看新订单确认单
     </a>
   </div>
+
 </div>
 `,
   };
@@ -117,6 +124,7 @@ function buildCustomerEmail(order) {
 
 function buildOpsEmail(order) {
   const deposit = order.deposit_amount ?? 500;
+
   const balance =
     order.balance_due ??
     (order.total_price ? order.total_price - deposit : null);
@@ -125,32 +133,34 @@ function buildOpsEmail(order) {
     subject: `【新订单】${order.order_id}`,
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
+
   <h3>新订单通知</h3>
 
-  <p><b>订单号：</b>${order.order_id ?? "-"}</p>
-  <p><b>用车日期：</b>${order.start_date ?? "-"}</p>
+  <p><b>订单号：</b>${order.order_id ?? ""}</p>
+  <p><b>用车日期：</b>${order.start_date ?? ""}</p>
   <p><b>车型：</b>${carNameMap(order.car_model_id)}</p>
   <p><b>司机语言：</b>${driverLangMap(order.driver_lang)}</p>
-  <p><b>包车时长：</b>${order.duration ?? "-"} 小时</p>
-
-  <p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
-  <p><b>押金：</b>${deposit} RMB</p>
-  <p><b>尾款：</b>${
-    balance !== null ? `${balance} RMB` : "-"
-  }</p>
+  <p><b>包车时长：</b>${order.duration ?? ""} 小时</p>
 
   <hr/>
 
-  <p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
-  <p><b>电话：</b>${order.phone ?? "-"}</p>
-  <p><b>微信：</b>${order.wechat ?? "-"}</p>
-  <p><b>邮箱：</b>${order.email ?? "-"}</p>
+  <p><b>全款：</b>${order.total_price ?? ""} RMB</p>
+  <p><b>押金：</b>${deposit} RMB</p>
+  <p><b>尾款：</b>${balance !== null ? `${balance} RMB` : ""}</p>
+
+  <hr/>
+
+  <p><b>客人名字：</b>${order.customer_name ?? ""}</p>
+  <p><b>电话：</b>${order.phone ?? ""}</p>
+  <p><b>微信：</b>${order.wechat ?? ""}</p>
+  <p><b>邮箱：</b>${order.email ?? ""}</p>
+
 </div>
 `,
   };
 }
 
-// =============== 邮件幂等（字段不动） ===============
+// =============== 邮件幂等（不动） ===============
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return;
   if (order.email_customer_sent) return;
@@ -172,7 +182,6 @@ async function sendCustomerEmailOnce(order) {
       to: order.email,
       subject: mail.subject,
       html: mail.html,
-      tags: [{ name: "order_id", value: String(order.order_id) }],
     });
   } catch {
     await supabase
@@ -202,7 +211,6 @@ async function sendOpsEmailOnce(order) {
       to: "songshanshan1977@gmail.com",
       subject: mail.subject,
       html: mail.html,
-      tags: [{ name: "order_id", value: String(order.order_id) }],
     });
   } catch {
     await supabase
@@ -212,7 +220,7 @@ async function sendOpsEmailOnce(order) {
   }
 }
 
-// ================= driver_lang 规范 =================
+// ================= driver_lang 规范（不动） =================
 function normalizeDriverLang(lang) {
   const v = String(lang || "ZH").toUpperCase();
   return v === "JP" ? "JP" : "ZH";
@@ -236,19 +244,14 @@ export default async function handler(req, res) {
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      // ✅ 只做“清洗”，不改逻辑：去掉可能的 \n \r 空格
-      let orderId =
-        session?.metadata?.order_id || session?.client_reference_id;
-
-      orderId = String(orderId || "")
-        .replace(/\r/g, "")
-        .replace(/\n/g, "")
-        .trim();
+      // ✅ 关键修复：清理隐藏空格/换行，否则会 order not found，Resend 永远不触发
+      const orderIdRaw =
+        session?.metadata?.order_id || session?.client_reference_id || "";
+      const orderId = String(orderIdRaw).trim();
 
       if (!orderId) return res.status(200).json({ ok: true });
 
-      // ✅ 先精确查（原逻辑）
-      let { data: order } = await supabase
+      const { data: order } = await supabase
         .from("orders")
         .select(
           `
@@ -273,43 +276,8 @@ export default async function handler(req, res) {
         .eq("order_id", orderId)
         .single();
 
-      // ✅ 查不到就做一次兜底（兼容 DB 里尾部脏字符：比如 ORD-xxxx\n）
-      if (!order) {
-        const { data: list } = await supabase
-          .from("orders")
-          .select(
-            `
-            order_id,
-            start_date,
-            end_date,
-            car_model_id,
-            driver_lang,
-            duration,
-            email,
-            total_price,
-            deposit_amount,
-            balance_due,
-            customer_name,
-            phone,
-            wechat,
-            inventory_locked,
-            email_customer_sent,
-            email_ops_sent
-          `
-          )
-          .like("order_id", `${orderId}%`)
-          .order("created_at", { ascending: false })
-          .limit(1);
+      if (!order) return res.status(200).json({ ok: true });
 
-        order = Array.isArray(list) && list.length > 0 ? list[0] : null;
-      }
-
-      if (!order) {
-        console.log("[webhook] order not found", { orderId });
-        return res.status(200).json({ ok: true });
-      }
-
-      // ✅ 唯一库存幂等判断（原逻辑）
       if (!order.inventory_locked) {
         const { error } = await supabase.rpc("lock_inventory_v2", {
           p_start_date: order.start_date,
