@@ -31,9 +31,9 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// ================== 显示映射（只用于邮件展示） ==================
+// ================= 显示映射（只用于邮件展示） =================
 
-// 你系统固定的 3 个车型 UUID
+// 你系统固定 3 个车型 UUID（你截图里邮件展示的就是 UUID，所以这里必须映射）
 const CAR_MODEL_ID_NAME_MAP = {
   "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型 5 座轿车",
   "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
@@ -42,24 +42,22 @@ const CAR_MODEL_ID_NAME_MAP = {
 
 function carNameMap(id) {
   if (!id) return "-";
-  // 兼容 car1/car2/car3
+  // 兼容老写法 car1/car2/car3
   if (id === "car1") return "经济型 5 座轿车";
   if (id === "car2") return "豪华 7 座阿尔法";
   if (id === "car3") return "舒适 10 座海狮";
-  // 兼容 UUID
+  // UUID 映射
   return CAR_MODEL_ID_NAME_MAP[id] || id;
 }
 
 function driverLangMap(lang) {
   const v = String(lang || "").toUpperCase();
-  if (v === "ZH" || v === "ZH-CN" || v === "CN") return "中文司机";
-  if (v === "JP" || v === "JA" || v === "JPN") return "日文司机";
-  if (lang === "zh") return "中文司机";
-  if (lang === "jp") return "日文司机";
+  if (v === "ZH" || lang === "zh") return "中文司机";
+  if (v === "JP" || lang === "jp") return "日文司机";
   return lang || "-";
 }
 
-// ================= 邮件模板（只补内容） =================
+// ================= 邮件模板（补齐内容） =================
 
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
@@ -75,6 +73,7 @@ function buildCustomerEmail(order) {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
+
   <h2>预约已确认（押金已支付）</h2>
 
   <p><b>订单号：</b>${order.order_id ?? "-"}</p>
@@ -100,7 +99,7 @@ function buildCustomerEmail(order) {
 
   <hr/>
 
-  <p>若手机端支付宝未自动跳回，请点击下方按钮查看确认单（含感谢页与二维码）。</p>
+  <p>若手机端支付宝未自动跳回，请点击下方按钮查看确认单（含感谢页内容）。</p>
 
   <div style="margin-top:18px;text-align:center">
     <a href="${successUrl}"
@@ -117,8 +116,9 @@ function buildCustomerEmail(order) {
       查看新订单确认单
     </a>
   </div>
+
 </div>
-    `,
+`,
   };
 }
 
@@ -132,6 +132,7 @@ function buildOpsEmail(order) {
     subject: `【新订单】${order.order_id}`,
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
+
   <h3>新订单通知</h3>
 
   <p><b>订单号：</b>${order.order_id ?? "-"}</p>
@@ -150,21 +151,24 @@ function buildOpsEmail(order) {
   <p><b>电话：</b>${order.phone ?? "-"}</p>
   <p><b>微信：</b>${order.wechat ?? "-"}</p>
   <p><b>邮箱：</b>${order.email ?? "-"}</p>
+
 </div>
-    `,
+`,
   };
 }
 
-// =============== 邮件幂等（字段不动） ===============
+// =============== 邮件幂等（逻辑不变：只修 NULL 匹配不到） ===============
+
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return;
   if (order.email_customer_sent) return;
 
+  // ✅ 关键修复：兼容 NULL 或 false（否则 update 匹配不到 -> 不会触发 Resend）
   const { data } = await supabase
     .from("orders")
     .update({ email_customer_sent: true })
     .eq("order_id", order.order_id)
-    .eq("email_customer_sent", false)
+    .or("email_customer_sent.is.null,email_customer_sent.eq.false")
     .select("order_id");
 
   if (!data || data.length === 0) return;
@@ -189,11 +193,12 @@ async function sendCustomerEmailOnce(order) {
 async function sendOpsEmailOnce(order) {
   if (order.email_ops_sent) return;
 
+  // ✅ 关键修复：兼容 NULL 或 false
   const { data } = await supabase
     .from("orders")
     .update({ email_ops_sent: true })
     .eq("order_id", order.order_id)
-    .eq("email_ops_sent", false)
+    .or("email_ops_sent.is.null,email_ops_sent.eq.false")
     .select("order_id");
 
   if (!data || data.length === 0) return;
@@ -239,13 +244,8 @@ export default async function handler(req, res) {
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      // ✅ 不改变流程：只是兼容更多 metadata key（防止 order_id 拿不到直接 return）
       const orderId =
-        session?.metadata?.order_id ||
-        session?.metadata?.orderId ||
-        session?.metadata?.orderID ||
-        session?.metadata?.ORDER_ID ||
-        session?.client_reference_id;
+        session?.metadata?.order_id || session?.client_reference_id;
 
       if (!orderId) return res.status(200).json({ ok: true });
 
@@ -276,6 +276,7 @@ export default async function handler(req, res) {
 
       if (!order) return res.status(200).json({ ok: true });
 
+      // ✅ 唯一库存幂等判断（不动）
       if (!order.inventory_locked) {
         const { error } = await supabase.rpc("lock_inventory_v2", {
           p_start_date: order.start_date,
