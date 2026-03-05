@@ -20,8 +20,7 @@ const supabase = createClient(
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 const RESEND_FROM =
-  process.env.RESEND_FROM ||
-  "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
+  process.env.RESEND_FROM || "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
 
 async function buffer(readable) {
   const chunks = [];
@@ -84,15 +83,20 @@ function buildCustomerEmail(order) {
 <hr/>
 
 <p><b>客人名字：</b>${order.customer_name ?? ""}</p>
+
 <p><b>电话：</b>${order.phone ?? ""}</p>
+
 <p><b>微信：</b>${order.wechat ?? ""}</p>
+
 <p><b>邮箱：</b>${order.email ?? ""}</p>
 
 <hr/>
 
 <div style="margin-top:25px">
 
-<a href="https://xn--okinawa-n14kh45a.com/success?order_id=${order.order_id}"
+<a href="https://xn--okinawa-n14kh45a.com/success?order_id=${
+      order.order_id
+    }"
 style="
 display:inline-block;
 padding:14px 24px;
@@ -106,36 +110,6 @@ font-size:16px;
 查看新订单确认单
 
 </a>
-
-</div>
-
-<hr/>
-
-<div style="margin-top:30px">
-
-<h2>🎉 预订成功！（押金已支付）</h2>
-
-<p>感谢您选择 <b>华人 Okinawan</b>，您的包车已成功锁定。</p>
-
-<p>✅ 客服将第一时间与您确认行程与司机安排</p>
-
-<p>📌 请务必添加我们的售后微信</p>
-
-<p>添加微信时请备注订单号：</p>
-
-<p><b>${order.order_id}</b></p>
-
-<div style="margin-top:15px">
-<img src="https://xn--okinawa-n14kh45a.com/wechat-qr.png" width="220"/>
-</div>
-
-<p>扫码添加客服微信</p>
-
-<p>
-<a href="https://xn--okinawa-n14kh45a.com" style="color:#2563eb;">
-返回首页
-</a>
-</p>
 
 </div>
 
@@ -174,16 +148,17 @@ function buildOpsEmail(order) {
 <p><b>押金：</b>${deposit} RMB</p>
 
 <p><b>尾款：</b>${
-      balance !== null
-        ? `${balance} RMB`
-        : ""
+      balance !== null ? `${balance} RMB` : ""
     }</p>
 
 <hr/>
 
 <p><b>客人名字：</b>${order.customer_name ?? ""}</p>
+
 <p><b>电话：</b>${order.phone ?? ""}</p>
+
 <p><b>微信：</b>${order.wechat ?? ""}</p>
+
 <p><b>邮箱：</b>${order.email ?? ""}</p>
 
 </div>
@@ -191,18 +166,18 @@ function buildOpsEmail(order) {
   };
 }
 
-// =============== 邮件幂等（不动） ===============
+// =============== 邮件幂等（不动逻辑，只修 NULL 兼容） ===============
 
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return;
-
   if (order.email_customer_sent) return;
 
+  // ✅ 修复：兼容 NULL（NULL 也视为未发送）
   const { data } = await supabase
     .from("orders")
     .update({ email_customer_sent: true })
     .eq("order_id", order.order_id)
-    .eq("email_customer_sent", false)
+    .or("email_customer_sent.is.null,email_customer_sent.eq.false")
     .select("order_id");
 
   if (!data || data.length === 0) return;
@@ -227,11 +202,12 @@ async function sendCustomerEmailOnce(order) {
 async function sendOpsEmailOnce(order) {
   if (order.email_ops_sent) return;
 
+  // ✅ 修复：兼容 NULL（NULL 也视为未发送）
   const { data } = await supabase
     .from("orders")
     .update({ email_ops_sent: true })
     .eq("order_id", order.order_id)
-    .eq("email_ops_sent", false)
+    .or("email_ops_sent.is.null,email_ops_sent.eq.false")
     .select("order_id");
 
   if (!data || data.length === 0) return;
@@ -267,9 +243,7 @@ export default async function handler(req, res) {
 
   try {
     const buf = await buffer(req);
-
     const sig = req.headers["stripe-signature"];
-
     event = stripe.webhooks.constructEvent(buf, sig, webhookSecret);
   } catch (err) {
     return res.status(400).send("Webhook Error");
@@ -280,14 +254,14 @@ export default async function handler(req, res) {
       const session = event.data.object;
 
       const orderId =
-        session?.metadata?.order_id ||
-        session?.client_reference_id;
+        session?.metadata?.order_id || session?.client_reference_id;
 
       if (!orderId) return res.status(200).json({ ok: true });
 
       const { data: order } = await supabase
         .from("orders")
-        .select(`
+        .select(
+          `
 order_id,
 start_date,
 end_date,
@@ -304,7 +278,8 @@ wechat,
 inventory_locked,
 email_customer_sent,
 email_ops_sent
-`)
+`
+        )
         .eq("order_id", orderId)
         .single();
 
@@ -328,7 +303,6 @@ email_ops_sent
       }
 
       await sendCustomerEmailOnce(order);
-
       await sendOpsEmailOnce(order);
 
       return res.status(200).json({ ok: true });
