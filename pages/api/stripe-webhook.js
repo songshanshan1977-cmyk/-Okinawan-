@@ -32,8 +32,6 @@ async function buffer(readable) {
 }
 
 // ================= 显示映射（只用于邮件展示） =================
-
-// 你系统固定 3 个车型 UUID（你截图里邮件展示的就是 UUID，所以这里必须映射）
 const CAR_MODEL_ID_NAME_MAP = {
   "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型 5 座轿车",
   "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
@@ -42,11 +40,9 @@ const CAR_MODEL_ID_NAME_MAP = {
 
 function carNameMap(id) {
   if (!id) return "-";
-  // 兼容老写法 car1/car2/car3
   if (id === "car1") return "经济型 5 座轿车";
   if (id === "car2") return "豪华 7 座阿尔法";
   if (id === "car3") return "舒适 10 座海狮";
-  // UUID 映射
   return CAR_MODEL_ID_NAME_MAP[id] || id;
 }
 
@@ -58,7 +54,6 @@ function driverLangMap(lang) {
 }
 
 // ================= 邮件模板（补齐内容） =================
-
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
   const balance =
@@ -73,7 +68,6 @@ function buildCustomerEmail(order) {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
-
   <h2>预约已确认（押金已支付）</h2>
 
   <p><b>订单号：</b>${order.order_id ?? "-"}</p>
@@ -116,7 +110,6 @@ function buildCustomerEmail(order) {
       查看新订单确认单
     </a>
   </div>
-
 </div>
 `,
   };
@@ -132,7 +125,6 @@ function buildOpsEmail(order) {
     subject: `【新订单】${order.order_id}`,
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
-
   <h3>新订单通知</h3>
 
   <p><b>订单号：</b>${order.order_id ?? "-"}</p>
@@ -151,38 +143,76 @@ function buildOpsEmail(order) {
   <p><b>电话：</b>${order.phone ?? "-"}</p>
   <p><b>微信：</b>${order.wechat ?? "-"}</p>
   <p><b>邮箱：</b>${order.email ?? "-"}</p>
-
 </div>
 `,
   };
 }
 
-// =============== 邮件幂等（逻辑不变：只修 NULL 匹配不到） ===============
-
+// =============== 邮件幂等（不改流程，只加“说实话日志”+ NULL 兼容） ===============
 async function sendCustomerEmailOnce(order) {
-  if (!order?.email) return;
-  if (order.email_customer_sent) return;
+  console.log("[mail][customer] start", {
+    order_id: order?.order_id,
+    to: order?.email,
+    email_customer_sent: order?.email_customer_sent,
+  });
 
-  // ✅ 关键修复：兼容 NULL 或 false（否则 update 匹配不到 -> 不会触发 Resend）
-  const { data } = await supabase
+  if (!order?.email) {
+    console.log("[mail][customer] skip: no email", { order_id: order?.order_id });
+    return;
+  }
+
+  if (order.email_customer_sent) {
+    console.log("[mail][customer] skip: already sent flag true", {
+      order_id: order.order_id,
+    });
+    return;
+  }
+
+  const { data, error } = await supabase
     .from("orders")
     .update({ email_customer_sent: true })
     .eq("order_id", order.order_id)
+    // ✅ 关键：兼容 NULL / false，否则很多单 update 匹配不到 → 不触发 resend
     .or("email_customer_sent.is.null,email_customer_sent.eq.false")
     .select("order_id");
 
-  if (!data || data.length === 0) return;
+  console.log("[mail][customer] flag update result", {
+    order_id: order.order_id,
+    matched: data?.length || 0,
+    error: error?.message || null,
+  });
+
+  if (!data || data.length === 0) {
+    console.log("[mail][customer] skip: update matched 0 (likely flag not null/false)", {
+      order_id: order.order_id,
+    });
+    return;
+  }
 
   const mail = buildCustomerEmail(order);
 
   try {
-    await resend.emails.send({
+    const resp = await resend.emails.send({
       from: RESEND_FROM,
       to: order.email,
       subject: mail.subject,
       html: mail.html,
+      // ✅ 方便你在 Resend 搜索
+      tags: [{ name: "order_id", value: String(order.order_id) }],
     });
-  } catch {
+
+    console.log("[mail][customer] resend response", {
+      order_id: order.order_id,
+      resp,
+    });
+  } catch (err) {
+    console.error("[mail][customer] resend ERROR", {
+      order_id: order.order_id,
+      message: err?.message,
+      name: err?.name,
+      stack: err?.stack,
+    });
+
     await supabase
       .from("orders")
       .update({ email_customer_sent: false })
@@ -191,28 +221,57 @@ async function sendCustomerEmailOnce(order) {
 }
 
 async function sendOpsEmailOnce(order) {
-  if (order.email_ops_sent) return;
+  console.log("[mail][ops] start", {
+    order_id: order?.order_id,
+    email_ops_sent: order?.email_ops_sent,
+  });
 
-  // ✅ 关键修复：兼容 NULL 或 false
-  const { data } = await supabase
+  if (order.email_ops_sent) {
+    console.log("[mail][ops] skip: already sent flag true", { order_id: order.order_id });
+    return;
+  }
+
+  const { data, error } = await supabase
     .from("orders")
     .update({ email_ops_sent: true })
     .eq("order_id", order.order_id)
     .or("email_ops_sent.is.null,email_ops_sent.eq.false")
     .select("order_id");
 
-  if (!data || data.length === 0) return;
+  console.log("[mail][ops] flag update result", {
+    order_id: order.order_id,
+    matched: data?.length || 0,
+    error: error?.message || null,
+  });
+
+  if (!data || data.length === 0) {
+    console.log("[mail][ops] skip: update matched 0", { order_id: order.order_id });
+    return;
+  }
 
   const mail = buildOpsEmail(order);
 
   try {
-    await resend.emails.send({
+    const resp = await resend.emails.send({
       from: RESEND_FROM,
       to: "songshanshan1977@gmail.com",
       subject: mail.subject,
       html: mail.html,
+      tags: [{ name: "order_id", value: String(order.order_id) }],
     });
-  } catch {
+
+    console.log("[mail][ops] resend response", {
+      order_id: order.order_id,
+      resp,
+    });
+  } catch (err) {
+    console.error("[mail][ops] resend ERROR", {
+      order_id: order.order_id,
+      message: err?.message,
+      name: err?.name,
+      stack: err?.stack,
+    });
+
     await supabase
       .from("orders")
       .update({ email_ops_sent: false })
@@ -247,6 +306,11 @@ export default async function handler(req, res) {
       const orderId =
         session?.metadata?.order_id || session?.client_reference_id;
 
+      console.log("[webhook] checkout.session.completed", {
+        orderId,
+        stripe_event_id: event?.id,
+      });
+
       if (!orderId) return res.status(200).json({ ok: true });
 
       const { data: order } = await supabase
@@ -274,15 +338,22 @@ export default async function handler(req, res) {
         .eq("order_id", orderId)
         .single();
 
-      if (!order) return res.status(200).json({ ok: true });
+      if (!order) {
+        console.log("[webhook] order not found", { orderId });
+        return res.status(200).json({ ok: true });
+      }
 
-      // ✅ 唯一库存幂等判断（不动）
       if (!order.inventory_locked) {
         const { error } = await supabase.rpc("lock_inventory_v2", {
           p_start_date: order.start_date,
           p_end_date: order.end_date || order.start_date,
           p_car_model_id: order.car_model_id,
           p_driver_lang: normalizeDriverLang(order.driver_lang),
+        });
+
+        console.log("[inventory] lock_inventory_v2", {
+          order_id: order.order_id,
+          error: error?.message || null,
         });
 
         if (!error) {
@@ -302,6 +373,11 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ ok: true });
   } catch (e) {
+    console.error("[webhook] handler ERROR", {
+      message: e?.message,
+      name: e?.name,
+      stack: e?.stack,
+    });
     return res.status(200).json({ ok: true });
   }
 }
