@@ -22,16 +22,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const RESEND_FROM =
   process.env.RESEND_FROM || "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
 
-// 读取 raw body
-async function buffer(readable) {
-  const chunks = [];
-  for await (const chunk of readable) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
-
-// ===== 车型 UUID 映射 =====
+// ===== 车型映射 =====
 const carNameMap = {
   "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型 5 座轿车",
   "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
@@ -45,7 +36,16 @@ const driverLangMap = {
   JP: "日文司机",
 };
 
-// ================= 客人邮件 =================
+// 读取 raw body
+async function buffer(readable) {
+  const chunks = [];
+  for await (const chunk of readable) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+// ================= 邮件模板 =================
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
 
@@ -74,9 +74,9 @@ function buildCustomerEmail(order) {
 
 <p><b>包车时长：</b>${order.duration} 小时</p>
 
-<p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
+<hr/>
 
-<p><b>押金：</b>${deposit} RMB</p>
+<p><b>押金：</b>${deposit} RMB（已支付）</p>
 
 <p><b>尾款：</b>${
   balance !== null
@@ -87,11 +87,8 @@ function buildCustomerEmail(order) {
 <hr/>
 
 <p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
-
 <p><b>电话：</b>${order.phone ?? "-"}</p>
-
 <p><b>微信：</b>${order.wechat ?? "-"}</p>
-
 <p><b>邮箱：</b>${order.email ?? "-"}</p>
 
 <br/>
@@ -120,14 +117,7 @@ font-weight:bold;
   };
 }
 
-// ================= 运营邮件 =================
 function buildOpsEmail(order) {
-  const deposit = order.deposit_amount ?? 500;
-
-  const balance =
-    order.balance_due ??
-    (order.total_price ? order.total_price - deposit : null);
-
   const carName = carNameMap[order.car_model_id] || order.car_model_id;
   const driverLang =
     driverLangMap[order.driver_lang] || order.driver_lang;
@@ -138,27 +128,13 @@ function buildOpsEmail(order) {
 <div style="font-family:Arial,sans-serif;line-height:1.6">
 
 <p><b>订单号：</b>${order.order_id}</p>
-
-<p><b>用车日期：</b>${order.start_date}</p>
-
+<p><b>日期：</b>${order.start_date}</p>
 <p><b>车型：</b>${carName}</p>
-
 <p><b>司机语言：</b>${driverLang}</p>
 
-<p><b>包车时长：</b>${order.duration} 小时</p>
-
-<p><b>全款：</b>${order.total_price ?? "-"} RMB</p>
-
-<p><b>押金：</b>${deposit} RMB</p>
-
-<p><b>尾款：</b>${balance ?? "-"} RMB</p>
-
-<p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
-
+<p><b>客人：</b>${order.customer_name ?? "-"}</p>
 <p><b>电话：</b>${order.phone ?? "-"}</p>
-
 <p><b>微信：</b>${order.wechat ?? "-"}</p>
-
 <p><b>邮箱：</b>${order.email ?? "-"}</p>
 
 </div>
@@ -226,13 +202,13 @@ async function sendOpsEmailOnce(order) {
   }
 }
 
-// ================= driver_lang =================
+// ================= driver_lang 规范 =================
 function normalizeDriverLang(lang) {
   const v = String(lang || "ZH").toUpperCase();
   return v === "JP" ? "JP" : "ZH";
 }
 
-// ================= webhook =================
+// ================= 主 webhook =================
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
