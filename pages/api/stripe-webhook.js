@@ -20,23 +20,9 @@ const supabase = createClient(
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 const RESEND_FROM =
-  process.env.RESEND_FROM || "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
+  process.env.RESEND_FROM ||
+  "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
 
-// ===== 车型映射 =====
-const carNameMap = {
-  "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型 5 座轿车",
-  "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
-  "453df662-d350-4ab9-b811-61ffcda40d4b": "舒适 10 座海狮",
-};
-
-const driverLangMap = {
-  zh: "中文司机",
-  ZH: "中文司机",
-  jp: "日文司机",
-  JP: "日文司机",
-};
-
-// 读取 raw body
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -45,7 +31,21 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
+function carNameMap(id) {
+  if (id === "car1") return "经济型轿车";
+  if (id === "car2") return "豪华阿尔法";
+  if (id === "car3") return "10座海狮";
+  return id;
+}
+
+function driverLangMap(lang) {
+  if (lang === "ZH") return "中文司机";
+  if (lang === "JP") return "日文司机";
+  return lang;
+}
+
 // ================= 邮件模板 =================
+
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
 
@@ -53,12 +53,9 @@ function buildCustomerEmail(order) {
     order.balance_due ??
     (order.total_price ? order.total_price - deposit : null);
 
-  const carName = carNameMap[order.car_model_id] || order.car_model_id;
-  const driverLang =
-    driverLangMap[order.driver_lang] || order.driver_lang;
-
   return {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
+
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
 
@@ -68,42 +65,47 @@ function buildCustomerEmail(order) {
 
 <p><b>用车日期：</b>${order.start_date}</p>
 
-<p><b>车型：</b>${carName}</p>
+<p><b>车型：</b>${carNameMap(order.car_model_id)}</p>
 
-<p><b>司机语言：</b>${driverLang}</p>
+<p><b>司机语言：</b>${driverLangMap(order.driver_lang)}</p>
 
 <p><b>包车时长：</b>${order.duration} 小时</p>
 
-<hr/>
+<p><b>全款：</b>${order.total_price ?? ""} RMB</p>
 
-<p><b>押金：</b>${deposit} RMB（已支付）</p>
+<p><b>押金：</b>${deposit} RMB</p>
 
 <p><b>尾款：</b>${
-  balance !== null
-    ? `${balance} RMB（用车当日支付司机）`
-    : "用车当日支付司机"
-}</p>
+      balance !== null
+        ? `${balance} RMB（用车当日支付司机）`
+        : "用车当日支付司机"
+    }</p>
 
 <hr/>
 
-<p><b>客人名字：</b>${order.customer_name ?? "-"}</p>
-<p><b>电话：</b>${order.phone ?? "-"}</p>
-<p><b>微信：</b>${order.wechat ?? "-"}</p>
-<p><b>邮箱：</b>${order.email ?? "-"}</p>
+<p><b>客人名字：</b>${order.customer_name ?? ""}</p>
 
-<br/>
+<p><b>电话：</b>${order.phone ?? ""}</p>
 
-<div style="text-align:center;margin-top:20px">
+<p><b>微信：</b>${order.wechat ?? ""}</p>
 
-<a href="https://okinawan.vercel.app/success?order_id=${order.order_id}"
+<p><b>邮箱：</b>${order.email ?? ""}</p>
+
+<hr/>
+
+<div style="margin-top:25px">
+
+<a href="https://xn--okinawa-n14kh45a.com/success?order_id=${
+      order.order_id
+    }"
 style="
-background:#0070f3;
-color:#ffffff;
-padding:12px 24px;
+display:inline-block;
+padding:14px 24px;
+background:#2563eb;
+color:white;
 text-decoration:none;
 border-radius:6px;
-display:inline-block;
-font-weight:bold;
+font-size:16px;
 ">
 
 查看新订单确认单
@@ -118,33 +120,60 @@ font-weight:bold;
 }
 
 function buildOpsEmail(order) {
-  const carName = carNameMap[order.car_model_id] || order.car_model_id;
-  const driverLang =
-    driverLangMap[order.driver_lang] || order.driver_lang;
+  const deposit = order.deposit_amount ?? 500;
+
+  const balance =
+    order.balance_due ??
+    (order.total_price ? order.total_price - deposit : null);
 
   return {
     subject: `【新订单】${order.order_id}`,
+
     html: `
 <div style="font-family:Arial,sans-serif;line-height:1.6">
 
-<p><b>订单号：</b>${order.order_id}</p>
-<p><b>日期：</b>${order.start_date}</p>
-<p><b>车型：</b>${carName}</p>
-<p><b>司机语言：</b>${driverLang}</p>
+<h3>新订单通知</h3>
 
-<p><b>客人：</b>${order.customer_name ?? "-"}</p>
-<p><b>电话：</b>${order.phone ?? "-"}</p>
-<p><b>微信：</b>${order.wechat ?? "-"}</p>
-<p><b>邮箱：</b>${order.email ?? "-"}</p>
+<p><b>订单号：</b>${order.order_id}</p>
+
+<p><b>用车日期：</b>${order.start_date}</p>
+
+<p><b>车型：</b>${carNameMap(order.car_model_id)}</p>
+
+<p><b>司机语言：</b>${driverLangMap(order.driver_lang)}</p>
+
+<p><b>包车时长：</b>${order.duration} 小时</p>
+
+<p><b>全款：</b>${order.total_price ?? ""} RMB</p>
+
+<p><b>押金：</b>${deposit} RMB</p>
+
+<p><b>尾款：</b>${
+      balance !== null
+        ? `${balance} RMB`
+        : ""
+    }</p>
+
+<hr/>
+
+<p><b>客人名字：</b>${order.customer_name ?? ""}</p>
+
+<p><b>电话：</b>${order.phone ?? ""}</p>
+
+<p><b>微信：</b>${order.wechat ?? ""}</p>
+
+<p><b>邮箱：</b>${order.email ?? ""}</p>
 
 </div>
 `,
   };
 }
 
-// =============== 邮件幂等 ===============
+// =============== 邮件幂等（不动） ===============
+
 async function sendCustomerEmailOnce(order) {
   if (!order?.email) return;
+
   if (order.email_customer_sent) return;
 
   const { data } = await supabase
@@ -202,13 +231,13 @@ async function sendOpsEmailOnce(order) {
   }
 }
 
-// ================= driver_lang 规范 =================
 function normalizeDriverLang(lang) {
   const v = String(lang || "ZH").toUpperCase();
   return v === "JP" ? "JP" : "ZH";
 }
 
 // ================= 主 webhook =================
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
@@ -216,9 +245,11 @@ export default async function handler(req, res) {
 
   try {
     const buf = await buffer(req);
+
     const sig = req.headers["stripe-signature"];
+
     event = stripe.webhooks.constructEvent(buf, sig, webhookSecret);
-  } catch {
+  } catch (err) {
     return res.status(400).send("Webhook Error");
   }
 
@@ -227,30 +258,31 @@ export default async function handler(req, res) {
       const session = event.data.object;
 
       const orderId =
-        session?.metadata?.order_id || session?.client_reference_id;
+        session?.metadata?.order_id ||
+        session?.client_reference_id;
 
       if (!orderId) return res.status(200).json({ ok: true });
 
       const { data: order } = await supabase
         .from("orders")
         .select(`
-          order_id,
-          start_date,
-          end_date,
-          car_model_id,
-          driver_lang,
-          duration,
-          email,
-          customer_name,
-          phone,
-          wechat,
-          total_price,
-          deposit_amount,
-          balance_due,
-          inventory_locked,
-          email_customer_sent,
-          email_ops_sent
-        `)
+order_id,
+start_date,
+end_date,
+car_model_id,
+driver_lang,
+duration,
+email,
+total_price,
+deposit_amount,
+balance_due,
+customer_name,
+phone,
+wechat,
+inventory_locked,
+email_customer_sent,
+email_ops_sent
+`)
         .eq("order_id", orderId)
         .single();
 
@@ -274,13 +306,14 @@ export default async function handler(req, res) {
       }
 
       await sendCustomerEmailOnce(order);
+
       await sendOpsEmailOnce(order);
 
       return res.status(200).json({ ok: true });
     }
 
     return res.status(200).json({ ok: true });
-  } catch {
+  } catch (e) {
     return res.status(200).json({ ok: true });
   }
 }
