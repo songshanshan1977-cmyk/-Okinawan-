@@ -22,11 +22,6 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const RESEND_FROM =
   process.env.RESEND_FROM || "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
 
-// ✅ 你图1 的感谢页（手机端按钮要打开这里）
-const THANK_YOU_URL =
-  process.env.PUBLIC_THANK_YOU_URL ||
-  "https://xn--okinawa-n14kh45a.com/success?order_id=";
-
 // 读取 raw body
 async function buffer(readable) {
   const chunks = [];
@@ -36,148 +31,128 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// ================= 显示映射（只影响邮件展示） =================
-
-// ✅ 车型 UUID -> 中文（把剩下两个 UUID 补上就全中文了）
-const CAR_MODEL_ID_NAME_MAP = {
-  // 你截图里的这个 UUID（ORD-20260305-33072）
-  "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型轿车（5座）",
-
-  // TODO: 把你数据库 car_models 里另外两台车的 UUID 填进来：
-  // "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx": "豪华阿尔法（7座）",
-  // "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy": "10座海狮（Hiace）",
-};
-
+// ================= 邮件显示映射（只影响内容，不动逻辑） =================
 function carNameZh(id) {
-  if (!id) return "";
-  // 兼容老的 car1/car2/car3
-  if (id === "car1") return "经济型轿车（5座）";
-  if (id === "car2") return "豪华阿尔法（7座）";
-  if (id === "car3") return "10座海狮（Hiace）";
-  // UUID 映射
-  return CAR_MODEL_ID_NAME_MAP[id] || id; // 没填映射就会显示原值（避免报错）
+  const map = {
+    // 海狮车型（Hiace）
+    "453df662-d350-4ab9-b811-61ffcda40d4b": "海狮车型",
+    // 经济型轿车（Economy）
+    "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型轿车",
+    // 阿尔法（Alphard）——你截图里 name_zh 就是这个文字
+    "82cf604f-e688-49fe-aecf-69894a01f6cb": "丰田阿尔尔法法德",
+  };
+
+  return map[id] || "包车车型";
 }
 
 function driverLangZh(lang) {
-  const v = String(lang || "").toUpperCase();
+  const v = String(lang || "ZH").toUpperCase();
   if (v === "JP") return "日文司机";
-  if (v === "ZH") return "中文司机";
-  return lang || "";
+  return "中文司机";
 }
 
-function safe(v) {
-  return v === null || v === undefined ? "" : String(v);
-}
-
-function money(v) {
+function fmtMoney(v) {
   if (v === null || v === undefined || v === "") return "";
-  return `${v} RMB`;
+  const n = Number(v);
+  if (Number.isNaN(n)) return String(v);
+  return String(n);
 }
 
-// ================= 邮件模板（只补内容，不改流程） =================
-
+// ================= 邮件模板（不改逻辑，只补内容） =================
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
+
   const balance =
     order.balance_due ??
-    (order.total_price ? order.total_price - deposit : null);
+    (order.total_price ? Number(order.total_price) - Number(deposit) : null);
 
-  const total = order.total_price ?? "";
-
-  const btnUrl = `${THANK_YOU_URL}${encodeURIComponent(order.order_id)}`;
+  const successUrl = `https://xn--okinawa-n14kh45a.com/success?order_id=${encodeURIComponent(
+    order.order_id
+  )}`;
 
   return {
     subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
     html: `
-<div style="font-family:Arial,sans-serif;line-height:1.75;color:#111">
-  <h2 style="margin:0 0 12px 0;">预约已确认（押金已支付）</h2>
+      <div style="font-family:Arial,sans-serif;line-height:1.7;color:#111">
+        <h2 style="margin:0 0 12px 0;">预约已确认（押金已支付）</h2>
 
-  <div style="background:#f6f7f9;border:1px solid #e5e7eb;border-radius:10px;padding:14px 14px;margin:12px 0;">
-    <p style="margin:6px 0;"><b>订单号：</b>${safe(order.order_id)}</p>
-    <p style="margin:6px 0;"><b>用车日期：</b>${safe(order.start_date)}</p>
-    <p style="margin:6px 0;"><b>车型：</b>${safe(carNameZh(order.car_model_id))}</p>
-    <p style="margin:6px 0;"><b>司机语言：</b>${safe(driverLangZh(order.driver_lang))}</p>
-    <p style="margin:6px 0;"><b>包车时长：</b>${safe(order.duration)} 小时</p>
-  </div>
+        <p><b>订单号：</b>${order.order_id ?? ""}</p>
+        <p><b>用车日期：</b>${order.start_date ?? ""}</p>
+        <p><b>车型：</b>${carNameZh(order.car_model_id)}</p>
+        <p><b>司机语言：</b>${driverLangZh(order.driver_lang)}</p>
+        <p><b>包车时长：</b>${order.duration ?? ""} 小时</p>
 
-  <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;padding:14px 14px;margin:12px 0;">
-    <p style="margin:6px 0;"><b>全款：</b>${money(total)}</p>
-    <p style="margin:6px 0;"><b>押金：</b>${money(deposit)}（已支付）</p>
-    <p style="margin:6px 0;"><b>尾款：</b>${
-      balance !== null
-        ? `${money(balance)}（用车当日支付司机）`
-        : "用车当日支付司机"
-    }</p>
-  </div>
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:14px 0;" />
 
-  <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;padding:14px 14px;margin:12px 0;">
-    <p style="margin:6px 0;"><b>客人名字：</b>${safe(order.customer_name)}</p>
-    <p style="margin:6px 0;"><b>电话：</b>${safe(order.phone)}</p>
-    <p style="margin:6px 0;"><b>微信：</b>${safe(order.wechat)}</p>
-    <p style="margin:6px 0;"><b>邮箱：</b>${safe(order.email)}</p>
-  </div>
+        <p><b>全款：</b>${fmtMoney(order.total_price)} RMB</p>
+        <p><b>押金：</b>${fmtMoney(deposit)} RMB（已支付）</p>
+        <p><b>尾款：</b>${
+          balance !== null
+            ? `${fmtMoney(balance)} RMB（用车当日支付司机）`
+            : "用车当日支付司机"
+        }</p>
 
-  <p style="margin:14px 0 10px 0;">若手机端支付宝未自动跳回，请点击确认单按钮查看。</p>
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:14px 0;" />
 
-  <!-- ✅ 手机端按钮：打开感谢页（图1） -->
-  <div style="margin:18px 0;">
-    <a href="${btnUrl}"
-       style="display:inline-block;padding:14px 18px;background:#2563eb;color:#fff;text-decoration:none;border-radius:10px;font-size:16px;">
-      打开确认单 / 感谢页
-    </a>
-  </div>
+        <p><b>客人名字：</b>${order.name ?? ""}</p>
+        <p><b>电话：</b>${order.phone ?? ""}</p>
+        <p><b>微信：</b>${order.wechat ?? ""}</p>
+        <p><b>邮箱：</b>${order.email ?? ""}</p>
 
-  <div style="color:#6b7280;font-size:12px;margin-top:18px;">
-    本邮件由系统自动发送，请勿直接回复。
-  </div>
-</div>
-`,
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:14px 0;" />
+
+        <p style="margin:0 0 14px 0;">若手机端支付宝未自动跳回，请点击确认单按钮查看。</p>
+
+        <a href="${successUrl}"
+           style="
+             display:inline-block;
+             padding:12px 18px;
+             background:#2563eb;
+             color:#fff;
+             text-decoration:none;
+             border-radius:8px;
+             font-size:16px;
+           ">
+          查看新订单确认单（感谢页）
+        </a>
+      </div>
+    `,
   };
 }
 
 function buildOpsEmail(order) {
   const deposit = order.deposit_amount ?? 500;
+
   const balance =
     order.balance_due ??
-    (order.total_price ? order.total_price - deposit : null);
-
-  const total = order.total_price ?? "";
-
-  const btnUrl = `${THANK_YOU_URL}${encodeURIComponent(order.order_id)}`;
+    (order.total_price ? Number(order.total_price) - Number(deposit) : null);
 
   return {
     subject: `【新订单】${order.order_id}`,
     html: `
-<div style="font-family:Arial,sans-serif;line-height:1.75;color:#111">
-  <h3 style="margin:0 0 10px 0;">新订单通知</h3>
+      <div style="font-family:Arial,sans-serif;line-height:1.7;color:#111">
+        <h3 style="margin:0 0 12px 0;">新订单通知</h3>
 
-  <p style="margin:6px 0;"><b>订单号：</b>${safe(order.order_id)}</p>
-  <p style="margin:6px 0;"><b>用车日期：</b>${safe(order.start_date)}</p>
-  <p style="margin:6px 0;"><b>车型：</b>${safe(carNameZh(order.car_model_id))}</p>
-  <p style="margin:6px 0;"><b>司机语言：</b>${safe(driverLangZh(order.driver_lang))}</p>
-  <p style="margin:6px 0;"><b>包车时长：</b>${safe(order.duration)} 小时</p>
+        <p><b>订单号：</b>${order.order_id ?? ""}</p>
+        <p><b>用车日期：</b>${order.start_date ?? ""}</p>
+        <p><b>车型：</b>${carNameZh(order.car_model_id)}</p>
+        <p><b>司机语言：</b>${driverLangZh(order.driver_lang)}</p>
+        <p><b>包车时长：</b>${order.duration ?? ""} 小时</p>
 
-  <hr style="border:none;border-top:1px solid #e5e7eb;margin:12px 0;" />
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:14px 0;" />
 
-  <p style="margin:6px 0;"><b>全款：</b>${money(total)}</p>
-  <p style="margin:6px 0;"><b>押金：</b>${money(deposit)}</p>
-  <p style="margin:6px 0;"><b>尾款：</b>${balance !== null ? money(balance) : ""}</p>
+        <p><b>全款：</b>${fmtMoney(order.total_price)} RMB</p>
+        <p><b>押金：</b>${fmtMoney(deposit)} RMB</p>
+        <p><b>尾款：</b>${balance !== null ? `${fmtMoney(balance)} RMB` : ""}</p>
 
-  <hr style="border:none;border-top:1px solid #e5e7eb;margin:12px 0;" />
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:14px 0;" />
 
-  <p style="margin:6px 0;"><b>客人名字：</b>${safe(order.customer_name)}</p>
-  <p style="margin:6px 0;"><b>电话：</b>${safe(order.phone)}</p>
-  <p style="margin:6px 0;"><b>微信：</b>${safe(order.wechat)}</p>
-  <p style="margin:6px 0;"><b>邮箱：</b>${safe(order.email)}</p>
-
-  <div style="margin:16px 0;">
-    <a href="${btnUrl}"
-       style="display:inline-block;padding:12px 16px;background:#111827;color:#fff;text-decoration:none;border-radius:10px;font-size:14px;">
-      打开确认单 / 感谢页
-    </a>
-  </div>
-</div>
-`,
+        <p><b>客人名字：</b>${order.name ?? ""}</p>
+        <p><b>电话：</b>${order.phone ?? ""}</p>
+        <p><b>微信：</b>${order.wechat ?? ""}</p>
+        <p><b>邮箱：</b>${order.email ?? ""}</p>
+      </div>
+    `,
   };
 }
 
@@ -247,7 +222,7 @@ function normalizeDriverLang(lang) {
   return v === "JP" ? "JP" : "ZH";
 }
 
-// ================= 主 webhook（保留你现在能跑通的逻辑） =================
+// ================= 主 webhook =================
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
@@ -258,31 +233,19 @@ export default async function handler(req, res) {
     const sig = req.headers["stripe-signature"];
     event = stripe.webhooks.constructEvent(buf, sig, webhookSecret);
   } catch (err) {
-    console.log("[webhook] signature verify failed:", err?.message || err);
     return res.status(400).send("Webhook Error");
   }
 
   try {
-    console.log("[webhook] type =", event?.type);
-    console.log("[webhook] livemode =", event?.livemode);
-
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
       const orderId =
         session?.metadata?.order_id || session?.client_reference_id;
 
-      console.log("[webhook] orderId =", orderId);
-      console.log(
-        "[webhook] SUPABASE_URL =",
-        process.env.NEXT_PUBLIC_SUPABASE_URL
-      );
-      console.log("[webhook] RESEND_FROM =", RESEND_FROM);
-
       if (!orderId) return res.status(200).json({ ok: true });
 
-      // ✅ 只为邮件展示补字段：customer_name/phone/wechat（不改其它逻辑）
-      const { data: order, error: orderErr } = await supabase
+      const { data: order } = await supabase
         .from("orders")
         .select(
           `
@@ -296,62 +259,45 @@ export default async function handler(req, res) {
           total_price,
           deposit_amount,
           balance_due,
-          customer_name,
-          phone,
-          wechat,
           inventory_locked,
           email_customer_sent,
-          email_ops_sent
+          email_ops_sent,
+          name,
+          phone,
+          wechat
         `
         )
         .eq("order_id", orderId)
         .single();
 
-      console.log("[webhook] orderErr =", orderErr);
-      console.log("[webhook] orderFound =", !!order);
-
       if (!order) return res.status(200).json({ ok: true });
-
-      console.log("[webhook] email =", order.email);
-      console.log("[webhook] email_customer_sent =", order.email_customer_sent);
-      console.log("[webhook] email_ops_sent =", order.email_ops_sent);
-      console.log("[webhook] inventory_locked =", order.inventory_locked);
 
       // ✅ 唯一库存幂等判断
       if (!order.inventory_locked) {
-        console.log("[webhook] lock_inventory_v2 start");
-        const { error: lockErr } = await supabase.rpc("lock_inventory_v2", {
+        const { error } = await supabase.rpc("lock_inventory_v2", {
           p_start_date: order.start_date,
           p_end_date: order.end_date || order.start_date,
           p_car_model_id: order.car_model_id,
           p_driver_lang: normalizeDriverLang(order.driver_lang),
         });
-        console.log("[webhook] lock_inventory_v2 error =", lockErr);
 
-        if (!lockErr) {
-          const { error: invUpdErr } = await supabase
+        if (!error) {
+          await supabase
             .from("orders")
             .update({ inventory_locked: true })
             .eq("order_id", order.order_id)
             .eq("inventory_locked", false);
-          console.log("[webhook] inventory_locked update error =", invUpdErr);
         }
       }
 
-      console.log("[webhook] sendCustomerEmailOnce start");
       await sendCustomerEmailOnce(order);
-      console.log("[webhook] sendCustomerEmailOnce done");
-
-      console.log("[webhook] sendOpsEmailOnce start");
       await sendOpsEmailOnce(order);
-      console.log("[webhook] sendOpsEmailOnce done");
 
       return res.status(200).json({ ok: true });
     }
 
     return res.status(200).json({ ok: true });
   } catch (e) {
-    console.log("[webhook] handler error:", e?.message || e);
     return res.status(200).json({ ok: true });
   }
 }
