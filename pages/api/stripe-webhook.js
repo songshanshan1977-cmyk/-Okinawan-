@@ -22,9 +22,9 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const RESEND_FROM =
   process.env.RESEND_FROM || "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
 
-// ✅ 手机端按钮要跳到图2（感谢页 / Step5）
+// ✅ 修复域名：改用自定义子域名，确保中国、香港、台湾用户能打开感谢页
 const THANK_YOU_URL = (orderId) =>
-  `https://okinawan.vercel.app/booking?step=5&order_id=${encodeURIComponent(
+  `https://booking.xn--okinawa-n14kh45a.com/booking?step=5&order_id=${encodeURIComponent(
     orderId
   )}`;
 
@@ -60,12 +60,18 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// ================= 邮件模板（只补内容） =================
+// ================= 邮件模板（已修正域名与日期） =================
 function buildCustomerEmail(order) {
   const deposit = order.deposit_amount ?? 500;
   const total = order.total_price ?? null;
   const balance =
     order.balance_due ?? (total !== null ? Number(total) - Number(deposit) : null);
+
+  // ✅ 补全日期逻辑：如果有结束日期且不等于开始日期，显示范围
+  const dateText =
+    order.end_date && order.end_date !== order.start_date
+      ? `${order.start_date} → ${order.end_date}`
+      : order.start_date || "-";
 
   const carZh = getCarModelZh(order.car_model_id);
   const langZh = getDriverLangZh(order.driver_lang);
@@ -79,7 +85,7 @@ function buildCustomerEmail(order) {
         <h2 style="margin:0 0 12px 0;">预约已确认（押金已支付）</h2>
 
         <p><b>订单号：</b>${order.order_id || "-"}</p>
-        <p><b>用车日期：</b>${order.start_date || "-"}</p>
+        <p><b>用车日期：</b>${dateText}</p>
         <p><b>车型：</b>${carZh}</p>
         <p><b>司机语言：</b>${langZh}</p>
         <p><b>包车时长：</b>${order.duration ? `${order.duration} 小时` : "-"}</p>
@@ -131,6 +137,12 @@ function buildOpsEmail(order) {
   const balance =
     order.balance_due ?? (total !== null ? Number(total) - Number(deposit) : null);
 
+  // ✅ 补全日期逻辑
+  const dateText =
+    order.end_date && order.end_date !== order.start_date
+      ? `${order.start_date} → ${order.end_date}`
+      : order.start_date || "-";
+
   const carZh = getCarModelZh(order.car_model_id);
   const langZh = getDriverLangZh(order.driver_lang);
 
@@ -141,7 +153,7 @@ function buildOpsEmail(order) {
         <h2 style="margin:0 0 12px 0;">新订单通知</h2>
 
         <p><b>订单号：</b>${order.order_id || "-"}</p>
-        <p><b>用车日期：</b>${order.start_date || "-"}</p>
+        <p><b>用车日期：</b>${dateText}</p>
         <p><b>车型：</b>${carZh}</p>
         <p><b>司机语言：</b>${langZh}</p>
         <p><b>包车时长：</b>${order.duration ? `${order.duration} 小时` : "-"}</p>
