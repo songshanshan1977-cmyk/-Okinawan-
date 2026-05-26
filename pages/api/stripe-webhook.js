@@ -360,6 +360,12 @@ export default async function handler(req, res) {
         }
       }
 
+      // 付款成功 → draft 升级为 paid（卡口：只有这里才能让订单对后台可见）
+      await supabase
+        .from("orders")
+        .update({ payment_status: "paid" })
+        .eq("order_id", order.order_id);
+
       await sendCustomerEmailOnce(order);
       await sendOpsEmailOnce(order);
 

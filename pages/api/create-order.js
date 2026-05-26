@@ -117,7 +117,7 @@ export default async function handler(req, res) {
           itinerary: data.itinerary ?? null,
           wechat: data.wechat ?? null,
 
-          payment_status: "pending",
+          payment_status: "draft",
           inventory_status: "pending",
           email_status: "pending",
           source: data.source || "direct",
