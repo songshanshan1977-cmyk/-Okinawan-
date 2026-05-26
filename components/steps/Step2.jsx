@@ -100,6 +100,7 @@ export default function Step2({ initialData, onNext, onBack }) {
       body: JSON.stringify({
         date: initialData.start_date,
         car_model_id: CAR_MODEL_IDS[carModel],
+        driver_lang: normalizeLangForAPI(driverLang),
       }),
     });
 
@@ -107,7 +108,7 @@ export default function Step2({ initialData, onNext, onBack }) {
     const data = await res.json();
     return {
       ok: data?.ok === true,
-      total_stock: Number(data?.total_stock ?? 0),
+      total_stock: Number(data?.remaining_qty ?? 0),
     };
   };
 
