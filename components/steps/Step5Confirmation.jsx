@@ -1,24 +1,24 @@
 import { useEffect, useState } from "react";
+import { translations } from "../../lib/i18n/bookingTranslations";
 
-// ⭐ 车型 ID → 名称 映射（与 Step3 / 邮件一致）
-const carIdNameMap = {
-  "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济 5 座轿车",
-  "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 7 座阿尔法",
-  "453df662-d350-4ab9-b811-61ffcda40d4b": "舒适 10 座海狮",
+// ⭐ 车型 UUID → 翻译 key 映射（UUID 只作只读 key，不参与业务逻辑）
+const UUID_TO_T_KEY = {
+  "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "carUuid_5fdc",
+  "82cf604f-e688-49fe-aecf-69894a01f6cb": "carUuid_82cf",
+  "453df662-d350-4ab9-b811-61ffcda40d4b": "carUuid_453d",
 };
 
-// ✅ 司机语言展示：兼容 ZH/JP + zh/jp
-function renderDriverLang(v) {
+// ⭐ 司机语言显示名（兼容数据库 ZH/JP 和前端 zh/jp）
+function renderDriverLangDisplay(v, t) {
   const x = String(v || "").toUpperCase();
-  if (x === "JP") return "日文司机";
-  if (x === "ZH") return "中文司机";
-  // 兼容旧值（万一有）
-  if (String(v || "").toLowerCase() === "jp") return "日文司机";
-  if (String(v || "").toLowerCase() === "zh") return "中文司机";
+  if (x === "JP") return t.driverLangOpt_jp;
+  if (x === "ZH") return t.driverLangOpt_zh;
   return "—";
 }
 
-export default function Step5Confirmation({ onNext }) {
+export default function Step5Confirmation({ bookingUiLang, onNext }) {
+  const t = translations[bookingUiLang] || translations["zh"];
+
   const [loading, setLoading] = useState(true);
   const [order, setOrder] = useState(null);
   const [error, setError] = useState("");
@@ -28,7 +28,7 @@ export default function Step5Confirmation({ onNext }) {
     const orderId = params.get("order_id");
 
     if (!orderId) {
-      setError("缺少订单编号");
+      setError(t.s5ErrMissing);
       setLoading(false);
       return;
     }
@@ -37,129 +37,124 @@ export default function Step5Confirmation({ onNext }) {
       .then((res) => res.json())
       .then((data) => {
         if (!data || data.error) {
-          setError(data?.error || "订单不存在");
+          setError(data?.error || t.s5ErrNotFound);
         } else {
           setOrder(data);
         }
         setLoading(false);
       })
       .catch(() => {
-        setError("加载订单失败");
+        setError(t.s5ErrLoad);
         setLoading(false);
       });
   }, []);
 
-  if (loading) return <p>正在加载订单信息...</p>;
+  if (loading) return <p>{t.s5Loading}</p>;
   if (error) return <p className="text-red-600">{error}</p>;
 
-  // ===== B3-2：统一日期展示规则 =====
+  // ===== 日期展示 =====
   const isMultiDay = order.end_date && order.end_date !== order.start_date;
-
   const days = isMultiDay
     ? Math.floor(
         (new Date(order.end_date) - new Date(order.start_date)) /
           (1000 * 60 * 60 * 24)
       ) + 1
     : 1;
-
+  const daysBracket = isMultiDay
+    ? t.s5DaysBracket.replace("{N}", days)
+    : "";
   const dateText = isMultiDay
-    ? `${order.start_date} ～ ${order.end_date}（共 ${days} 天）`
+    ? `${order.start_date} ～ ${order.end_date}${daysBracket}`
     : order.start_date;
 
   const balance = Math.max((order.total_price || 0) - 500, 0);
 
-  // ✅ 关键：联系人兜底（避免 get-order 少字段时页面看起来“没显示”）
-  const contactName = order.name || order.contact_name || order.customer_name || "—";
+  // ⭐ 车型显示名（从翻译表查，UUID 不参与业务逻辑）
+  const carTKey = UUID_TO_T_KEY[order.car_model_id];
+  const carDisplayName = carTKey ? t[carTKey] : t.notSelected;
+
+  const contactName =
+    order.name || order.contact_name || order.customer_name || "—";
   const contactPhone = order.phone || "—";
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 py-8 px-4 md:px-0">
-      <h2 className="text-2xl font-bold">✅ 押金支付成功</h2>
-      <p>您的订单已确认，我们已为您锁定车辆，请核对以下信息：</p>
+      <h2 className="text-2xl font-bold">{t.s5SuccessTitle}</h2>
+      <p>{t.s5SuccessDesc}</p>
 
       <div className="border rounded-lg p-6 space-y-3">
         <p>
-          <strong>订单编号：</strong>
-          {order.order_id}
+          <strong>{t.labelOrderId}</strong>{order.order_id}
         </p>
 
         <hr />
 
         <p>
-          <strong>用车日期：</strong>
-          {dateText}
+          <strong>{t.labelCharterDate}</strong>{dateText}
         </p>
         <p>
-          <strong>出发酒店：</strong>
-          {order.departure_hotel || "—"}
+          <strong>{t.labelDepartureHotel}</strong>{order.departure_hotel || "—"}
         </p>
         <p>
-          <strong>回程酒店：</strong>
-          {order.end_hotel || "—"}
+          <strong>{t.labelEndHotel}</strong>{order.end_hotel || "—"}
         </p>
 
         <hr />
 
         <p>
-          <strong>车型：</strong>
-          {carIdNameMap[order.car_model_id] || "未选择"}
+          <strong>{t.labelVehicle}</strong>{carDisplayName}
         </p>
 
         {order.itinerary && (
           <p>
-            <strong>行程：</strong>
-            {order.itinerary}
+            <strong>{t.labelItinerary}</strong>{order.itinerary}
           </p>
         )}
 
         <p>
-          <strong>司机语言：</strong>
-          {renderDriverLang(order.driver_lang)}
+          <strong>{t.labelDriverLang}</strong>
+          {renderDriverLangDisplay(order.driver_lang, t)}
         </p>
         <p>
-          <strong>包车时长：</strong>
-          {order.duration} 小时
+          <strong>{t.labelDuration}</strong>
+          {order.duration}{t.unitHour}
         </p>
         <p>
-          <strong>人数：</strong>
-          {order.pax} 人
+          <strong>{t.labelPax}</strong>
+          {order.pax}{t.unitPerson}
         </p>
         <p>
-          <strong>行李：</strong>
-          {order.luggage} 件
+          <strong>{t.labelLuggage}</strong>
+          {order.luggage}{t.unitItem}
         </p>
 
         <hr />
 
         <p>
-          <strong>包车总费用：</strong>¥{order.total_price}
+          <strong>{t.labelTotalFeeAlt}</strong>¥{order.total_price}
         </p>
-        <p className="text-green-600 font-bold">✔ 已支付押金：¥500</p>
+        <p className="text-green-600 font-bold">{t.s5DepositPaid}</p>
         <p className="text-orange-600">
-          ⭐ 尾款（用车当日支付司机）：¥{balance}
+          {t.s5Balance}¥{balance}
         </p>
 
         <hr />
 
         <p>
-          <strong>联系人：</strong>
-          {contactName}
+          <strong>{t.labelContact}</strong>{contactName}
         </p>
         <p>
-          <strong>电话：</strong>
-          {contactPhone}
+          <strong>{t.labelPhone}</strong>{contactPhone}
         </p>
 
         {order.wechat && (
           <p>
-            <strong>微信：</strong>
-            {order.wechat}
+            <strong>{t.labelWechat}</strong>{order.wechat}
           </p>
         )}
 
         <p>
-          <strong>邮箱：</strong>
-          {order.email || "—"}
+          <strong>{t.labelEmail}</strong>{order.email || "—"}
         </p>
       </div>
 
@@ -167,10 +162,8 @@ export default function Step5Confirmation({ onNext }) {
         onClick={onNext}
         className="w-full md:w-auto px-6 py-3 bg-black text-white rounded-md"
       >
-        下一步
+        {t.s5BtnNext}
       </button>
     </div>
   );
 }
-
-

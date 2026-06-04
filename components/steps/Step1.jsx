@@ -1,7 +1,8 @@
 import { useMemo, useState, useEffect } from "react";
 import { DayPicker } from "react-day-picker";
 import { format } from "date-fns";
-import { zhCN } from "date-fns/locale";
+import { zhCN, zhTW, ja as jaLocale, enUS } from "date-fns/locale";
+import { translations } from "../../lib/i18n/bookingTranslations";
 
 /* ===== 工具函数 ===== */
 
@@ -28,7 +29,18 @@ function getTomorrow() {
   return t;
 }
 
-export default function Step1({ initialData, onNext }) {
+// bookingUiLang -> date-fns locale 对象
+const DATE_LOCALES = {
+  zh: zhCN,
+  "zh-TW": zhTW,
+  ja: jaLocale,
+  en: enUS,
+};
+
+export default function Step1({ initialData, bookingUiLang, onNext }) {
+  const t = translations[bookingUiLang] || translations["zh"];
+  const dateLocale = DATE_LOCALES[bookingUiLang] || zhCN;
+
   const [start, setStart] = useState(fromYMD(initialData.start_date));
   const [end, setEnd] = useState(fromYMD(initialData.end_date));
 
@@ -50,7 +62,8 @@ export default function Step1({ initialData, onNext }) {
 
   const disabledDays = useMemo(() => [{ before: tomorrow }], [tomorrow]);
 
-  const formatCaption = (date) => format(date, "yyyy年M月", { locale: zhCN });
+  const formatCaption = (date) =>
+    format(date, t.s1CalFormat, { locale: dateLocale });
 
   const isWeekend = (date) => {
     const d = date.getDay();
@@ -61,19 +74,19 @@ export default function Step1({ initialData, onNext }) {
     setError("");
 
     if (!start) {
-      setError("请选择用车开始日期");
+      setError(t.s1ErrNoStart);
       return;
     }
     if (!end) {
-      setError("请选择用车结束日期");
+      setError(t.s1ErrNoEnd);
       return;
     }
     if (!departureHotel.trim()) {
-      setError("请输入出发酒店");
+      setError(t.s1ErrNoDeparture);
       return;
     }
     if (!endHotel.trim()) {
-      setError("请输入回程酒店");
+      setError(t.s1ErrNoEndHotel);
       return;
     }
 
@@ -81,7 +94,7 @@ export default function Step1({ initialData, onNext }) {
     start0.setHours(0, 0, 0, 0);
 
     if (start0 < tomorrow) {
-      setError("请选择明天或之后的日期");
+      setError(t.s1ErrTooSoon);
       return;
     }
 
@@ -97,12 +110,6 @@ export default function Step1({ initialData, onNext }) {
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "24px 16px" }}>
       <style>{`
-        /* =========================
-           ✅ 手机端适配：只改布局
-           - 手机：上下排列
-           - PC：左右并排
-           ========================= */
-
         .calWrap {
           display: flex;
           gap: 56px;
@@ -168,7 +175,6 @@ export default function Step1({ initialData, onNext }) {
           text-align: center;
         }
 
-        /* ✅ 手机端：纵向排版 + 宽度自适应 */
         @media (max-width: 768px) {
           .calWrap {
             flex-direction: column;
@@ -203,20 +209,9 @@ export default function Step1({ initialData, onNext }) {
           }
         }
 
-        /* ===== DayPicker 视觉优化 ===== */
-
-        .rdp {
-          margin: 0;
-        }
-
-        .rdp-month {
-          width: 100%;
-        }
-
-        .rdp-table {
-          margin: 0 auto;
-        }
-
+        .rdp { margin: 0; }
+        .rdp-month { width: 100%; }
+        .rdp-table { margin: 0 auto; }
         .rdp-caption {
           display: flex;
           align-items: center;
@@ -225,11 +220,7 @@ export default function Step1({ initialData, onNext }) {
           background: #f3f3f3;
           border-bottom: 1px solid #ddd;
         }
-
-        .rdp-caption_label {
-          font-weight: 700;
-        }
-
+        .rdp-caption_label { font-weight: 700; }
         .rdp-nav button {
           border: 1px solid #bbb;
           background: #fff;
@@ -238,56 +229,41 @@ export default function Step1({ initialData, onNext }) {
           border-radius: 6px;
           cursor: pointer;
         }
-
-        .rdp-head {
-          border-bottom: 1px solid #ddd;
-        }
-
-        .rdp-head_cell {
-          font-weight: 700;
-          padding: 10px 0;
-        }
-
-        .rdp-cell {
-          padding: 4px;
-        }
-
+        .rdp-head { border-bottom: 1px solid #ddd; }
+        .rdp-head_cell { font-weight: 700; padding: 10px 0; }
+        .rdp-cell { padding: 4px; }
         .rdp-day {
           width: 40px;
           height: 40px;
           border: 1px solid #e6e6e6;
           border-radius: 6px;
         }
-
         .rdp-day_selected {
           background: #fff3a0 !important;
           color: #000 !important;
           font-weight: 700;
         }
-
-        .rdp-day_disabled {
-          color: #bbb !important;
-        }
+        .rdp-day_disabled { color: #bbb !important; }
       `}</style>
 
       <h2 style={{ fontSize: 34, textAlign: "center", marginBottom: 8 }}>
-        立即预订
+        {t.s1Title}
       </h2>
 
       <p style={{ textAlign: "center", color: "#666", marginBottom: 12 }}>
-        请选择您期望的包车开始和结束日期
+        {t.s1Subtitle}
       </p>
 
       <div className="calWrap">
         <div>
-          <div className="calTitle">开始日期</div>
+          <div className="calTitle">{t.s1StartDate}</div>
           <div className="calBox">
             <DayPicker
               mode="single"
               selected={start}
               onSelect={(d) => setStart(d || null)}
               disabled={disabledDays}
-              locale={zhCN}
+              locale={dateLocale}
               formatters={{ formatCaption }}
               weekStartsOn={1}
               modifiers={{ weekend: isWeekend }}
@@ -297,7 +273,7 @@ export default function Step1({ initialData, onNext }) {
         </div>
 
         <div>
-          <div className="calTitle">结束日期</div>
+          <div className="calTitle">{t.s1EndDate}</div>
           <div className="calBox">
             <DayPicker
               mode="single"
@@ -306,7 +282,7 @@ export default function Step1({ initialData, onNext }) {
               disabled={[...disabledDays, start ? { before: start } : null].filter(
                 Boolean
               )}
-              locale={zhCN}
+              locale={dateLocale}
               formatters={{ formatCaption }}
               weekStartsOn={1}
               modifiers={{ weekend: isWeekend }}
@@ -318,7 +294,9 @@ export default function Step1({ initialData, onNext }) {
 
       <div className="fieldRow">
         <div className="field">
-          <label style={{ display: "block", marginBottom: 8 }}>出发酒店</label>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            {t.s1DepartureHotel}
+          </label>
           <input
             className="input"
             value={departureHotel}
@@ -327,7 +305,9 @@ export default function Step1({ initialData, onNext }) {
         </div>
 
         <div className="field">
-          <label style={{ display: "block", marginBottom: 8 }}>回程酒店</label>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            {t.s1EndHotel}
+          </label>
           <input
             className="input"
             value={endHotel}
@@ -340,10 +320,9 @@ export default function Step1({ initialData, onNext }) {
 
       <div className="btnRow">
         <button className="btn" onClick={handleNext}>
-          下一步
+          {t.btnNext}
         </button>
       </div>
     </div>
   );
 }
-

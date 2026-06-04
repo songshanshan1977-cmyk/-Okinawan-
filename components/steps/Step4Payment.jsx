@@ -1,25 +1,29 @@
 // components/steps/Step4Payment.jsx
 
 import React, { useState } from "react";
+import { translations } from "../../lib/i18n/bookingTranslations";
 
 const CREATE_ORDER_URL = "/api/create-order";
 const CREATE_PAYMENT_URL = "/api/create-payment-intent"; // ✅ 统一走 Vercel
 
-// ✅ 与 Step3 保持一致的展示映射
-const carNameMap = {
-  car1: "经济 5 座轿车",
-  car2: "豪华 7 座阿尔法",
-  car3: "舒适 10 座海狮",
-};
+export default function Step4Payment({ initialData, bookingUiLang, onBack }) {
+  const t = translations[bookingUiLang] || translations["zh"];
 
-const driverLangMap = {
-  zh: "中文司机",
-  jp: "日文司机",
-};
-
-export default function Step4Payment({ initialData, onBack }) {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+
+  // ⭐ 车型显示名（显示层翻译，不影响 car_model 值）
+  const carDisplayName = {
+    car1: t.carName_car1,
+    car2: t.carName_car2,
+    car3: t.carName_car3,
+  }[initialData.car_model] || initialData.car_model;
+
+  // ⭐ 司机语言显示名（显示层翻译，driver_lang 值 "zh"/"jp" 不变）
+  const driverLangDisplay =
+    String(initialData.driver_lang).toLowerCase() === "zh"
+      ? t.driverLangOpt_zh
+      : t.driverLangOpt_jp;
 
   const handlePay = async () => {
     setLoading(true);
@@ -39,7 +43,9 @@ export default function Step4Payment({ initialData, onBack }) {
       console.log("🔵 create-order 返回：", orderData);
 
       if (!orderRes.ok || !orderData?.order?.order_id) {
-        setErrorMsg("订单创建失败：" + (orderData?.error || "未返回订单号"));
+        setErrorMsg(
+          t.s4ErrOrderFail + (orderData?.error || "未返回订单号")
+        );
         setLoading(false);
         return;
       }
@@ -62,8 +68,8 @@ export default function Step4Payment({ initialData, onBack }) {
       if (!payRes.ok || !payData?.url) {
         setErrorMsg(
           payData?.error
-            ? `创建支付链接失败：${payData.error}`
-            : "无法创建支付链接，请稍后再试。"
+            ? `${t.s4ErrOrderFail}${payData.error}`
+            : t.s4ErrPayFail
         );
         setLoading(false);
         return;
@@ -75,102 +81,95 @@ export default function Step4Payment({ initialData, onBack }) {
       window.location.href = payData.url;
     } catch (err) {
       console.error("🔥 支付异常：", err);
-      setErrorMsg("连接支付系统失败，请稍后再试。");
+      setErrorMsg(t.s4ErrConnFail);
       setLoading(false);
     }
   };
 
   return (
     <div className="max-w-3xl mx-auto space-y-8 py-8">
-      <h2 className="text-2xl font-bold mb-4">Step4：确认并支付押金</h2>
+      <h2 className="text-2xl font-bold mb-4">{t.s4Title}</h2>
 
       <div className="border p-6 rounded-lg space-y-2 text-lg">
         <p>
-          <strong>订单编号：</strong> {initialData.order_id}
+          <strong>{t.labelOrderId}</strong>{initialData.order_id}
         </p>
 
         <hr />
 
-        {/* ✅ 只新增：行程（可选），放在车型上面 */}
         {initialData.itinerary && (
           <p>
-            <strong>行程：</strong>
-            {initialData.itinerary}
+            <strong>{t.labelItinerary}</strong>{initialData.itinerary}
           </p>
         )}
 
-        {/* ✅ 车型 & 司机语言：统一“人话” */}
         <p>
-          <strong>车型：</strong>
-          {carNameMap[initialData.car_model] || initialData.car_model}
+          <strong>{t.labelVehicle}</strong>{carDisplayName}
         </p>
 
         <p>
-          <strong>司机语言：</strong>
-          {driverLangMap[initialData.driver_lang] || initialData.driver_lang}
+          <strong>{t.labelDriverLang}</strong>{driverLangDisplay}
         </p>
 
         <p>
-          <strong>包车时长：</strong> {initialData.duration} 小时
+          <strong>{t.labelDuration}</strong>
+          {initialData.duration}{t.unitHour}
         </p>
         <p>
-          <strong>人数：</strong> {initialData.pax} 人
+          <strong>{t.labelPax}</strong>
+          {initialData.pax}{t.unitPerson}
         </p>
         <p>
-          <strong>行李：</strong> {initialData.luggage} 件
+          <strong>{t.labelLuggage}</strong>
+          {initialData.luggage}{t.unitItem}
         </p>
 
         <hr />
 
         <p>
-          <strong>用车日期：</strong>
+          <strong>{t.labelCharterDate}</strong>
           {initialData.start_date} → {initialData.end_date}
         </p>
         <p>
-          <strong>出发酒店：</strong> {initialData.departure_hotel}
+          <strong>{t.labelDepartureHotel}</strong>{initialData.departure_hotel}
         </p>
         <p>
-          <strong>结束酒店：</strong> {initialData.end_hotel}
+          <strong>{t.labelEndHotel}</strong>{initialData.end_hotel}
         </p>
 
         <hr />
 
         <p>
-          <strong>姓名：</strong> {initialData.name}
+          <strong>{t.labelName}</strong>{initialData.name}
         </p>
         <p>
-          <strong>电话：</strong> {initialData.phone}
+          <strong>{t.labelPhone}</strong>{initialData.phone}
         </p>
 
-        {/* ✅ 只新增：微信（可选），放在电话下面 */}
         {initialData.wechat && (
           <p>
-            <strong>微信：</strong> {initialData.wechat}
+            <strong>{t.labelWechat}</strong>{initialData.wechat}
           </p>
         )}
 
         <p>
-          <strong>邮箱：</strong> {initialData.email || "—"}
+          <strong>{t.labelEmail}</strong>{initialData.email || "—"}
         </p>
         {initialData.remark && (
           <p>
-            <strong>备注：</strong> {initialData.remark}
+            <strong>{t.labelRemark}</strong>{initialData.remark}
           </p>
         )}
 
         <hr />
 
         <p>
-          <strong>包车总费用：</strong>¥{initialData.total_price}
+          <strong>{t.labelTotalFeeAlt}</strong>¥{initialData.total_price}
         </p>
 
-        <p className="text-blue-600 font-bold mt-4">
-          本次将前往 Stripe 支付押金：¥500
-        </p>
+        <p className="text-blue-600 font-bold mt-4">{t.s4DepositNote}</p>
 
-        <p className="text-sm text-gray-500">
-          ※ 支付成功后系统将自动扣减库存并确认订单
-        </p>
+        <p className="text-sm text-gray-500">{t.s4SystemNote}</p>
 
         {errorMsg && (
           <p className="text-red-600 text-base mt-3 whitespace-pre-line">
@@ -185,7 +184,7 @@ export default function Step4Payment({ initialData, onBack }) {
           onClick={onBack}
           className="px-4 py-2 border rounded-md text-sm"
         >
-          返回上一步
+          {t.s4BtnBack}
         </button>
 
         <button
@@ -194,11 +193,9 @@ export default function Step4Payment({ initialData, onBack }) {
           disabled={loading}
           className="px-4 py-2 rounded-md bg-black text-white text-sm disabled:opacity-60"
         >
-          {loading ? "正在创建支付链接..." : "前往 Stripe 支付押金"}
+          {loading ? t.s4BtnLoading : t.s4BtnPay}
         </button>
       </div>
     </div>
   );
 }
-
-

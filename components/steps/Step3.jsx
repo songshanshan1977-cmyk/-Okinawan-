@@ -1,10 +1,8 @@
-const carNameMap = {
-  car1: "经济 5 座轿车",
-  car2: "豪华 7 座阿尔法",
-  car3: "舒适 10 座海狮",
-};
+import { translations } from "../../lib/i18n/bookingTranslations";
 
-export default function Step3({ initialData, onNext, onBack }) {
+export default function Step3({ initialData, bookingUiLang, onNext, onBack }) {
+  const t = translations[bookingUiLang] || translations["zh"];
+
   const {
     order_id,
     start_date,
@@ -21,13 +19,22 @@ export default function Step3({ initialData, onNext, onBack }) {
     phone,
     email,
     remark,
-
-    // ✅ 只新增：行程（可选）
     itinerary,
-
-    // ✅ 只新增：微信（可选）
     wechat,
   } = initialData;
+
+  // ⭐ 车型显示名（显示层翻译，不影响 car_model 值）
+  const carDisplayName = {
+    car1: t.carName_car1,
+    car2: t.carName_car2,
+    car3: t.carName_car3,
+  }[car_model] || t.notSelected;
+
+  // ⭐ 司机语言显示名（显示层翻译，driver_lang 值 "zh"/"jp" 不变）
+  const driverLangDisplay =
+    String(driver_lang).toLowerCase() === "zh"
+      ? t.driverLangOpt_zh
+      : t.driverLangOpt_jp;
 
   const handleNext = () => {
     // ✅ 不改任何数据，原样进入 Step4
@@ -37,15 +44,15 @@ export default function Step3({ initialData, onNext, onBack }) {
   return (
     <div>
       <h2 style={{ fontSize: "24px", marginBottom: "8px" }}>
-        Step3：订单确认
+        {t.s3Title}
       </h2>
 
       <p style={{ color: "#6b7280", marginBottom: "16px" }}>
-        请确认以下信息无误后再进行支付。
+        {t.s3Subtitle}
       </p>
 
       <p style={{ color: "#4b5563", marginBottom: "16px", fontSize: "14px" }}>
-        订单编号：{order_id}
+        {t.labelOrderId}{order_id}
       </p>
 
       {/* 用车信息 */}
@@ -58,28 +65,31 @@ export default function Step3({ initialData, onNext, onBack }) {
           marginBottom: "16px",
         }}
       >
-        <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>📅 用车信息</h3>
-        <p>开始日期：{start_date}</p>
-        <p>结束日期：{end_date}</p>
-        <p>出发酒店：{departure_hotel}</p>
-        <p>结束酒店：{end_hotel}</p>
+        <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>
+          {t.s3TripInfoTitle}
+        </h3>
+        <p>{t.labelStartDate}{start_date}</p>
+        <p>{t.labelEndDate}{end_date}</p>
+        <p>{t.labelDepartureHotel}{departure_hotel}</p>
+        <p>{t.labelEndHotel}{end_hotel}</p>
 
         <hr style={{ margin: "12px 0" }} />
 
-        <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>🚗 车型 & 服务</h3>
+        <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>
+          {t.s3VehicleServiceTitle}
+        </h3>
 
-        {/* ✅ 只新增：行程（可选）放在车型上面 */}
-        {itinerary && <p>行程：{itinerary}</p>}
+        {itinerary && <p>{t.labelItinerary}{itinerary}</p>}
 
-        <p>车型：{carNameMap[car_model] || "未选择"}</p>
-        <p>司机语言：{driver_lang === "zh" ? "中文司机" : "日文司机"}</p>
-        <p>包车时长：{duration} 小时</p>
-        <p>人数：{pax} 人</p>
-        <p>行李：{luggage} 件</p>
+        <p>{t.labelVehicle}{carDisplayName}</p>
+        <p>{t.labelDriverLang}{driverLangDisplay}</p>
+        <p>{t.labelDuration}{duration}{t.unitHour}</p>
+        <p>{t.labelPax}{pax}{t.unitPerson}</p>
+        <p>{t.labelLuggage}{luggage}{t.unitItem}</p>
 
-        <p>包车费用：¥{total_price}</p>
+        <p>{t.labelTotalFee}¥{total_price}</p>
         <p style={{ color: "#2563eb", fontWeight: 600, marginTop: "4px" }}>
-          需支付押金：¥500（固定）
+          {t.s3DepositNote}
         </p>
       </div>
 
@@ -93,24 +103,21 @@ export default function Step3({ initialData, onNext, onBack }) {
           marginBottom: "16px",
         }}
       >
-        <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>👤 客户信息</h3>
+        <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>
+          {t.s3CustomerInfoTitle}
+        </h3>
 
-        <p>姓名：{name || "-"}</p>
-        <p>电话：{phone || "-"}</p>
-
-        {/* ✅ 只新增：微信（可选）放在电话下面 */}
-        {wechat && <p>微信：{wechat}</p>}
-
-        <p>邮箱：{email || "-"}</p>
-        {remark && <p>备注：{remark}</p>}
+        <p>{t.labelName}{name || "-"}</p>
+        <p>{t.labelPhone}{phone || "-"}</p>
+        {wechat && <p>{t.labelWechat}{wechat}</p>}
+        <p>{t.labelEmail}{email || "-"}</p>
+        {remark && <p>{t.labelRemark}{remark}</p>}
       </div>
 
       <div style={{ display: "flex", gap: "8px" }}>
-        <button onClick={onBack}>返回修改</button>
-        <button onClick={handleNext}>确认并前往支付</button>
+        <button onClick={onBack}>{t.s3BtnBack}</button>
+        <button onClick={handleNext}>{t.s3BtnConfirm}</button>
       </div>
     </div>
   );
 }
-
-

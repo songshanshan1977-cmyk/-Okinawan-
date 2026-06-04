@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { translations } from "../../lib/i18n/bookingTranslations";
 
 // ⭐ 车型 UUID（保持不变）
 const CAR_MODEL_IDS = {
@@ -7,7 +8,7 @@ const CAR_MODEL_IDS = {
   car3: "453df662-d350-4ab9-b811-61ffcda40d4b",
 };
 
-// 前端 zh/jp → 后端 ZH/JP
+// ⭐ 前端 zh/jp → 后端 ZH/JP（不变）
 const normalizeLangForAPI = (lang) => {
   if (lang === "zh") return "ZH";
   if (lang === "jp") return "JP";
@@ -27,8 +28,11 @@ const calcDays = (start, end) => {
   return Math.floor((e - s) / (1000 * 60 * 60 * 24)) + 1;
 };
 
-export default function Step2({ initialData, onNext, onBack }) {
+export default function Step2({ initialData, bookingUiLang, onNext, onBack }) {
+  const t = translations[bookingUiLang] || translations["zh"];
+
   const [carModel, setCarModel] = useState(initialData.car_model || "");
+  // ⭐ driver_lang 值保持 "zh"/"jp"，仅用于业务提交，不等于 bookingUiLang
   const [driverLang, setDriverLang] = useState(initialData.driver_lang || "zh");
   const [duration, setDuration] = useState(initialData.duration || 8);
   const [totalPrice, setTotalPrice] = useState(initialData.total_price || 0);
@@ -39,13 +43,8 @@ export default function Step2({ initialData, onNext, onBack }) {
   const [name, setName] = useState(initialData.name ?? "");
   const [phone, setPhone] = useState(initialData.phone ?? "");
   const [email, setEmail] = useState(initialData.email ?? "");
-
-  // ✅ 已有：行程（可选）
   const [itinerary, setItinerary] = useState(initialData.itinerary ?? "");
-
-  // ✅ 只新增：微信（可选）—— 放在电话下面
   const [wechat, setWechat] = useState(initialData.wechat ?? "");
-
   const [remark, setRemark] = useState(initialData.remark ?? "");
 
   const [error, setError] = useState("");
@@ -83,7 +82,7 @@ export default function Step2({ initialData, onNext, onBack }) {
         setTotalPrice(dailyPrice * days);
       } else {
         setTotalPrice(0);
-        setError("价格读取失败，请稍后重试。");
+        setError(t.s2ErrPriceFail);
       }
     };
 
@@ -118,15 +117,15 @@ export default function Step2({ initialData, onNext, onBack }) {
 
     const today = formatDate(new Date());
     if (initialData.start_date === today) {
-      setError("当日不能预约，请选择明天或之后的日期。");
+      setError(t.s2ErrSameDay);
       return;
     }
 
-    if (!carModel) return setError("请选择车型");
-    if (!name.trim()) return setError("请输入姓名（必填）");
-    if (!phone.trim()) return setError("请输入电话（必填）");
-    if (!email.trim()) return setError("请输入邮箱（必填）");
-    if (!totalPrice || totalPrice <= 0) return setError("价格读取失败，请稍后重试。");
+    if (!carModel) return setError(t.s2ErrNoModel);
+    if (!name.trim()) return setError(t.s2ErrNoName);
+    if (!phone.trim()) return setError(t.s2ErrNoPhone);
+    if (!email.trim()) return setError(t.s2ErrNoEmail);
+    if (!totalPrice || totalPrice <= 0) return setError(t.s2ErrPriceFail);
 
     const inv = await checkInventory();
     setStockHint(inv.total_stock);
@@ -140,22 +139,16 @@ export default function Step2({ initialData, onNext, onBack }) {
       order_id: initialData.order_id,
       car_model: carModel,
       car_model_id: CAR_MODEL_IDS[carModel],
-      driver_lang: driverLang,
+      driver_lang: driverLang,   // ⭐ 业务值保持 "zh"/"jp"
       duration,
       total_price: totalPrice,
       pax: Number(pax),
       luggage: Number(luggage),
       name: name.trim(),
       phone: phone.trim(),
-
-      // ✅ 只新增：把微信带到下一步（可选）
       wechat: wechat ?? "",
-
       email: email.trim(),
-
-      // ✅ 已有：把行程带到下一步（可选）
       itinerary: itinerary ?? "",
-
       remark: remark ?? "",
     });
   };
@@ -177,7 +170,7 @@ export default function Step2({ initialData, onNext, onBack }) {
 
   return (
     <div style={{ maxWidth: 820, margin: "0 auto", padding: 20 }}>
-      <h2 style={{ fontSize: 26, marginBottom: 20 }}>Step2：选择车型 & 服务</h2>
+      <h2 style={{ fontSize: 26, marginBottom: 20 }}>{t.s2Title}</h2>
 
       {/* 车型 */}
       <div style={{ display: "flex", gap: 16, marginBottom: 20 }}>
@@ -196,9 +189,9 @@ export default function Step2({ initialData, onNext, onBack }) {
               fontWeight: 600,
             }}
           >
-            {m === "car1" && "经济 5 座轿车"}
-            {m === "car2" && "豪华 7 座阿尔法"}
-            {m === "car3" && "舒适 10 座海狮"}
+            {m === "car1" && t.carName_car1}
+            {m === "car2" && t.carName_car2}
+            {m === "car3" && t.carName_car3}
           </div>
         ))}
       </div>
@@ -213,31 +206,33 @@ export default function Step2({ initialData, onNext, onBack }) {
           }}
         >
           <div>
-            <label>司机语言</label>
+            <label>{t.s2DriverLangLabel}</label>
             <select
               style={input}
               value={driverLang}
               onChange={(e) => setDriverLang(e.target.value)}
             >
-              <option value="zh">中文司机</option>
-              <option value="jp">日文司机</option>
+              {/* ⭐ option value 保持 "zh"/"jp"，只改显示文字 */}
+              <option value="zh">{t.driverLangOpt_zh}</option>
+              <option value="jp">{t.driverLangOpt_jp}</option>
             </select>
           </div>
 
           <div>
-            <label>包车时长</label>
+            <label>{t.s2DurationLabel}</label>
             <select
               style={input}
               value={duration}
               onChange={(e) => setDuration(Number(e.target.value))}
             >
-              <option value={8}>8 小时</option>
-              <option value={10}>10 小时</option>
+              {/* ⭐ option value 保持 8/10，只改显示文字 */}
+              <option value={8}>{t.durationOpt_8}</option>
+              <option value={10}>{t.durationOpt_10}</option>
             </select>
           </div>
 
           <div>
-            <label>人数</label>
+            <label>{t.s2PaxLabel}</label>
             <select
               style={input}
               value={pax}
@@ -252,7 +247,7 @@ export default function Step2({ initialData, onNext, onBack }) {
           </div>
 
           <div>
-            <label>行李</label>
+            <label>{t.s2LuggageLabel}</label>
             <select
               style={input}
               value={luggage}
@@ -270,54 +265,49 @@ export default function Step2({ initialData, onNext, onBack }) {
 
       {/* 客户信息 */}
       <div style={{ ...box, marginBottom: 20 }}>
-        <strong style={{ display: "block", marginBottom: 12 }}>客户信息</strong>
+        <strong style={{ display: "block", marginBottom: 12 }}>
+          {t.s2CustomerInfoTitle}
+        </strong>
 
         <div style={{ display: "grid", gap: 12 }}>
           <input
             style={input}
-            placeholder="姓名（必填）"
+            placeholder={t.s2PlaceholderName}
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
           <input
             style={input}
-            placeholder="电话（必填）"
+            placeholder={t.s2PlaceholderPhone}
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
           />
-
-          {/* ✅ 只新增：微信（可选）放在电话下面 */}
           <input
             style={input}
-            placeholder="微信（可选）"
+            placeholder={t.s2PlaceholderWechat}
             value={wechat}
             onChange={(e) => setWechat(e.target.value)}
           />
-
-          {/* ✅✅ 方案一：邮箱输入框下面加提示（不影响输入，一直可见） */}
           <div style={{ display: "grid", gap: 6 }}>
             <input
               style={input}
-              placeholder="邮箱（必填）"
+              placeholder={t.s2PlaceholderEmail}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
             <div style={{ fontSize: 12, color: "#6b7280" }}>
-              请填写正确邮箱，付款成功后将发送订单确认邮件
+              {t.s2EmailHint}
             </div>
           </div>
-
-          {/* ✅ 已有：行程（可选） */}
           <input
             style={input}
-            placeholder="行程（可选）"
+            placeholder={t.s2PlaceholderItinerary}
             value={itinerary}
             onChange={(e) => setItinerary(e.target.value)}
           />
-
           <input
             style={input}
-            placeholder="备注（可选）"
+            placeholder={t.s2PlaceholderRemark}
             value={remark}
             onChange={(e) => setRemark(e.target.value)}
           />
@@ -326,15 +316,15 @@ export default function Step2({ initialData, onNext, onBack }) {
 
       {/* 总价 */}
       <div style={{ fontSize: 18, marginBottom: 8 }}>
-        当前总价：<strong>¥{totalPrice}</strong>
+        {t.s2CurrentTotal}<strong>¥{totalPrice}</strong>
         {typeof stockHint === "number" && (
           <span style={{ marginLeft: 12, color: "#6b7280" }}>
-            （库存：{stockHint}）
+            {t.s2StockHint}{stockHint}）
           </span>
         )}
       </div>
 
-      {/* A + B：库存不可用提示块 */}
+      {/* 库存不足提示 */}
       {error === "NO_STOCK" && (
         <div
           style={{
@@ -347,10 +337,8 @@ export default function Step2({ initialData, onNext, onBack }) {
             fontSize: 14,
           }}
         >
-          <strong>该日期该车型暂无车辆</strong>
-          <div style={{ marginTop: 4 }}>
-            请尝试更换其他车型，或返回上一步修改用车日期。
-          </div>
+          <strong>{t.s2ErrNoStockTitle}</strong>
+          <div style={{ marginTop: 4 }}>{t.s2ErrNoStockDesc}</div>
         </div>
       )}
 
@@ -359,10 +347,9 @@ export default function Step2({ initialData, onNext, onBack }) {
       )}
 
       <div style={{ display: "flex", gap: 12 }}>
-        <button onClick={onBack}>返回上一步</button>
-        <button onClick={handleNext}>下一步：填写信息</button>
+        <button onClick={onBack}>{t.btnBack}</button>
+        <button onClick={handleNext}>{t.s2BtnNextInfo}</button>
       </div>
     </div>
   );
 }
-
