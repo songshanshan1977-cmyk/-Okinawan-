@@ -1,15 +1,76 @@
 // pages/index.jsx
 
+import { useState, useEffect } from "react";
 import Head from "next/head";
 import { useRouter } from "next/router";
+import { translations } from "../lib/i18n/bookingTranslations";
+
+const VALID_UI_LANGS = ["zh", "zh-TW", "ja", "en"];
 
 export default function Home() {
   const router = useRouter();
 
+  // ⭐ 页面显示语言（不写入 localStorage，不改 URL）
+  const [bookingUiLang, setBookingUiLang] = useState("zh");
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const langParam = params.get("lang");
+    if (VALID_UI_LANGS.includes(langParam)) {
+      setBookingUiLang(langParam);
+    }
+  }, []);
+
+  const t = translations[bookingUiLang] || translations["zh"];
+
+  // ⭐ 语言切换按钮（只切换显示文字，不改 URL / localStorage）
+  const langSwitcher = (
+    <div
+      style={{
+        display: "flex",
+        gap: "8px",
+        justifyContent: "flex-end",
+        flexWrap: "wrap",
+        marginBottom: "16px",
+        paddingBottom: "10px",
+        borderBottom: "1px solid #e2e8f0",
+      }}
+    >
+      {VALID_UI_LANGS.map((code) => {
+        const label = {
+          zh: t.langZh,
+          "zh-TW": t.langZhTW,
+          ja: t.langJa,
+          en: t.langEn,
+        }[code];
+        const isActive = bookingUiLang === code;
+        return (
+          <button
+            key={code}
+            onClick={() => setBookingUiLang(code)}
+            style={{
+              padding: "4px 10px",
+              fontSize: "13px",
+              borderRadius: "6px",
+              border: isActive ? "1.5px solid #3f6df6" : "1px solid #ccc",
+              background: isActive ? "#eff4ff" : "#f9f9f9",
+              color: isActive ? "#3f6df6" : "#555",
+              fontWeight: isActive ? 600 : 400,
+              cursor: "pointer",
+            }}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
     <>
       <Head>
-        <title>华人 Okinawa 官方包车预约系统</title>
+        <title>{t.homePageTitle}</title>
         <meta
           name="description"
           content="冲绳当地华人正规包车服务 · 官方在线预约系统 · 押金仅 500 RMB"
@@ -19,7 +80,7 @@ export default function Home() {
         <meta name="robots" content="noindex, nofollow" />
         <meta name="googlebot" content="noindex, nofollow" />
 
-        {/* ✅ 仅新增：把“规范入口”指向真正预约页，避免 / 抢入口 */}
+        {/* ✅ 仅新增：把"规范入口"指向真正预约页，避免 / 抢入口 */}
         <link rel="canonical" href="https://okinawan.vercel.app/booking" />
       </Head>
 
@@ -41,6 +102,9 @@ export default function Home() {
             textAlign: "center",
           }}
         >
+          {/* 语言切换按钮 */}
+          {langSwitcher}
+
           {/* 顶部品牌 */}
           <div style={{ marginBottom: "28px" }}>
             <div
@@ -51,7 +115,7 @@ export default function Home() {
                 marginBottom: "8px",
               }}
             >
-              OFFICIAL BOOKING SYSTEM
+              {t.homeOfficialLabel}
             </div>
 
             <h1
@@ -62,7 +126,7 @@ export default function Home() {
                 marginBottom: "10px",
               }}
             >
-              华人 Okinawa 包车预约系统
+              {t.homeTitle}
             </h1>
 
             <p
@@ -71,7 +135,7 @@ export default function Home() {
                 color: "#475569",
               }}
             >
-              冲绳当地华人正规包车服务 · 官方在线预约
+              {t.homeSubtitle}
             </p>
           </div>
 
@@ -93,7 +157,7 @@ export default function Home() {
                 marginBottom: "20px",
               }}
             >
-              系统保障
+              {t.homeGuaranteeTitle}
             </h2>
 
             <div
@@ -107,20 +171,20 @@ export default function Home() {
               }}
             >
               <div>
-                ✔ 押金仅 <strong>500 RMB</strong>，其余费用用车当日直接支付司机
+                ✔ {t.homeG1Pre}<strong>500 RMB</strong>{t.homeG1Post}
               </div>
               <div>
-                ✔ 支付成功后，系统自动发送 <strong>订单确认邮件</strong>
+                ✔ {t.homeG2Pre}<strong>{t.homeG2Bold}</strong>{t.homeG2Post}
               </div>
               <div>
-                ✔ <strong>中文 / 日文司机</strong> 可选，行程沟通无障碍
+                ✔ <strong>{t.homeG3Bold}</strong>{t.homeG3Post}
               </div>
             </div>
           </div>
 
-          {/* CTA */}
+          {/* CTA —— 根据当前语言跳转对应 /booking?lang=xx */}
           <button
-            onClick={() => router.push("/booking")}
+            onClick={() => router.push(`/booking?lang=${bookingUiLang}`)}
             style={{
               background: "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)",
               color: "#ffffff",
@@ -133,7 +197,7 @@ export default function Home() {
               boxShadow: "0 16px 32px rgba(37,99,235,0.35)",
             }}
           >
-            进入包车预约
+            {t.homeCta}
           </button>
 
           {/* 底部信任兜底 */}
@@ -145,9 +209,11 @@ export default function Home() {
               lineHeight: "1.7",
             }}
           >
-            <div>客服支持：微信 / WhatsApp</div>
+            <div>{t.homeSupport}</div>
             <div>
-              本系统为 <strong>华人 Okinawa</strong> 官方包车预约平台
+              {t.homePlatformPre}
+              <strong>华人 Okinawa</strong>
+              {t.homePlatformPost}
             </div>
           </div>
         </div>
