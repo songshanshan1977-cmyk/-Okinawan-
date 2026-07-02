@@ -5,7 +5,7 @@ import Head from "next/head";
 import { useRouter } from "next/router";
 import { translations } from "../lib/i18n/bookingTranslations";
 
-const VALID_UI_LANGS = ["zh", "zh-TW", "ja", "en"];
+const VALID_UI_LANGS = ["zh", "zh-TW", "ja", "en", "ko"];
 
 export default function Home() {
   const router = useRouter();
@@ -43,6 +43,7 @@ export default function Home() {
           "zh-TW": t.langZhTW,
           ja: t.langJa,
           en: t.langEn,
+          ko: t.langKo,
         }[code];
         const isActive = bookingUiLang === code;
         return (

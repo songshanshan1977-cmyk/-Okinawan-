@@ -22,7 +22,7 @@ function generateOrderId() {
 }
 
 // ⭐ 合法 UI 语言代码（与 driver_lang 业务字段完全无关）
-const VALID_UI_LANGS = ["zh", "zh-TW", "ja", "en"];
+const VALID_UI_LANGS = ["zh", "zh-TW", "ja", "en", "ko"];
 
 export default function BookingFlow() {
   // ⭐ FIX 1：step 不给默认值
@@ -132,6 +132,7 @@ export default function BookingFlow() {
           "zh-TW": t.langZhTW,
           ja: t.langJa,
           en: t.langEn,
+          ko: t.langKo,
         }[code];
         const isActive = bookingUiLang === code;
         return (
