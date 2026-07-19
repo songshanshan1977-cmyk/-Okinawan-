@@ -11,6 +11,7 @@ export default function Step4Payment({ initialData, bookingUiLang, onBack }) {
 
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [unavailableDates, setUnavailableDates] = useState([]);
 
   // ⭐ 车型显示名（显示层翻译，不影响 car_model 值）
   const carDisplayName = {
@@ -28,6 +29,7 @@ export default function Step4Payment({ initialData, bookingUiLang, onBack }) {
   const handlePay = async () => {
     setLoading(true);
     setErrorMsg("");
+    setUnavailableDates([]);
 
     try {
       // ----------------------------
@@ -41,6 +43,13 @@ export default function Step4Payment({ initialData, bookingUiLang, onBack }) {
 
       const orderData = await orderRes.json();
       console.log("🔵 create-order 返回：", orderData);
+
+      if (orderRes.status === 409 && orderData?.error === "paid_order_immutable") {
+        // 订单已付款：不允许再修改，直接引导用户返回查看已有订单
+        setErrorMsg(t.s4ErrOrderFail + orderData.error);
+        setLoading(false);
+        return;
+      }
 
       if (!orderRes.ok || !orderData?.order?.order_id) {
         setErrorMsg(
@@ -64,6 +73,14 @@ export default function Step4Payment({ initialData, bookingUiLang, onBack }) {
 
       const payData = await payRes.json();
       console.log("🔵 create-payment-intent 返回：", payRes.status, payData);
+
+      // ⭐ 服务端二次库存检查未通过：不创建过、不返回付款链接
+      if (payRes.status === 409 && payData?.error === "inventory_unavailable") {
+        setErrorMsg("NO_STOCK");
+        setUnavailableDates(Array.isArray(payData?.unavailable_dates) ? payData.unavailable_dates : []);
+        setLoading(false);
+        return;
+      }
 
       if (!payRes.ok || !payData?.url) {
         setErrorMsg(
@@ -171,7 +188,34 @@ export default function Step4Payment({ initialData, bookingUiLang, onBack }) {
 
         <p className="text-sm text-gray-500">{t.s4SystemNote}</p>
 
-        {errorMsg && (
+        {errorMsg === "NO_STOCK" && (
+          <div
+            style={{
+              background: "#fef2f2",
+              border: "1px solid #fecaca",
+              color: "#b91c1c",
+              padding: "12px 14px",
+              borderRadius: 10,
+              marginTop: 12,
+              fontSize: 14,
+            }}
+          >
+            <strong>{t.s2ErrNoStockTitle}</strong>
+            <div style={{ marginTop: 4 }}>
+              {initialData.end_date && initialData.end_date !== initialData.start_date
+                ? t.s2ErrRangeUnavailableMsg
+                : t.s2ErrNoStockDesc}
+            </div>
+            {unavailableDates.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                {t.s2UnavailableDatesLabel}
+                {unavailableDates.map((d) => d.date).join("、")}
+              </div>
+            )}
+          </div>
+        )}
+
+        {errorMsg && errorMsg !== "NO_STOCK" && (
           <p className="text-red-600 text-base mt-3 whitespace-pre-line">
             {errorMsg}
           </p>

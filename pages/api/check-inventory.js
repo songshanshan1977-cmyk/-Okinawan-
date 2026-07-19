@@ -1,31 +1,11 @@
 // pages/api/check-inventory.js
 import { createClient } from "@supabase/supabase-js";
+const { checkAvailability } = require("../../lib/inventory/checkAvailability");
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
-
-// YYYY-MM-DD -> Date (local)
-function parseYMD(s) {
-  const [y, m, d] = String(s).split("-").map(Number);
-  return new Date(y, m - 1, d);
-}
-function fmtYMD(dt) {
-  const y = dt.getFullYear();
-  const m = String(dt.getMonth() + 1).padStart(2, "0");
-  const d = String(dt.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-function rangeDays(start, end) {
-  const s = parseYMD(start);
-  const e = parseYMD(end);
-  const out = [];
-  for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
-    out.push(fmtYMD(d));
-  }
-  return out;
-}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -34,75 +14,54 @@ export default async function handler(req, res) {
 
   const body = req.body || {};
   const car_model_id = body.car_model_id;
-
-  // 司机语言（库存维度的一部分）— 必须显式传入，拒绝静默降级
-  const rawLang = body.driver_lang;
-  const driver_lang = rawLang
-    ? String(rawLang).toUpperCase() === "ZH"
-      ? "ZH"
-      : String(rawLang).toUpperCase() === "JP"
-      ? "JP"
-      : null
-    : null;
+  const driver_lang = body.driver_lang;
 
   // ✅ 兼容两套参数：
   // 单日：date
   // 多日：start_date / end_date
-  const start = body.start_date || body.date;
-  const end = body.end_date || body.date;
+  const start_date = body.start_date || body.date;
+  const end_date = body.end_date || body.date;
 
-  // ❗ 这里只校验「必须存在的维度」
-  if (!car_model_id || !driver_lang || !start || !end) {
+  if (!car_model_id || !driver_lang || !start_date || !end_date) {
     console.warn("check-inventory missing params", {
       car_model_id,
       driver_lang,
-      start,
-      end,
+      start_date,
+      end_date,
     });
     return res.status(400).json({
       ok: false,
-      error: "missing params",
+      error: "invalid_request",
     });
   }
 
-  // ✅ 多日规则：只要有一天 <= 0 就算无库存
-  const days = rangeDays(start, end);
+  const result = await checkAvailability({
+    supabase,
+    start_date,
+    end_date,
+    car_model_id,
+    driver_lang,
+  });
 
-  const { data, error } = await supabase
-    .from("inventory_rules_v2")
-    .select("date, remaining_qty_calc")
-    .eq("car_model_id", car_model_id)
-    .eq("driver_lang", driver_lang)
-    .in("date", days);
-
-  if (error) {
-    console.error("inventory_rules_v2 error:", error);
-    return res.status(500).json({ ok: false });
+  if (!result.ok) {
+    if (result.status === 500) {
+      console.error("check-inventory: inventory check failed", result.error);
+    }
+    return res.status(result.status).json({ ok: false, error: result.error });
   }
 
-  // ✅ 缺日视为 0（防止“没生成库存却能下单”）
-  const map = new Map(
-    (data || []).map((r) => [r.date, Number(r.remaining_qty_calc ?? 0)])
-  );
-
-  let min = Infinity;
-  let firstBad = null;
-
-  for (const d of days) {
-    const r = map.has(d) ? map.get(d) : 0;
-    if (r < min) min = r;
-    if (r <= 0 && !firstBad) firstBad = d;
-  }
+  // ✅ 新字段（多日）+ 旧字段（保留，避免单日调用方回归）
+  const first_bad_date = result.unavailable_dates[0]?.date ?? null;
 
   return res.json({
-    ok: min > 0,
-    remaining_qty: Number.isFinite(min) ? min : 0,
-    first_bad_date: firstBad,
-    checked: {
-      start_date: start,
-      end_date: end,
-      days_count: days.length,
-    },
+    // 新契约
+    available: result.available,
+    unavailable_dates: result.unavailable_dates,
+    checked: result.checked,
+
+    // 旧契约（兼容保留，remaining_qty 语义不变：区间内最小可用量）
+    ok: result.available,
+    remaining_qty: result.min_remaining,
+    first_bad_date,
   });
 }
-

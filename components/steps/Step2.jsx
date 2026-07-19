@@ -49,6 +49,7 @@ export default function Step2({ initialData, bookingUiLang, onNext, onBack }) {
 
   const [error, setError] = useState("");
   const [stockHint, setStockHint] = useState(null);
+  const [unavailableDates, setUnavailableDates] = useState([]);
 
   const fetchDailyPrice = async (modelKey, lang, hours) => {
     if (!modelKey || !initialData.start_date) return null;
@@ -97,23 +98,28 @@ export default function Step2({ initialData, bookingUiLang, onNext, onBack }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        date: initialData.start_date,
+        start_date: initialData.start_date,
+        end_date: initialData.end_date,
         car_model_id: CAR_MODEL_IDS[carModel],
         driver_lang: normalizeLangForAPI(driverLang),
       }),
     });
 
-    if (!res.ok) return { ok: false, total_stock: 0 };
+    if (!res.ok) return { ok: false, total_stock: 0, unavailable_dates: [] };
     const data = await res.json();
+    // ⭐ 兼容新旧字段：available 优先，退回旧的 ok 字段
+    const available = data?.available ?? data?.ok;
     return {
-      ok: data?.ok === true,
+      ok: available === true,
       total_stock: Number(data?.remaining_qty ?? 0),
+      unavailable_dates: Array.isArray(data?.unavailable_dates) ? data.unavailable_dates : [],
     };
   };
 
   const handleNext = async () => {
     setError("");
     setStockHint(null);
+    setUnavailableDates([]); // ⭐ 每次重新检查前清空旧的无车日期列表
 
     const today = formatDate(new Date());
     if (initialData.start_date === today) {
@@ -132,7 +138,8 @@ export default function Step2({ initialData, bookingUiLang, onNext, onBack }) {
 
     if (!inv.ok) {
       setError("NO_STOCK");
-      return;
+      setUnavailableDates(inv.unavailable_dates);
+      return; // ⭐ 不调用 onNext，停留在 Step2，不自动拆单
     }
 
     onNext({
@@ -338,7 +345,17 @@ export default function Step2({ initialData, bookingUiLang, onNext, onBack }) {
           }}
         >
           <strong>{t.s2ErrNoStockTitle}</strong>
-          <div style={{ marginTop: 4 }}>{t.s2ErrNoStockDesc}</div>
+          <div style={{ marginTop: 4 }}>
+            {initialData.end_date && initialData.end_date !== initialData.start_date
+              ? t.s2ErrRangeUnavailableMsg
+              : t.s2ErrNoStockDesc}
+          </div>
+          {unavailableDates.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              {t.s2UnavailableDatesLabel}
+              {unavailableDates.map((d) => d.date).join("、")}
+            </div>
+          )}
         </div>
       )}
 
