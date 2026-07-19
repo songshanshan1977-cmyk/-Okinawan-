@@ -112,19 +112,42 @@ export default async function handler(req, res) {
         patch.deposit_amount = 500;
       }
 
-      const { data: updated, error: updateErr } = await supabase
+      // ⚠️ 不用 .single()：0 行匹配 vs 真正的数据库错误必须能明确区分，
+      // 不能靠 .single() 把两种情况都折叠成同一个 error。
+      const { data: updatedRows, error: updateErr } = await supabase
         .from("orders")
         .update(patch)
         .eq("order_id", existing.order_id)
         .eq("payment_status", existing.payment_status) // 防止并发中途变成已付款
-        .select()
-        .single();
+        .select();
 
       if (updateErr) {
         console.error("❌ Supabase update existing order error:", updateErr);
-        return res.status(500).json({ error: updateErr.message });
+        return res.status(500).json({ error: "order_update_failed" });
       }
 
+      if (!updatedRows || updatedRows.length === 0) {
+        // 条件 update 影响 0 行：读取之后、写入之前，订单状态已经变化。
+        // 不得原样返回"更新成功"——重新读取，明确诊断原因后再拒绝。
+        const { data: current, error: recheckErr } = await supabase
+          .from("orders")
+          .select("*")
+          .eq("order_id", existing.order_id)
+          .maybeSingle();
+
+        if (recheckErr) {
+          console.error("❌ Supabase re-check order error:", recheckErr);
+          return res.status(500).json({ error: "order_update_failed" });
+        }
+
+        if (current && isPaidOrImmutable(current)) {
+          return res.status(409).json({ error: "paid_order_immutable" });
+        }
+
+        return res.status(409).json({ error: "order_state_changed" });
+      }
+
+      const updated = updatedRows[0];
       return res.status(200).json({ success: true, order: updated, reused: true, updated: true });
     }
 
