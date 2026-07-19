@@ -203,6 +203,7 @@ export default function BookingFlow() {
           bookingUiLang={bookingUiLang}
           onBack={() => setStep(3)}
           onPaymentSuccess={() => setStep(5)}
+          onOrderIdResolved={(orderId) => updateFormData({ order_id: orderId })}
         />
       )}
 

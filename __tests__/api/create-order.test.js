@@ -4,7 +4,6 @@ const { createMockReq, createMockRes } = require("../helpers/mockReqRes");
 // 三个正式车型 UUID（来自 components/BookingFlow.jsx CAR_MODEL_IDS）
 const ECONOMY = "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca";
 const ALPHARD = "82cf604f-e688-49fe-aecf-69894a01f6cb";
-const HIACE = "453df662-d350-4ab9-b811-61ffcda40d4b";
 
 function loadHandler(supabase) {
   let handler;
@@ -35,7 +34,30 @@ const BASE_ORDER_INPUT = {
   email: "a@b.com",
 };
 
-describe("POST /api/create-order — 幂等 + 未付款draft受控更新 + 服务端价格重算", () => {
+const EXISTING_DRAFT_A = {
+  order_id: "ORD-20260802-AAAAA",
+  payment_status: "draft",
+  start_date: "2026-08-02",
+  end_date: "2026-08-05",
+  departure_hotel: "Hotel A",
+  end_hotel: "Hotel B",
+  car_model_id: ECONOMY,
+  driver_lang: "ZH",
+  duration: 8,
+  pax: 2,
+  luggage: 1,
+  name: "Original Owner",
+  phone: "080-0000-0000",
+  email: "owner@example.com",
+  wechat: null,
+  itinerary: null,
+  remark: null,
+  source: "direct",
+  total_price: 6400, // 1600 * 4天
+  deposit_amount: 500,
+};
+
+describe("POST /api/create-order — 新订单：服务端重算价格", () => {
   test("新订单：服务端重新计算 total_price，不采用客户端伪造值", async () => {
     const supabase = createMockSupabase({
       from: {
@@ -44,7 +66,7 @@ describe("POST /api/create-order — 幂等 + 未付款draft受控更新 + 服�
           { data: { ...BASE_ORDER_INPUT, total_price: 6400, payment_status: "draft" }, error: null }, // insert 返回
         ],
       },
-      rpc: () => ({ data: 1600, error: null }), // get_car_price 每日 1600
+      rpc: () => ({ data: 1600, error: null }),
     });
     const handler = loadHandler(supabase);
 
@@ -55,323 +77,216 @@ describe("POST /api/create-order — 幂等 + 未付款draft受控更新 + 服�
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.reused).toBe(false);
-    // insert 调用参数里的 total_price 必须是服务端算出的 1600*4=6400，不是客户端传的 999999
-    const insertCalls = supabase.__tableCalls.orders.insert.mock.calls;
-    const insertPayload = insertCalls[0][0][0];
+    expect(res.body.created_new_order).toBe(false);
+
+    const insertPayload = supabase.__tableCalls.orders.insert.mock.calls[0][0][0];
     expect(insertPayload.total_price).toBe(6400);
     expect(insertPayload.total_price).not.toBe(999999);
+    expect(insertPayload.deposit_amount).toBe(500); // 固定常量（顺手修正9），不读取客户端值
   });
 
-  test("case 13: Step4无车返回后，同一order_id修改日期重试 -> 更新同一行，价格按新日期重算", async () => {
-    const existingDraft = {
-      order_id: "ORD-20260802-33333",
-      payment_status: "draft",
-      start_date: "2026-08-02",
-      end_date: "2026-08-05",
-      car_model_id: ECONOMY,
-      driver_lang: "ZH",
-      duration: 8,
-      total_price: 6400,
-      deposit_amount: 500,
-    };
-    const updatedRow = { ...existingDraft, start_date: "2026-08-10", end_date: "2026-08-11", total_price: 3200 };
-
+  test("回归：客户端提交 deposit_amount 也不会被采用（新订单路径）", async () => {
     const supabase = createMockSupabase({
-      from: {
-        orders: [
-          { data: existingDraft, error: null }, // 查询已存在订单
-          { data: [updatedRow], error: null }, // update ...select() 返回数组（不再用 .single()）
-        ],
-      },
+      from: { orders: [{ data: null, error: null }, { data: { ...BASE_ORDER_INPUT }, error: null }] },
       rpc: () => ({ data: 1600, error: null }),
     });
     const handler = loadHandler(supabase);
 
-    const req = createMockReq({
-      body: { ...BASE_ORDER_INPUT, order_id: existingDraft.order_id, start_date: "2026-08-10", end_date: "2026-08-11" },
-    });
+    const req = createMockReq({ body: { ...BASE_ORDER_INPUT, deposit_amount: 1 } });
     const res = createMockRes();
     await handler(req, res);
 
-    expect(res.statusCode).toBe(200);
-    expect(res.body.reused).toBe(true);
-    expect(res.body.updated).toBe(true);
-    expect(res.body.order.start_date).toBe("2026-08-10");
-    expect(res.body.order.total_price).toBe(3200); // 1600 * 2天，用新日期重算，不是旧的6400
+    const insertPayload = supabase.__tableCalls.orders.insert.mock.calls[0][0][0];
+    expect(insertPayload.deposit_amount).toBe(500);
   });
+});
 
-  test("case 14: 修改未付款draft的车型/司机语言/时长 -> 服务端重新计算价格", async () => {
-    const existingDraft = {
-      order_id: "ORD-20260802-44444",
-      payment_status: "draft",
-      start_date: "2026-08-02",
-      end_date: "2026-08-02",
-      car_model_id: HIACE,
-      driver_lang: "ZH",
-      duration: 8,
-      total_price: 1600,
-      deposit_amount: 500,
-    };
-    const updatedRow = { ...existingDraft, car_model_id: ALPHARD, driver_lang: "JP", duration: 10, total_price: 2200 };
+describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿", () => {
+  test("7.1 陌生人篡改尝试：A 的任何字段都不变，请求被当作独立新草稿 B 处理", async () => {
+    const newB = { ...EXISTING_DRAFT_A, order_id: "ORD-20260802-BBBBB", email: "attacker@evil.com", phone: "666", start_date: "2099-01-01", end_date: "2099-01-01", total_price: 1600 };
 
-    const rpcSpy = jest.fn(() => ({ data: 2200, error: null }));
     const supabase = createMockSupabase({
-      from: { orders: [{ data: existingDraft, error: null }, { data: [updatedRow], error: null }] },
-      rpc: rpcSpy,
+      from: {
+        orders: [
+          { data: EXISTING_DRAFT_A, error: null }, // 查询：命中 A
+          { data: newB, error: null }, // insertNewDraftWithRetry 的 insert 返回
+        ],
+      },
+      rpc: () => ({ data: 1600, error: null }),
     });
     const handler = loadHandler(supabase);
 
     const req = createMockReq({
       body: {
         ...BASE_ORDER_INPUT,
-        order_id: existingDraft.order_id,
-        car_model_id: ALPHARD,
-        driver_lang: "jp",
-        duration: 10,
+        order_id: EXISTING_DRAFT_A.order_id, // 攻击者携带 A 的 order_id
+        email: "attacker@evil.com",
+        phone: "666",
+        start_date: "2099-01-01",
+        end_date: "2099-01-01",
       },
     });
-    const res = createMockRes();
-    await handler(req, res);
-
-    expect(res.body.order.total_price).toBe(2200);
-    expect(rpcSpy).toHaveBeenCalledWith(
-      "get_car_price",
-      expect.objectContaining({ p_car_model_id: ALPHARD, p_driver_lang: "JP", p_duration_hours: 10 })
-    );
-  });
-
-  test("case 15: 对 payment_status=paid 订单提交同order_id修改请求 -> 409 且不写库", async () => {
-    const paidOrder = {
-      order_id: "ORD-20260802-55555",
-      payment_status: "paid",
-      start_date: "2026-08-02",
-      end_date: "2026-08-02",
-      total_price: 1600,
-    };
-    const supabase = createMockSupabase({
-      from: { orders: { data: paidOrder, error: null } },
-    });
-    const handler = loadHandler(supabase);
-
-    const req = createMockReq({
-      body: { ...BASE_ORDER_INPUT, order_id: paidOrder.order_id, start_date: "2026-09-01" },
-    });
-    const res = createMockRes();
-    await handler(req, res);
-
-    expect(res.statusCode).toBe(409);
-    expect(res.body.error).toBe("paid_order_immutable");
-    // 不得调用 update（数据库内容不变）
-    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
-  });
-
-  test("幂等: 完全相同请求重复提交，结果一致（价格不因重复提交而漂移）", async () => {
-    const existingDraft = {
-      order_id: "ORD-20260802-66666",
-      payment_status: "draft",
-      start_date: "2026-08-02",
-      end_date: "2026-08-02",
-      car_model_id: ECONOMY,
-      driver_lang: "ZH",
-      duration: 8,
-      total_price: 1600,
-      deposit_amount: 500,
-    };
-    const supabase = createMockSupabase({
-      from: { orders: [{ data: existingDraft, error: null }, { data: [existingDraft], error: null }] },
-      rpc: () => ({ data: 1600, error: null }),
-    });
-    const handler = loadHandler(supabase);
-
-    const req = createMockReq({
-      body: { ...BASE_ORDER_INPUT, order_id: existingDraft.order_id, start_date: "2026-08-02", end_date: "2026-08-02" },
-    });
-    const res = createMockRes();
-    await handler(req, res);
-
-    expect(res.body.order.total_price).toBe(1600);
-  });
-
-  // ────────────────────────────────────────────────────────────
-  // 任务一：draft 并发更新静默失败修复
-  // ────────────────────────────────────────────────────────────
-
-  test("并发1: 读到draft、条件update影响0行、复查发现已paid -> 409 paid_order_immutable，不得返回成功", async () => {
-    const draftAtReadTime = {
-      order_id: "ORD-20260802-77777",
-      payment_status: "draft", // 读取时还是 draft
-      start_date: "2026-08-02",
-      end_date: "2026-08-02",
-      car_model_id: ECONOMY,
-      driver_lang: "ZH",
-      duration: 8,
-      total_price: 1600,
-      deposit_amount: 500,
-    };
-    const nowPaid = { ...draftAtReadTime, payment_status: "paid" }; // 写入前已被 webhook 改成 paid
-
-    const supabase = createMockSupabase({
-      from: {
-        orders: [
-          { data: draftAtReadTime, error: null }, // 第一次 select：读到 draft
-          { data: [], error: null }, // update...eq(payment_status,'draft') 匹配 0 行
-          { data: nowPaid, error: null }, // 复查：真实当前状态是 paid
-        ],
-      },
-      rpc: () => ({ data: 1600, error: null }),
-    });
-    const handler = loadHandler(supabase);
-
-    const req = createMockReq({
-      body: { ...BASE_ORDER_INPUT, order_id: draftAtReadTime.order_id, start_date: "2026-08-03" },
-    });
-    const res = createMockRes();
-    await handler(req, res);
-
-    expect(res.statusCode).toBe(409);
-    expect(res.body.error).toBe("paid_order_immutable");
-    expect(res.body.success).toBeUndefined(); // 绝不能带 success:true
-  });
-
-  test("并发2: 读到draft、条件update影响0行、复查发现是其他非paid状态变化 -> 409 order_state_changed", async () => {
-    const draftAtReadTime = {
-      order_id: "ORD-20260802-88888",
-      payment_status: "draft",
-      start_date: "2026-08-02",
-      end_date: "2026-08-02",
-      car_model_id: ECONOMY,
-      driver_lang: "ZH",
-      duration: 8,
-      total_price: 1600,
-      deposit_amount: 500,
-    };
-    const nowPending = { ...draftAtReadTime, payment_status: "pending" }; // 被别的请求改成了 pending（仍非 draft，条件不匹配）
-
-    const supabase = createMockSupabase({
-      from: {
-        orders: [
-          { data: draftAtReadTime, error: null },
-          { data: [], error: null }, // update 匹配 0 行
-          { data: nowPending, error: null }, // 复查：不是 paid，但状态确实变了
-        ],
-      },
-      rpc: () => ({ data: 1600, error: null }),
-    });
-    const handler = loadHandler(supabase);
-
-    const req = createMockReq({
-      body: { ...BASE_ORDER_INPUT, order_id: draftAtReadTime.order_id, start_date: "2026-08-03" },
-    });
-    const res = createMockRes();
-    await handler(req, res);
-
-    expect(res.statusCode).toBe(409);
-    expect(res.body.error).toBe("order_state_changed");
-    expect(res.body.success).toBeUndefined();
-  });
-
-  test("正常路径: 条件update确实影响1行 -> 200 且返回更新后的行", async () => {
-    const draft = {
-      order_id: "ORD-20260802-99999",
-      payment_status: "draft",
-      start_date: "2026-08-02",
-      end_date: "2026-08-02",
-      car_model_id: ECONOMY,
-      driver_lang: "ZH",
-      duration: 8,
-      total_price: 1600,
-      deposit_amount: 500,
-    };
-    const updated = { ...draft, start_date: "2026-08-03", total_price: 1600 };
-
-    const supabase = createMockSupabase({
-      from: { orders: [{ data: draft, error: null }, { data: [updated], error: null }] },
-      rpc: () => ({ data: 1600, error: null }),
-    });
-    const handler = loadHandler(supabase);
-
-    const req = createMockReq({ body: { ...BASE_ORDER_INPUT, order_id: draft.order_id, start_date: "2026-08-03" } });
     const res = createMockRes();
     await handler(req, res);
 
     expect(res.statusCode).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(res.body.updated).toBe(true);
-    expect(res.body.order.start_date).toBe("2026-08-03");
+    expect(res.body.created_new_order).toBe(true);
+    expect(res.body.previous_order_id).toBe(EXISTING_DRAFT_A.order_id);
+    expect(res.body.order.order_id).not.toBe(EXISTING_DRAFT_A.order_id); // B != A
+
+    // 关键断言：整个请求处理过程中，orders 表从未被 update 过——A 不可能被这条请求改动
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+
+    // insert 时使用的是攻击者提交的新内容，而不是 A 的原内容
+    const insertPayload = supabase.__tableCalls.orders.insert.mock.calls[0][0][0];
+    expect(insertPayload.email).toBe("attacker@evil.com");
+    expect(insertPayload.order_id).not.toBe(EXISTING_DRAFT_A.order_id);
   });
 
-  test("数据库update本身报错(非0行问题) -> 500，且不泄露详情", async () => {
-    const draft = {
-      order_id: "ORD-20260802-10101",
-      payment_status: "draft",
-      start_date: "2026-08-02",
-      end_date: "2026-08-02",
-      car_model_id: ECONOMY,
-      driver_lang: "ZH",
-      duration: 8,
-      total_price: 1600,
-      deposit_amount: 500,
-    };
+  test("7.2 相同规范化内容重复提交：返回原 A，insert 0 次，update 0 次", async () => {
+    const supabase = createMockSupabase({
+      from: { orders: { data: EXISTING_DRAFT_A, error: null } },
+      rpc: () => ({ data: 1600, error: null }), // 1600*4=6400，与 A 的 total_price 一致
+    });
+    const handler = loadHandler(supabase);
+
+    const req = createMockReq({
+      body: {
+        ...BASE_ORDER_INPUT,
+        order_id: EXISTING_DRAFT_A.order_id,
+        start_date: EXISTING_DRAFT_A.start_date,
+        end_date: EXISTING_DRAFT_A.end_date,
+        departure_hotel: EXISTING_DRAFT_A.departure_hotel,
+        end_hotel: EXISTING_DRAFT_A.end_hotel,
+        car_model_id: EXISTING_DRAFT_A.car_model_id,
+        driver_lang: "zh",
+        duration: EXISTING_DRAFT_A.duration,
+        pax: EXISTING_DRAFT_A.pax,
+        luggage: EXISTING_DRAFT_A.luggage,
+        name: EXISTING_DRAFT_A.name,
+        phone: EXISTING_DRAFT_A.phone,
+        email: EXISTING_DRAFT_A.email,
+      },
+    });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.reused).toBe(true);
+    expect(res.body.created_new_order).toBe(false);
+    expect(res.body.order.order_id).toBe(EXISTING_DRAFT_A.order_id);
+
+    expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+  });
+
+  test("7.3 仅客户端 total_price 变化（其余业务字段相同）：视为相同内容，不新建订单", async () => {
+    const supabase = createMockSupabase({
+      from: { orders: { data: EXISTING_DRAFT_A, error: null } },
+      rpc: () => ({ data: 1600, error: null }),
+    });
+    const handler = loadHandler(supabase);
+
+    const req = createMockReq({
+      body: {
+        ...BASE_ORDER_INPUT,
+        order_id: EXISTING_DRAFT_A.order_id,
+        start_date: EXISTING_DRAFT_A.start_date,
+        end_date: EXISTING_DRAFT_A.end_date,
+        departure_hotel: EXISTING_DRAFT_A.departure_hotel,
+        end_hotel: EXISTING_DRAFT_A.end_hotel,
+        car_model_id: EXISTING_DRAFT_A.car_model_id,
+        driver_lang: "zh",
+        duration: EXISTING_DRAFT_A.duration,
+        pax: EXISTING_DRAFT_A.pax,
+        luggage: EXISTING_DRAFT_A.luggage,
+        name: EXISTING_DRAFT_A.name,
+        phone: EXISTING_DRAFT_A.phone,
+        email: EXISTING_DRAFT_A.email,
+        total_price: 1, // 唯一变化：客户端伪造成 1 元
+      },
+    });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.body.reused).toBe(true);
+    expect(res.body.created_new_order).toBe(false);
+    expect(res.body.order.total_price).toBe(6400); // 仍是 A 的服务端原值，不是 1
+    expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+  });
+
+  test("7.4a 已付款订单收到相同内容 -> 409，不 insert 不 update", async () => {
+    const paidOrder = { ...EXISTING_DRAFT_A, payment_status: "paid" };
+    const supabase = createMockSupabase({ from: { orders: { data: paidOrder, error: null } } });
+    const handler = loadHandler(supabase);
+
+    const req = createMockReq({ body: { ...BASE_ORDER_INPUT, order_id: paidOrder.order_id } });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toBe("paid_order_immutable");
+    expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+  });
+
+  test("7.4b 已付款订单收到不同内容 -> 同样 409，不会静默创建新单替代", async () => {
+    const paidOrder = { ...EXISTING_DRAFT_A, payment_status: "paid" };
+    const supabase = createMockSupabase({ from: { orders: { data: paidOrder, error: null } } });
+    const handler = loadHandler(supabase);
+
+    const req = createMockReq({
+      body: { ...BASE_ORDER_INPUT, order_id: paidOrder.order_id, start_date: "2099-01-01", end_date: "2099-01-01" },
+    });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toBe("paid_order_immutable");
+    expect(res.body.created_new_order).toBeUndefined();
+    expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+  });
+
+  test("7.5 新ID冲突重试：第一次新ID唯一冲突，第二次成功，A 不受影响", async () => {
+    const conflict = { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } };
+    const newC = { ...EXISTING_DRAFT_A, order_id: "ORD-20260802-CCCCC", start_date: "2026-09-01", end_date: "2026-09-01", total_price: 1600 };
 
     const supabase = createMockSupabase({
       from: {
         orders: [
-          { data: draft, error: null },
-          { data: null, error: { message: "connection reset by peer at 10.0.0.7" } },
+          { data: EXISTING_DRAFT_A, error: null }, // 查询命中 A
+          conflict, // 第一次新 draft insert：唯一冲突
+          { data: newC, error: null }, // 第二次新 draft insert：成功
         ],
       },
       rpc: () => ({ data: 1600, error: null }),
     });
     const handler = loadHandler(supabase);
 
-    const req = createMockReq({ body: { ...BASE_ORDER_INPUT, order_id: draft.order_id, start_date: "2026-08-03" } });
-    const res = createMockRes();
-    await handler(req, res);
-
-    expect(res.statusCode).toBe(500);
-    expect(res.body.error).toBe("order_update_failed");
-    expect(JSON.stringify(res.body)).not.toMatch(/10\.0\.0\.7/);
-  });
-
-  test("任务二: duration 非法值(如9) -> 400 invalid_duration，不写库", async () => {
-    const supabase = createMockSupabase({
-      from: { orders: { data: null, error: null } },
-      rpc: () => ({ data: 1600, error: null }),
-    });
-    const handler = loadHandler(supabase);
-
-    const req = createMockReq({ body: { ...BASE_ORDER_INPUT, duration: 9 } });
-    const res = createMockRes();
-    await handler(req, res);
-
-    expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("invalid_duration");
-    expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
-  });
-
-  test("任务二: car_model_id 不是三个正式车型之一 -> 400 invalid_car_model，不写库", async () => {
-    const supabase = createMockSupabase({
-      from: { orders: { data: null, error: null } },
-      rpc: () => ({ data: 1600, error: null }),
-    });
-    const handler = loadHandler(supabase);
-
     const req = createMockReq({
-      body: { ...BASE_ORDER_INPUT, car_model_id: "00000000-0000-0000-0000-000000000000" },
+      body: { ...BASE_ORDER_INPUT, order_id: EXISTING_DRAFT_A.order_id, start_date: "2026-09-01", end_date: "2026-09-01" },
     });
     const res = createMockRes();
     await handler(req, res);
 
-    expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("invalid_car_model");
+    expect(res.statusCode).toBe(200);
+    expect(res.body.created_new_order).toBe(true);
+    expect(res.body.order.order_id).toBe("ORD-20260802-CCCCC");
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    // insert 恰好被调用 2 次（第一次冲突 + 第二次成功），重试次数受限
+    expect(supabase.__tableCalls.orders.insert.mock.calls.length).toBe(2);
   });
+});
 
-  test("回归: 缺少必填字段返回 400（不再要求客户端传 total_price）", async () => {
+describe("回归：既有行为保持", () => {
+  test("缺少必填字段返回 400（新订单路径）", async () => {
     const supabase = createMockSupabase({ from: { orders: { data: null, error: null } } });
     const handler = loadHandler(supabase);
 
-    const { total_price, departure_hotel, ...withoutHotel } = BASE_ORDER_INPUT;
-    const req = createMockReq({ body: withoutHotel }); // 缺 departure_hotel
+    const { departure_hotel, ...withoutHotel } = BASE_ORDER_INPUT;
+    const req = createMockReq({ body: withoutHotel });
     const res = createMockRes();
     await handler(req, res);
 
@@ -379,7 +294,19 @@ describe("POST /api/create-order — 幂等 + 未付款draft受控更新 + 服�
     expect(res.body.error).toMatch(/departure_hotel/);
   });
 
-  test("回归: 缺 order_id 返回 400", async () => {
+  test("缺少必填字段返回 400（既有草稿分支）", async () => {
+    const supabase = createMockSupabase({ from: { orders: { data: EXISTING_DRAFT_A, error: null } } });
+    const handler = loadHandler(supabase);
+
+    const { departure_hotel, ...withoutHotel } = BASE_ORDER_INPUT;
+    const req = createMockReq({ body: { ...withoutHotel, order_id: EXISTING_DRAFT_A.order_id } });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  test("缺 order_id 返回 400", async () => {
     const supabase = createMockSupabase({ from: { orders: { data: null, error: null } } });
     const handler = loadHandler(supabase);
 
@@ -390,7 +317,7 @@ describe("POST /api/create-order — 幂等 + 未付款draft受控更新 + 服�
     expect(res.statusCode).toBe(400);
   });
 
-  test("数据库查询出错不泄露详情", async () => {
+  test("查询数据库出错不泄露详情", async () => {
     const supabase = createMockSupabase({
       from: { orders: { data: null, error: { message: "internal secret detail" } } },
     });
@@ -401,5 +328,25 @@ describe("POST /api/create-order — 幂等 + 未付款draft受控更新 + 服�
     await handler(req, res);
 
     expect(res.statusCode).toBe(500);
+    expect(JSON.stringify(res.body)).not.toMatch(/internal secret detail/);
+  });
+
+  test("车型/时长非法值仍被拒绝（新订单路径）", async () => {
+    const supabase = createMockSupabase({ from: { orders: { data: null, error: null } }, rpc: () => ({ data: 1600, error: null }) });
+    const handler = loadHandler(supabase);
+
+    const req = createMockReq({ body: { ...BASE_ORDER_INPUT, duration: 9 } });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toBe("invalid_duration");
+  });
+
+  test("代码级确认：整个文件从未对 orders 表调用过 .update()（旧的多字段草稿更新能力已彻底移除）", async () => {
+    const fs = require("fs");
+    const source = fs.readFileSync(require.resolve("../../pages/api/create-order.js"), "utf8");
+    expect(source).not.toMatch(/DRAFT_UPDATE_WHITELIST/);
+    expect(source).not.toMatch(/\.update\(/);
   });
 });

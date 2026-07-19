@@ -6,7 +6,7 @@ import { translations } from "../../lib/i18n/bookingTranslations";
 const CREATE_ORDER_URL = "/api/create-order";
 const CREATE_PAYMENT_URL = "/api/create-payment-intent"; // ✅ 统一走 Vercel
 
-export default function Step4Payment({ initialData, bookingUiLang, onBack }) {
+export default function Step4Payment({ initialData, bookingUiLang, onBack, onOrderIdResolved }) {
   const t = translations[bookingUiLang] || translations["zh"];
 
   const [loading, setLoading] = useState(false);
@@ -59,8 +59,13 @@ export default function Step4Payment({ initialData, bookingUiLang, onBack }) {
         return;
       }
 
-      // ✅ 必须以数据库返回的 order_id 为准
+      // ✅ 必须以数据库返回的 order_id 为准（无论是复用旧ID还是服务端新生成的ID）
       const orderId = orderData.order.order_id;
+
+      // ⭐ 同步回父级 BookingFlow：Step4 之后的展示、重试、返回修改都必须用最新 order_id
+      if (typeof onOrderIdResolved === "function") {
+        onOrderIdResolved(orderId);
+      }
 
       // ----------------------------
       // ② 创建 Stripe 押金支付
