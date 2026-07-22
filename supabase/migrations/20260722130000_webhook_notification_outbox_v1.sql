@@ -10,6 +10,20 @@
 -- notification, an in-flight send claim, and final delivery — one boolean
 -- per audience cannot encode five states.
 --
+-- Revised again in the second Codex review round (R2) to add:
+--   - a frozen payload (recipient_email/email_subject/email_html) so a
+--     retry after a Resend-provider-Idempotency-Key-covered send always
+--     resends byte-identical content, never re-derived from
+--     possibly-changed `orders` data (§三 of the R2 fix instructions);
+--   - a 23-hour dead-letter cutoff matching Resend's own Idempotency-Key
+--     validity window, so nothing auto-retries a customer email forever
+--     (§四);
+--   - complete_webhook_notification_v1's boolean p_success replaced with a
+--     3-way p_outcome ('sent' | 'failed' | 'dead_letter'), so Node can
+--     directly dead-letter a deterministically-undeliverable row (e.g. no
+--     customer email on file) without waiting out the 23-hour window
+--     (§五).
+--
 -- MUST be applied AFTER 20260722120000_webhook_fail_safe_v1.sql, which
 -- inserts into the columns this file adds.
 --
@@ -23,8 +37,8 @@
 -- Existing columns per the schema captured in earlier rounds: id,
 -- order_id, email, subject, status (default 'pending'), error_message,
 -- created_at, provider_message_id. Nothing currently writes to this table
--- (confirmed by repo-wide grep in the round-8 audit), so these additions
--- are pure extension, not a behavior change for any existing writer.
+-- outside this webhook's own outbox usage (confirmed by repo-wide grep),
+-- so these additions are pure extension.
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS dedupe_key text;
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS notification_type text;
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS audience text;
@@ -36,17 +50,35 @@ ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS sent_at timestamptz;
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 -- provider_message_id and error_message are reused as-is (already exist).
 
--- dedupe_key = order_id || ':' || stripe_session_id || ':' || audience ||
--- ':' || notification_type — guarantees at most one outbox row per
--- (order, Session, audience, notification variant), which is exactly what
--- lets process_checkout_payment_v1 insert it with ON CONFLICT (dedupe_key)
--- DO NOTHING and be safe against being called twice for the same Session.
+-- R2 §三: the frozen payload. Written exactly once per row (by
+-- freeze_webhook_notification_payload_v1, first-writer-wins) so every
+-- retry — including ones using the SAME Resend Idempotency-Key — sends
+-- byte-identical content, never content re-derived from `orders` data
+-- that may have changed between attempts.
+ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS recipient_email text;
+ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS email_subject text;
+ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS email_html text;
+ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS payload_frozen_at timestamptz;
+
+-- R2 §四: the moment Node is first about to attempt a real delivery for
+-- this row (set by claim_webhook_notification_v1 the first time it claims
+-- a row whose first_dispatch_at is still NULL). Anchors the 23-hour
+-- automatic-retry cutoff, which is deliberately ONE HOUR inside Resend's
+-- documented 24-hour Idempotency-Key validity window — see §9 of the
+-- round's completion report for why 23h and not 24h.
+ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS first_dispatch_at timestamptz;
+
+-- dedupe_key composition varies by notification family (see the core
+-- migration's INSERT statements for the exact per-branch format), but is
+-- always built so that: (a) retries of the exact same terminal outcome
+-- reuse the identical key, and (b) two conceptually different
+-- notifications (different order/session/audience/notification_type, or —
+-- for the session/order-conflict alert — different attempted order_id)
+-- always get different keys.
 --
 -- Plain (non-partial) unique index: PostgreSQL unique indexes already
--- treat every NULL as distinct from every other NULL, so pre-existing rows
--- with no dedupe_key (if any ever existed) are unaffected, and this index
--- can be used directly as an ON CONFLICT (dedupe_key) inference target
--- without needing a matching partial-index predicate in the INSERT.
+-- treat every NULL as distinct from every other NULL, so this index can be
+-- used directly as an ON CONFLICT (dedupe_key) inference target.
 CREATE UNIQUE INDEX IF NOT EXISTS send_logs_dedupe_key_unique_idx
   ON public.send_logs (dedupe_key);
 
@@ -56,18 +88,25 @@ CREATE INDEX IF NOT EXISTS send_logs_claimable_idx
 -- =============================================================
 -- 2. claim_webhook_notification_v1 — claim claimable outbox rows
 -- =============================================================
--- Claims every send_logs row for (p_order_id, p_stripe_session_id) that is
--- pending, failed, or stuck in "processing" past its claim_expires_at
--- (i.e. a prior process died between claiming and completing). Each
--- claimed row gets a fresh, single-use claim_token and a short claim
--- lease; the caller must present that exact token back to
--- complete_webhook_notification_v1 or the claim is worthless.
+-- Two responsibilities, in order:
+--   (a) sweep: any row for THIS (order_id, stripe_session_id) that is
+--       still un-sent and has been "dispatching" for >= 23 hours since its
+--       first_dispatch_at is moved to status='dead_letter' — it will never
+--       be selected as claimable again by this or any future call, and
+--       Resend's own Idempotency-Key for it will itself have expired
+--       server-side by the time anyone could act on it anyway.
+--   (b) claim: of what's left, claim every row that is pending, failed, or
+--       stuck in "processing" past its claim_expires_at (i.e. a prior
+--       process died between claiming and completing). Each claimed row
+--       gets a fresh, single-use claim_token and a short claim lease; on a
+--       row's FIRST ever claim (first_dispatch_at IS NULL) that moment is
+--       recorded as first_dispatch_at.
 --
 -- Returns only routing metadata — dedupe_key/notification_type/audience/
--- claim_token/order_id — never email/subject/customer PII, so a caller
--- that only needs to know "what do I need to send" doesn't also receive
--- content it didn't ask for. The webhook still does its own separate
--- `orders` select to build the actual email body, exactly as before.
+-- claim_token/order_id — never email/subject/customer PII. The frozen
+-- payload (if any) is fetched separately via
+-- freeze_webhook_notification_payload_v1, which is also where a
+-- not-yet-frozen row gets its content written for the first time.
 CREATE OR REPLACE FUNCTION public.claim_webhook_notification_v1(
   p_order_id text,
   p_stripe_session_id text
@@ -93,6 +132,20 @@ BEGIN
       USING ERRCODE = 'P0004';
   END IF;
 
+  -- (a) 23-hour dead-letter sweep — see the function-level comment above.
+  UPDATE public.send_logs
+  SET status = 'dead_letter',
+      claim_token = NULL,
+      claim_expires_at = NULL,
+      error_message = 'provider_delivery_uncertain',
+      updated_at = now()
+  WHERE order_id = p_order_id
+    AND stripe_session_id = p_stripe_session_id
+    AND status IN ('pending', 'failed', 'processing')
+    AND first_dispatch_at IS NOT NULL
+    AND first_dispatch_at <= now() - interval '23 hours';
+
+  -- (b) claim whatever remains claimable.
   FOR r IN
     SELECT sl.id, sl.dedupe_key, sl.notification_type, sl.audience
     FROM public.send_logs sl
@@ -112,6 +165,11 @@ BEGIN
         claim_token = v_token,
         claim_expires_at = now() + interval '2 minutes',
         attempt_count = attempt_count + 1,
+        -- Only ever set on this row's FIRST claim; every later reclaim
+        -- (after a crash, an expired lease, or a failed send) leaves the
+        -- original moment untouched — that original moment is what the
+        -- 23-hour cutoff above is measured from.
+        first_dispatch_at = COALESCE(first_dispatch_at, now()),
         updated_at = now()
     WHERE id = r.id;
 
@@ -131,23 +189,100 @@ REVOKE ALL ON FUNCTION public.claim_webhook_notification_v1(text, text) FROM aut
 GRANT EXECUTE ON FUNCTION public.claim_webhook_notification_v1(text, text) TO service_role;
 
 -- =============================================================
--- 3. complete_webhook_notification_v1 — finish a claimed outbox row
+-- 3. freeze_webhook_notification_payload_v1 — first-writer-wins content
 -- =============================================================
--- Only succeeds if the caller presents the SAME claim_token that
--- claim_webhook_notification_v1 handed out for this dedupe_key — this is
--- what makes it safe for two overlapping webhook deliveries to both call
--- claim (the second one only picks up rows the first one's claim has
--- since expired) without ever completing the same physical send twice
--- under each other's authority.
+-- Called by Node immediately after claiming a row and building a
+-- CANDIDATE email from current `orders` data. If this row has never been
+-- frozen before, the candidate becomes authoritative and is stored. If it
+-- HAS already been frozen (a retry, possibly after `orders` data has since
+-- changed), the candidate is discarded and the ALREADY-frozen content is
+-- returned instead — so the actual bytes sent to Resend, and the
+-- Idempotency-Key request, are always self-consistent across every retry
+-- of the same outbox row.
 --
--- On success: status='sent', sent_at, provider_message_id recorded, claim
--- fields cleared. On failure: status='failed' (claimable again by a later
--- retry), error_message stored TRUNCATED (never raw provider payloads or
--- secrets), claim fields cleared.
+-- Only succeeds if p_claim_token matches the row's CURRENT claim_token —
+-- exactly the same ownership check as complete_webhook_notification_v1, so
+-- a stale/expired claim can never freeze (or read) a payload out from
+-- under whoever currently owns the row.
+CREATE OR REPLACE FUNCTION public.freeze_webhook_notification_payload_v1(
+  p_dedupe_key text,
+  p_claim_token uuid,
+  p_recipient_email text,
+  p_email_subject text,
+  p_email_html text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_row public.send_logs%ROWTYPE;
+BEGIN
+  IF p_dedupe_key IS NULL OR p_claim_token IS NULL THEN
+    RAISE EXCEPTION 'freeze_webhook_notification_payload_v1: p_dedupe_key and p_claim_token are required'
+      USING ERRCODE = 'P0006';
+  END IF;
+
+  SELECT * INTO v_row
+  FROM public.send_logs
+  WHERE dedupe_key = p_dedupe_key
+    AND claim_token = p_claim_token
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'reason', 'claim_token_mismatch_or_expired');
+  END IF;
+
+  IF v_row.payload_frozen_at IS NULL THEN
+    UPDATE public.send_logs
+    SET recipient_email = p_recipient_email,
+        email_subject = p_email_subject,
+        email_html = p_email_html,
+        payload_frozen_at = now(),
+        updated_at = now()
+    WHERE dedupe_key = p_dedupe_key
+      AND claim_token = p_claim_token
+    RETURNING * INTO v_row;
+  END IF;
+  -- else: already frozen — v_row already holds the existing payload as
+  -- read above; the candidate this call was passed is silently discarded.
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'frozen', jsonb_build_object(
+      'recipient_email', v_row.recipient_email,
+      'subject', v_row.email_subject,
+      'html', v_row.email_html
+    )
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text) FROM anon;
+REVOKE ALL ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text) TO service_role;
+
+-- =============================================================
+-- 4. complete_webhook_notification_v1 — finish a claimed outbox row
+-- =============================================================
+-- R2: the old boolean p_success is replaced with a 3-way p_outcome, so
+-- Node can express a THIRD terminal state — 'dead_letter' — for a row it
+-- has determined right now, deterministically, can never be delivered
+-- (e.g. the order has no customer email on file at all: retrying will
+-- never produce one). This is distinct from the 23-hour sweep in
+-- claim_webhook_notification_v1, which dead-letters rows that simply ran
+-- out of automatic-retry time; here Node is asserting "there is no point
+-- ever retrying this specific row again", immediately.
+--
+-- Only succeeds if the caller presents the SAME claim_token that
+-- claim_webhook_notification_v1 (or freeze_webhook_notification_payload_v1
+-- re-reading it) is currently honoring for this dedupe_key.
 CREATE OR REPLACE FUNCTION public.complete_webhook_notification_v1(
   p_dedupe_key text,
   p_claim_token uuid,
-  p_success boolean,
+  p_outcome text,
   p_provider_message_id text DEFAULT NULL,
   p_error_message text DEFAULT NULL
 )
@@ -164,7 +299,12 @@ BEGIN
       USING ERRCODE = 'P0005';
   END IF;
 
-  IF p_success THEN
+  IF p_outcome NOT IN ('sent', 'failed', 'dead_letter') THEN
+    RAISE EXCEPTION 'complete_webhook_notification_v1: invalid p_outcome: %', p_outcome
+      USING ERRCODE = 'P0007';
+  END IF;
+
+  IF p_outcome = 'sent' THEN
     UPDATE public.send_logs
     SET status = 'sent',
         sent_at = now(),
@@ -174,12 +314,25 @@ BEGIN
         error_message = NULL,
         updated_at = now()
     WHERE dedupe_key = p_dedupe_key
-      AND claim_token = p_claim_token;
-  ELSE
+      AND claim_token = p_claim_token
+      -- A 'sent' outcome always requires an actual provider message id —
+      -- never let a caller mark a row sent with no proof of delivery.
+      AND p_provider_message_id IS NOT NULL
+      AND length(trim(p_provider_message_id)) > 0;
+  ELSIF p_outcome = 'failed' THEN
     UPDATE public.send_logs
     SET status = 'failed',
         -- Never persist a raw provider payload or secret — truncate hard.
         error_message = left(coalesce(p_error_message, 'unknown_error'), 500),
+        claim_token = NULL,
+        claim_expires_at = NULL,
+        updated_at = now()
+    WHERE dedupe_key = p_dedupe_key
+      AND claim_token = p_claim_token;
+  ELSE -- 'dead_letter'
+    UPDATE public.send_logs
+    SET status = 'dead_letter',
+        error_message = left(coalesce(p_error_message, 'manual_action_required'), 500),
         claim_token = NULL,
         claim_expires_at = NULL,
         updated_at = now()
@@ -190,18 +343,18 @@ BEGIN
   GET DIAGNOSTICS v_updated = ROW_COUNT;
 
   IF v_updated = 0 THEN
-    -- Claim token didn't match anything claimable right now — either it
-    -- already expired and got re-claimed by someone else, or it was
-    -- already completed. The caller must NOT treat this as "I completed
-    -- it" or re-attempt sending under the assumption it still owns it.
+    -- Claim token didn't match anything claimable right now (already
+    -- expired and re-claimed by someone else, already completed, or —
+    -- for 'sent' — no usable provider_message_id was supplied). The
+    -- caller must NOT treat this as "I completed it".
     RETURN jsonb_build_object('ok', false, 'reason', 'claim_token_mismatch_or_expired');
   END IF;
 
   -- Backward-compat: keep the legacy orders.email_customer_sent /
-  -- email_ops_sent booleans in sync on real success, for any existing
-  -- back-office code that still reads them — but per B-03/B-04 they are
-  -- NOT read by this outbox's own claim logic, only written as a mirror.
-  IF p_success THEN
+  -- email_ops_sent booleans in sync on real delivery success ONLY — never
+  -- on 'failed' or 'dead_letter'. Per B-03/B-04 these are a write-only
+  -- mirror for back-office code; nothing in this outbox reads them.
+  IF p_outcome = 'sent' THEN
     UPDATE public.orders o
     SET email_customer_sent = true
     FROM public.send_logs sl
@@ -214,17 +367,17 @@ BEGIN
     FROM public.send_logs sl
     WHERE sl.dedupe_key = p_dedupe_key
       AND o.order_id = sl.order_id
-      AND sl.notification_type IN ('ops_booking_confirmed', 'ops_manual_review');
+      AND sl.notification_type IN ('ops_booking_confirmed', 'ops_manual_review', 'ops_session_order_conflict');
   END IF;
 
   RETURN jsonb_build_object('ok', true);
 END;
 $function$;
 
-REVOKE ALL ON FUNCTION public.complete_webhook_notification_v1(text, uuid, boolean, text, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.complete_webhook_notification_v1(text, uuid, boolean, text, text) FROM anon;
-REVOKE ALL ON FUNCTION public.complete_webhook_notification_v1(text, uuid, boolean, text, text) FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.complete_webhook_notification_v1(text, uuid, boolean, text, text) TO service_role;
+REVOKE ALL ON FUNCTION public.complete_webhook_notification_v1(text, uuid, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.complete_webhook_notification_v1(text, uuid, text, text, text) FROM anon;
+REVOKE ALL ON FUNCTION public.complete_webhook_notification_v1(text, uuid, text, text, text) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.complete_webhook_notification_v1(text, uuid, text, text, text) TO service_role;
 
 -- Explicitly NOT modified: public.lock_inventory_v2 stays exactly as-is.
 -- Explicitly NOT created: any webhook_events table.

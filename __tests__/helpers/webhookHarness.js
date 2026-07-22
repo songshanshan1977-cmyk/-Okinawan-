@@ -7,7 +7,7 @@
 // Stripe(...)` are re-created from the fresh mocks every time, instead of
 // leaking state between tests).
 
-function loadWebhookHandler({ supabase, constructEvent, resendSend }) {
+function loadWebhookHandler({ supabase, constructEvent, resendSend, notificationContentOverride }) {
   let handlerModule;
 
   jest.isolateModules(() => {
@@ -25,10 +25,30 @@ function loadWebhookHandler({ supabase, constructEvent, resendSend }) {
     });
 
     jest.doMock("resend", () => ({
+      // Resend 4.3.0's Resend class; .send(payload, {idempotencyKey}) is a
+      // real two-argument call in production code — the mock just records
+      // whatever args it's given, callers assert on resendSend.mock.calls.
       Resend: jest.fn(function ResendMock() {
-        return { emails: { send: resendSend || jest.fn(() => Promise.resolve({ id: "mock-email-id" })) } };
+        return { emails: { send: resendSend || jest.fn(() => Promise.resolve({ data: { id: "mock-email-id" }, error: null })) } };
       }),
     }));
+
+    // Only used by tests that need to force a notification-content edge
+    // case (e.g. an ops row with no resolvable recipient) that the real
+    // notificationContent.js module can't naturally produce because
+    // OPS_EMAIL_TO always falls back to a hardcoded address. jest.doMock's
+    // registration is NOT automatically cleared by isolateModules alone —
+    // without the explicit dontMock in the else branch, a prior test that
+    // used an override would silently leak its fake module into every
+    // later test in the same file.
+    if (notificationContentOverride) {
+      jest.doMock("../../lib/webhook/notificationContent", () => ({
+        buildNotificationContent: notificationContentOverride,
+        NOTIFICATION_TYPES: [],
+      }));
+    } else {
+      jest.dontMock("../../lib/webhook/notificationContent");
+    }
 
     handlerModule = require("../../pages/api/stripe-webhook");
   });

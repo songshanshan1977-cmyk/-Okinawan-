@@ -167,15 +167,28 @@ BEGIN
     ELSE
       -- Same Stripe Session somehow bound to a DIFFERENT order_id than
       -- this call is claiming. Never happens in the legitimate flow — do
-      -- not touch inventory/payment state for either order, no new write
-      -- (this Session already has its own payments row under the other
-      -- order_id; writing a second row here would falsely double-count
-      -- the same real-world Stripe payment).
+      -- not touch inventory/payment state for either order, no new
+      -- payments row (this Session already has its own payments row under
+      -- the other order_id; writing a second row here would falsely
+      -- double-count the same real-world Stripe payment). This anomaly
+      -- itself IS worth an ops-only alert (§六 of the round's fix
+      -- instructions) — insert it keyed on (session_id, ATTEMPTED
+      -- order_id) so it's found by the claim call the webhook makes for
+      -- p_order_id, and so a repeated delivery of the same conflicting
+      -- event can't create it twice.
+      INSERT INTO public.send_logs
+        (order_id, stripe_session_id, audience, notification_type, dedupe_key, status)
+      VALUES
+        (p_order_id, p_stripe_session_id, 'ops', 'ops_session_order_conflict',
+         p_stripe_session_id || ':' || p_order_id || ':ops:session_order_conflict', 'pending')
+      ON CONFLICT (dedupe_key) DO NOTHING;
+
       RETURN jsonb_build_object(
         'result', 'duplicate_payment_conflict',
-        'reason', 'stripe_session_id_bound_to_different_order',
-        'order_id', v_order.order_id,
-        'inventory_status', v_order.inventory_status
+        'reason', 'session_order_conflict',
+        'order_id', p_order_id,
+        'inventory_status', v_order.inventory_status,
+        'existing_order_id', v_existing_payment_order_id
       );
     END IF;
   END IF;

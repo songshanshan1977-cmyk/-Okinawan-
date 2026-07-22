@@ -79,4 +79,46 @@ describe("buildNotificationContent", () => {
     });
     expect(r.mail.html).not.toContain(fullId);
   });
+
+  describe("17/18. ops_session_order_conflict (R2 §六)", () => {
+    test("ops address, mentions both order ids, never promises a booking", () => {
+      const r = buildNotificationContent({
+        notificationType: "ops_session_order_conflict",
+        order: ORDER,
+        stripeSessionId: "cs_test_conflict_session_id_1234567890",
+        opsEmailTo: "ops@x.com",
+        attemptedOrderId: "ORD-ATTEMPTED",
+        existingOrderId: "ORD-EXISTING",
+      });
+      expect(r.to).toBe("ops@x.com");
+      expect(r.mail.html).toContain("ORD-ATTEMPTED");
+      expect(r.mail.html).toContain("ORD-EXISTING");
+      expect(r.mail.subject).not.toContain("预约确认");
+    });
+
+    test("Session ID never appears in full in the conflict email body", () => {
+      const fullId = "cs_test_conflict_session_id_1234567890";
+      const r = buildNotificationContent({
+        notificationType: "ops_session_order_conflict",
+        order: ORDER,
+        stripeSessionId: fullId,
+        opsEmailTo: "ops@x.com",
+        attemptedOrderId: "ORD-ATTEMPTED",
+        existingOrderId: "ORD-EXISTING",
+      });
+      expect(r.mail.html).not.toContain(fullId);
+    });
+
+    test("does not depend on `order` content at all (works even with a minimal order object)", () => {
+      const r = buildNotificationContent({
+        notificationType: "ops_session_order_conflict",
+        order: { order_id: "ORD-ATTEMPTED" },
+        stripeSessionId: "cs_test_x",
+        opsEmailTo: "ops@x.com",
+        attemptedOrderId: "ORD-ATTEMPTED",
+        existingOrderId: "ORD-EXISTING",
+      });
+      expect(r.to).toBe("ops@x.com");
+    });
+  });
 });
