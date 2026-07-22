@@ -1,8 +1,26 @@
 // pages/api/stripe-webhook.js
+//
+// v1 fail-safe rewrite (sandbox/webhook-fail-safe-v1). All business-content
+// writes (orders/payments/inventory) happen inside the single atomic
+// process_checkout_payment_v1 RPC (see supabase/migrations/
+// 20260722120000_webhook_fail_safe_v1.sql) — this handler's job is limited
+// to: verify the Stripe signature, filter/validate the event, resolve which
+// order it refers to, call the RPC, and dispatch the correct email template
+// based on the RPC's result. It never marks an order "paid" on its own,
+// and no exception path returns 200 — only genuinely inert cases
+// (unrelated event, unpaid session, unresolvable order_id) do.
 
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
+
+const { resolveOrderId, RESULT } = require("../../lib/webhook/resolveOrderId");
+const {
+  buildCustomerSuccessEmail,
+  buildOpsSuccessEmail,
+  buildCustomerPendingEmail,
+  buildOpsUrgentEmail,
+} = require("../../lib/webhook/emailTemplates");
 
 export const config = { api: { bodyParser: false } };
 
@@ -21,37 +39,8 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 
 const RESEND_FROM =
   process.env.RESEND_FROM || "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
+const OPS_EMAIL_TO = process.env.NOTIFY_TO_EMAIL || "songshanshan1977@gmail.com";
 
-// ✅ 修复域名：改用自定义子域名，确保中国、香港、台湾用户能打开感谢页
-const THANK_YOU_URL = (orderId) =>
-  `https://booking.xn--okinawa-n14kh45a.com/booking?step=5&order_id=${encodeURIComponent(
-    orderId
-  )}`;
-
-// ✅ 车型 UUID -> 中文（来自你截图 cars 表）
-const CAR_MODEL_ZH_MAP = {
-  "453df662-d350-4ab9-b811-61ffcda40d4b": "海狮车型",
-  "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca": "经济型轿车",
-  "82cf604f-e688-49fe-aecf-69894a01f6cb": "豪华 阿尔法",
-};
-
-function getCarModelZh(carModelId) {
-  if (!carModelId) return "-";
-  return CAR_MODEL_ZH_MAP[carModelId] || carModelId; // 兜底：未知就显示原值
-}
-
-function getDriverLangZh(driverLang) {
-  const v = String(driverLang || "ZH").toUpperCase();
-  return v === "JP" ? "日文司机" : "中文司机";
-}
-
-function money(v) {
-  if (v === null || v === undefined || v === "") return "-";
-  const n = Number(v);
-  return Number.isFinite(n) ? `${n} RMB` : `${v} RMB`;
-}
-
-// 读取 raw body
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -60,224 +49,83 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// ================= 邮件模板（已修正域名与日期） =================
-function buildCustomerEmail(order) {
-  const deposit = order.deposit_amount ?? 500;
-  const total = order.total_price ?? null;
-  const balance =
-    order.balance_due ?? (total !== null ? Number(total) - Number(deposit) : null);
-
-  // ✅ 补全日期逻辑：如果有结束日期且不等于开始日期，显示范围
-  const dateText =
-    order.end_date && order.end_date !== order.start_date
-      ? `${order.start_date} → ${order.end_date}`
-      : order.start_date || "-";
-
-  const carZh = getCarModelZh(order.car_model_id);
-  const langZh = getDriverLangZh(order.driver_lang);
-
-  const btnUrl = THANK_YOU_URL(order.order_id);
-
-  return {
-    subject: `HonestOki 预约确认｜订单 ${order.order_id}`,
-    html: `
-      <div style="font-family:Arial,sans-serif;line-height:1.7;color:#111">
-        <h2 style="margin:0 0 12px 0;">预约已确认（押金已支付）</h2>
-
-        <p><b>订单号：</b>${order.order_id || "-"}</p>
-        <p><b>用车日期：</b>${dateText}</p>
-        <p><b>车型：</b>${carZh}</p>
-        <p><b>司机语言：</b>${langZh}</p>
-        <p><b>包车时长：</b>${order.duration ? `${order.duration} 小时` : "-"}</p>
-
-        <hr style="border:none;border-top:1px solid #eee;margin:14px 0;" />
-
-        <p><b>全款：</b>${money(total)}</p>
-        <p><b>押金：</b>${money(deposit)}（已支付）</p>
-        <p><b>尾款：</b>${
-          balance !== null
-            ? `${money(balance)}（用车当日支付司机）`
-            : "用车当日支付司机"
-        }</p>
-
-        <hr style="border:none;border-top:1px solid #eee;margin:14px 0;" />
-
-        <p><b>客人名字：</b>${order.name || "-"}</p>
-        <p><b>电话：</b>${order.phone || "-"}</p>
-        <p><b>微信：</b>${order.wechat || "-"}</p>
-        <p><b>邮箱：</b>${order.email || "-"}</p>
-
-        <hr style="border:none;border-top:1px solid #eee;margin:14px 0;" />
-
-        <p>若手机端支付宝未自动跳回，请点击确认单按钮查看。</p>
-
-        <div style="margin-top:14px;">
-          <a href="${btnUrl}"
-             style="
-               display:inline-block;
-               padding:12px 18px;
-               background:#2f6fec;
-               color:#fff;
-               text-decoration:none;
-               border-radius:8px;
-               font-weight:700;
-             ">
-            查看新订单确认单（感谢页）
-          </a>
-        </div>
-
-      </div>
-    `,
-  };
-}
-
-function buildOpsEmail(order) {
-  const deposit = order.deposit_amount ?? 500;
-  const total = order.total_price ?? null;
-  const balance =
-    order.balance_due ?? (total !== null ? Number(total) - Number(deposit) : null);
-
-  // ✅ 补全日期逻辑
-  const dateText =
-    order.end_date && order.end_date !== order.start_date
-      ? `${order.start_date} → ${order.end_date}`
-      : order.start_date || "-";
-
-  const carZh = getCarModelZh(order.car_model_id);
-  const langZh = getDriverLangZh(order.driver_lang);
-
-  return {
-    subject: `【新订单】${order.order_id}`,
-    html: `
-      <div style="font-family:Arial,sans-serif;line-height:1.7;color:#111">
-        <h2 style="margin:0 0 12px 0;">新订单通知</h2>
-
-        <p><b>订单号：</b>${order.order_id || "-"}</p>
-        <p><b>用车日期：</b>${dateText}</p>
-        <p><b>车型：</b>${carZh}</p>
-        <p><b>司机语言：</b>${langZh}</p>
-        <p><b>包车时长：</b>${order.duration ? `${order.duration} 小时` : "-"}</p>
-
-        <hr style="border:none;border-top:1px solid #eee;margin:14px 0;" />
-
-        <p><b>全款：</b>${money(total)}</p>
-        <p><b>押金：</b>${money(deposit)}（已支付）</p>
-        <p><b>尾款：</b>${balance !== null ? money(balance) : "-"}</p>
-
-        <hr style="border:none;border-top:1px solid #eee;margin:14px 0;" />
-
-        <p><b>客人名字：</b>${order.name || "-"}</p>
-        <p><b>电话：</b>${order.phone || "-"}</p>
-        <p><b>微信：</b>${order.wechat || "-"}</p>
-        <p><b>邮箱：</b>${order.email || "-"}</p>
-      </div>
-    `,
-  };
-}
-
-// =============== 邮件幂等（不改） ===============
-async function sendCustomerEmailOnce(order) {
-  console.info("[webhook] sendCustomerEmailOnce start");
-
-  if (!order?.email) {
-    console.info("[webhook] sendCustomerEmailOnce skip: no email");
-    return;
-  }
-  if (order.email_customer_sent) {
-    console.info("[webhook] sendCustomerEmailOnce skip: already true");
-    return;
-  }
+// Claim-then-send: same per-order boolean-flag idempotency pattern as the
+// pre-v1 webhook. Returns false only when THIS call attempted a real send
+// and it failed — the caller then makes the whole webhook return 5xx so
+// Stripe redelivers and another attempt happens. The claim flag is rolled
+// back to false on failure so the retry isn't blocked by its own claim.
+async function claimAndSend({ order, flagColumn, to, mail }) {
+  if (!to) return true; // nothing to send to is not a delivery failure
+  if (order[flagColumn]) return true; // already sent
 
   const { data, error } = await supabase
     .from("orders")
-    .update({ email_customer_sent: true })
+    .update({ [flagColumn]: true })
     .eq("order_id", order.order_id)
-    .eq("email_customer_sent", false)
+    .eq(flagColumn, false)
     .select("order_id");
 
-  if (error) {
-    console.info("[webhook] sendCustomerEmailOnce claim error =", error);
-    return;
-  }
-  if (!data || data.length === 0) {
-    console.info("[webhook] sendCustomerEmailOnce claim skipped (no rows)");
-    return;
-  }
-
-  const mail = buildCustomerEmail(order);
+  if (error) return false;
+  if (!data || data.length === 0) return true; // lost the claim to a concurrent delivery
 
   try {
-    await resend.emails.send({
-      from: RESEND_FROM,
+    await resend.emails.send({ from: RESEND_FROM, to, subject: mail.subject, html: mail.html });
+    return true;
+  } catch (err) {
+    await supabase.from("orders").update({ [flagColumn]: false }).eq("order_id", order.order_id);
+    return false;
+  }
+}
+
+async function sendEmailsForOutcome({ order, result, inventoryStatus, reason, stripeSessionId }) {
+  // "locked" always gets the success template. "already_processed" replays
+  // whatever the ORIGINAL processing actually decided (via inventoryStatus).
+  // "failed" and "duplicate_payment_conflict" ALWAYS get the pending/urgent
+  // template, even if inventoryStatus happens to read "locked" (that would
+  // mean a different, earlier session already succeeded for this order —
+  // this second/conflicting session still needs human review, not a second
+  // "booking confirmed" email).
+  const useSuccessTemplate =
+    result === "locked" || (result === "already_processed" && inventoryStatus === "locked");
+
+  if (useSuccessTemplate) {
+    const okCustomer = await claimAndSend({
+      order,
+      flagColumn: "email_customer_sent",
       to: order.email,
-      subject: mail.subject,
-      html: mail.html,
+      mail: buildCustomerSuccessEmail(order),
     });
-    console.info("[webhook] sendCustomerEmailOnce done");
-  } catch (err) {
-    console.info("[webhook] sendCustomerEmailOnce resend error =", err);
-    await supabase
-      .from("orders")
-      .update({ email_customer_sent: false })
-      .eq("order_id", order.order_id);
-  }
-}
-
-async function sendOpsEmailOnce(order) {
-  console.info("[webhook] sendOpsEmailOnce start");
-
-  if (order.email_ops_sent) {
-    console.info("[webhook] sendOpsEmailOnce skip: already true");
-    return;
-  }
-
-  const { data, error } = await supabase
-    .from("orders")
-    .update({ email_ops_sent: true })
-    .eq("order_id", order.order_id)
-    .eq("email_ops_sent", false)
-    .select("order_id");
-
-  if (error) {
-    console.info("[webhook] sendOpsEmailOnce claim error =", error);
-    return;
-  }
-  if (!data || data.length === 0) {
-    console.info("[webhook] sendOpsEmailOnce claim skipped (no rows)");
-    return;
-  }
-
-  const mail = buildOpsEmail(order);
-
-  try {
-    await resend.emails.send({
-      from: RESEND_FROM,
-      to: "songshanshan1977@gmail.com",
-      subject: mail.subject,
-      html: mail.html,
+    const okOps = await claimAndSend({
+      order,
+      flagColumn: "email_ops_sent",
+      to: OPS_EMAIL_TO,
+      mail: buildOpsSuccessEmail(order),
     });
-    console.info("[webhook] sendOpsEmailOnce done");
-  } catch (err) {
-    console.info("[webhook] sendOpsEmailOnce resend error =", err);
-    await supabase
-      .from("orders")
-      .update({ email_ops_sent: false })
-      .eq("order_id", order.order_id);
+    return okCustomer && okOps;
   }
+
+  // failed / duplicate_payment_conflict: money received, needs human review.
+  const okCustomer = await claimAndSend({
+    order,
+    flagColumn: "email_customer_sent",
+    to: order.email,
+    mail: buildCustomerPendingEmail(order),
+  });
+  const okOps = await claimAndSend({
+    order,
+    flagColumn: "email_ops_sent",
+    to: OPS_EMAIL_TO,
+    mail: buildOpsUrgentEmail(order, reason, stripeSessionId),
+  });
+  return okCustomer && okOps;
 }
 
-// ================= driver_lang 规范（库存用，不改） =================
-function normalizeDriverLang(lang) {
-  const v = String(lang || "ZH").toUpperCase();
-  return v === "JP" ? "JP" : "ZH";
-}
+const KNOWN_RESULTS = new Set(["locked", "failed", "already_processed", "duplicate_payment_conflict"]);
 
-// ================= 主 webhook =================
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   let event;
-
   try {
     const buf = await buffer(req);
     const sig = req.headers["stripe-signature"];
@@ -287,94 +135,94 @@ export default async function handler(req, res) {
   }
 
   try {
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-
-      console.info("[webhook] type =", event.type);
-      console.info("[webhook] livemode =", event.livemode);
-      console.info("[webhook] SUPABASE_URL =", process.env.NEXT_PUBLIC_SUPABASE_URL);
-      console.info("[webhook] RESEND_FROM =", RESEND_FROM);
-
-      const orderId =
-        session?.metadata?.order_id || session?.client_reference_id;
-
-      console.info("[webhook] orderId =", orderId);
-
-      if (!orderId) return res.status(200).json({ ok: true });
-
-      const { data: order, error: orderErr } = await supabase
-        .from("orders")
-        .select(
-          `
-          order_id,
-          start_date,
-          end_date,
-          car_model_id,
-          driver_lang,
-          duration,
-          email,
-          name,
-          phone,
-          wechat,
-          total_price,
-          deposit_amount,
-          balance_due,
-          inventory_locked,
-          email_customer_sent,
-          email_ops_sent
-        `
-        )
-        .eq("order_id", orderId)
-        .single();
-
-      console.info("[webhook] orderErr =", orderErr);
-      console.info("[webhook] orderFound =", !!order);
-
-      if (!order) return res.status(200).json({ ok: true });
-
-      console.info("[webhook] email =", order.email);
-      console.info("[webhook] email_customer_sent =", order.email_customer_sent);
-      console.info("[webhook] email_ops_sent =", order.email_ops_sent);
-      console.info("[webhook] inventory_locked =", order.inventory_locked);
-
-      // ✅ 唯一库存幂等判断（不改）
-      if (!order.inventory_locked) {
-        console.info("[webhook] lock_inventory_v2 start");
-        const { error } = await supabase.rpc("lock_inventory_v2", {
-          p_start_date: order.start_date,
-          p_end_date: order.end_date || order.start_date,
-          p_car_model_id: order.car_model_id,
-          p_driver_lang: normalizeDriverLang(order.driver_lang),
-        });
-
-        console.info("[webhook] lock_inventory_v2 error =", error);
-
-        if (!error) {
-          const { error: updErr } = await supabase
-            .from("orders")
-            .update({ inventory_locked: true })
-            .eq("order_id", order.order_id)
-            .eq("inventory_locked", false);
-
-          console.info("[webhook] inventory_locked update error =", updErr);
-        }
-      }
-
-      // 付款成功 → draft 升级为 paid（卡口：只有这里才能让订单对后台可见）
-      await supabase
-        .from("orders")
-        .update({ payment_status: "paid" })
-        .eq("order_id", order.order_id);
-
-      await sendCustomerEmailOnce(order);
-      await sendOpsEmailOnce(order);
-
+    if (event.type !== "checkout.session.completed") {
       return res.status(200).json({ ok: true });
     }
 
-    return res.status(200).json({ ok: true });
+    const session = event.data.object;
+
+    if (session?.payment_status !== "paid") {
+      console.info(
+        "[webhook] session not paid, payment_status =",
+        session?.payment_status,
+        "event.id =",
+        event.id
+      );
+      return res.status(200).json({ ok: true });
+    }
+
+    const metadataOrderId = session?.metadata?.order_id || null;
+    const clientReferenceId = session?.client_reference_id || null;
+
+    const resolved = await resolveOrderId({ supabase, metadataOrderId, clientReferenceId });
+
+    if (resolved.status === RESULT.MISSING) {
+      console.info("[webhook] order_id missing, event.id =", event.id, "session.id =", session?.id);
+      return res.status(200).json({ ok: true });
+    }
+
+    if (resolved.status === RESULT.UNRESOLVABLE_CONFLICT) {
+      console.error(
+        "[webhook][SECURITY] unresolvable order_id conflict, event.id =",
+        event.id,
+        "session.id =",
+        session?.id
+      );
+      return res.status(500).json({ error: "order_id_conflict" });
+    }
+
+    const orderId = resolved.orderId;
+    const idSourceConflict = resolved.status === RESULT.RESOLVED_CONFLICT;
+
+    const { data: rpcResult, error: rpcError } = await supabase.rpc("process_checkout_payment_v1", {
+      p_order_id: orderId,
+      p_stripe_session_id: session.id,
+      p_amount: session.amount_total,
+      p_currency: session.currency,
+      p_id_source_conflict: idSourceConflict,
+    });
+
+    if (rpcError) {
+      console.error("[webhook] process_checkout_payment_v1 failed:", rpcError.message);
+      return res.status(500).json({ error: "processing_failed" });
+    }
+
+    const { result, reason, inventory_status: inventoryStatus } = rpcResult || {};
+
+    if (!KNOWN_RESULTS.has(result)) {
+      console.error("[webhook] unexpected RPC result shape:", result);
+      return res.status(500).json({ error: "unexpected_rpc_result" });
+    }
+
+    const { data: order, error: orderErr } = await supabase
+      .from("orders")
+      .select(
+        `order_id, start_date, end_date, car_model_id, driver_lang, duration, email, name, phone,
+         wechat, total_price, deposit_amount, balance_due, email_customer_sent, email_ops_sent`
+      )
+      .eq("order_id", orderId)
+      .single();
+
+    if (orderErr || !order) {
+      console.error("[webhook] post-RPC order lookup failed for email dispatch");
+      return res.status(500).json({ error: "order_lookup_failed" });
+    }
+
+    const emailsOk = await sendEmailsForOutcome({
+      order,
+      result,
+      inventoryStatus: inventoryStatus || (result === "locked" ? "locked" : "failed"),
+      reason,
+      stripeSessionId: session.id,
+    });
+
+    if (!emailsOk) {
+      return res.status(500).json({ error: "email_delivery_failed" });
+    }
+
+    return res.status(200).json({ ok: true, result });
   } catch (e) {
-    console.info("[webhook] handler catch =", e);
-    return res.status(200).json({ ok: true });
+    console.error("[webhook] unhandled exception (detail withheld from response)");
+    return res.status(500).json({ error: "internal_error" });
   }
 }
