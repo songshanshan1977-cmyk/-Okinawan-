@@ -1,26 +1,30 @@
 // pages/api/stripe-webhook.js
 //
-// v1 fail-safe rewrite (sandbox/webhook-fail-safe-v1). All business-content
-// writes (orders/payments/inventory) happen inside the single atomic
-// process_checkout_payment_v1 RPC (see supabase/migrations/
-// 20260722120000_webhook_fail_safe_v1.sql) — this handler's job is limited
-// to: verify the Stripe signature, filter/validate the event, resolve which
-// order it refers to, call the RPC, and dispatch the correct email template
-// based on the RPC's result. It never marks an order "paid" on its own,
-// and no exception path returns 200 — only genuinely inert cases
-// (unrelated event, unpaid session, unresolvable order_id) do.
+// v1 fail-safe rewrite (sandbox/webhook-fail-safe-v1), revised in the
+// Codex Draft-PR-#2 blocking-fix round. All business-content writes
+// (orders/payments/inventory/notification outbox) happen inside the
+// single atomic process_checkout_payment_v1 RPC (see supabase/migrations/
+// 20260722120000_webhook_fail_safe_v1.sql). This handler's job is limited
+// to: verify the Stripe signature, filter/validate the event, resolve
+// which order it refers to, call the RPC, then claim/send/complete every
+// outstanding notification via the send_logs outbox (see
+// 20260722130000_webhook_notification_outbox_v1.sql) — it never marks an
+// order "paid" on its own, never decides email-sent state via the legacy
+// per-order boolean email flags on orders (see B-03/B-04 in the round's
+// completion report), and no exception path returns 200 — only genuinely
+// inert cases (unrelated event, unpaid session, unresolvable order_id) do.
+//
+// B-05: no log line in this file may contain a complete Stripe Session ID,
+// Event ID, PaymentIntent ID, or customer PII (email/phone/name) — always
+// go through maskId() first.
 
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
 
 const { resolveOrderId, RESULT } = require("../../lib/webhook/resolveOrderId");
-const {
-  buildCustomerSuccessEmail,
-  buildOpsSuccessEmail,
-  buildCustomerPendingEmail,
-  buildOpsUrgentEmail,
-} = require("../../lib/webhook/emailTemplates");
+const { buildNotificationContent } = require("../../lib/webhook/notificationContent");
+const { maskId } = require("../../lib/webhook/maskId");
 
 export const config = { api: { bodyParser: false } };
 
@@ -49,75 +53,123 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-// Claim-then-send: same per-order boolean-flag idempotency pattern as the
-// pre-v1 webhook. Returns false only when THIS call attempted a real send
-// and it failed — the caller then makes the whole webhook return 5xx so
-// Stripe redelivers and another attempt happens. The claim flag is rolled
-// back to false on failure so the retry isn't blocked by its own claim.
-async function claimAndSend({ order, flagColumn, to, mail }) {
-  if (!to) return true; // nothing to send to is not a delivery failure
-  if (order[flagColumn]) return true; // already sent
-
-  const { data, error } = await supabase
-    .from("orders")
-    .update({ [flagColumn]: true })
-    .eq("order_id", order.order_id)
-    .eq(flagColumn, false)
-    .select("order_id");
-
-  if (error) return false;
-  if (!data || data.length === 0) return true; // lost the claim to a concurrent delivery
-
-  try {
-    await resend.emails.send({ from: RESEND_FROM, to, subject: mail.subject, html: mail.html });
-    return true;
-  } catch (err) {
-    await supabase.from("orders").update({ [flagColumn]: false }).eq("order_id", order.order_id);
-    return false;
-  }
+function safeTruncate(msg, max = 300) {
+  const s = msg ? String(msg) : "unknown_error";
+  return s.length > max ? `${s.slice(0, max)}...` : s;
 }
 
-async function sendEmailsForOutcome({ order, result, inventoryStatus, reason, stripeSessionId }) {
-  // "locked" always gets the success template. "already_processed" replays
-  // whatever the ORIGINAL processing actually decided (via inventoryStatus).
-  // "failed" and "duplicate_payment_conflict" ALWAYS get the pending/urgent
-  // template, even if inventoryStatus happens to read "locked" (that would
-  // mean a different, earlier session already succeeded for this order —
-  // this second/conflicting session still needs human review, not a second
-  // "booking confirmed" email).
-  const useSuccessTemplate =
-    result === "locked" || (result === "already_processed" && inventoryStatus === "locked");
-
-  if (useSuccessTemplate) {
-    const okCustomer = await claimAndSend({
-      order,
-      flagColumn: "email_customer_sent",
-      to: order.email,
-      mail: buildCustomerSuccessEmail(order),
-    });
-    const okOps = await claimAndSend({
-      order,
-      flagColumn: "email_ops_sent",
-      to: OPS_EMAIL_TO,
-      mail: buildOpsSuccessEmail(order),
-    });
-    return okCustomer && okOps;
+// B-03: the installed Resend SDK (3.5.0) response shape is
+// `{ data: { id } | null, error: ErrorResponse | null }` — a resolved
+// promise is NOT proof of delivery. All three of these must be treated as
+// failures, not just a thrown/rejected promise:
+//   - the promise rejects (network/SDK-level failure)
+//   - it resolves with a non-null `error`
+//   - it resolves with no `data` (or `data.id` missing) AND no `error`
+//     either (defensive: an SDK/API contract violation should never be
+//     silently treated as success)
+async function sendViaResend({ to, mail }) {
+  let response;
+  try {
+    response = await resend.emails.send({ from: RESEND_FROM, to, subject: mail.subject, html: mail.html });
+  } catch (err) {
+    return { ok: false, errorMessage: safeTruncate(err && err.message) };
   }
 
-  // failed / duplicate_payment_conflict: money received, needs human review.
-  const okCustomer = await claimAndSend({
-    order,
-    flagColumn: "email_customer_sent",
-    to: order.email,
-    mail: buildCustomerPendingEmail(order),
+  const { data, error } = response || {};
+  if (error) {
+    return { ok: false, errorMessage: safeTruncate(error.message || JSON.stringify(error)) };
+  }
+  if (!data || !data.id) {
+    return { ok: false, errorMessage: "resend_response_missing_message_id" };
+  }
+  return { ok: true, providerMessageId: data.id };
+}
+
+// B-04: claim every send_logs outbox row still owed for this
+// (order_id, stripe_session_id) pair, send each one, and mark it
+// sent/failed via complete_webhook_notification_v1 using the exact
+// claim_token the claim handed out. Recovers correctly no matter where a
+// PREVIOUS attempt died:
+//   - died before claiming at all -> row is still 'pending', claimed fresh
+//   - died between claim and calling Resend -> claim_expires_at lapses
+//     (2 min lease), a later retry's claim picks the row back up
+//   - died between Resend accepting the email and calling complete() ->
+//     same recovery path (claim_expires_at lapses); THIS is the one
+//     interruption window this round's design does not fully close, see
+//     the completion report's Resend-idempotency-key limitation note —
+//     the installed SDK exposes no per-call Idempotency-Key, so a retry
+//     that re-claims after that exact crash point can send a second,
+//     genuinely duplicate email. The outbox still guarantees no
+//     *silent* loss and no *unbounded* retry storm (attempt_count is
+//     tracked), which is the property this round's instructions required;
+//     true no-duplicate delivery across that specific window needs either
+//     an SDK upgrade or a different provider-side idempotency mechanism,
+//     both out of scope this round.
+async function claimAndProcessNotifications({ orderId, sessionId, order, reason }) {
+  const { data: claimed, error: claimError } = await supabase.rpc("claim_webhook_notification_v1", {
+    p_order_id: orderId,
+    p_stripe_session_id: sessionId,
   });
-  const okOps = await claimAndSend({
-    order,
-    flagColumn: "email_ops_sent",
-    to: OPS_EMAIL_TO,
-    mail: buildOpsUrgentEmail(order, reason, stripeSessionId),
-  });
-  return okCustomer && okOps;
+
+  if (claimError) {
+    console.error("[webhook] claim_webhook_notification_v1 failed:", claimError.message);
+    return false;
+  }
+
+  const rows = claimed || [];
+  let allOk = true;
+
+  for (const row of rows) {
+    const content = buildNotificationContent({
+      notificationType: row.notification_type,
+      order,
+      reason,
+      stripeSessionId: sessionId,
+      opsEmailTo: OPS_EMAIL_TO,
+    });
+
+    if (!content || !content.to) {
+      // Nothing sensible to deliver to (unknown notification_type, or the
+      // order has no email on file for a customer-audience row) — not a
+      // delivery failure. Complete it so it doesn't sit claimable forever.
+      await supabase.rpc("complete_webhook_notification_v1", {
+        p_dedupe_key: row.dedupe_key,
+        p_claim_token: row.claim_token,
+        p_success: true,
+        p_provider_message_id: null,
+        p_error_message: null,
+      });
+      continue;
+    }
+
+    const sendResult = await sendViaResend({ to: content.to, mail: content.mail });
+
+    const { data: completeResult, error: completeError } = await supabase.rpc("complete_webhook_notification_v1", {
+      p_dedupe_key: row.dedupe_key,
+      p_claim_token: row.claim_token,
+      p_success: sendResult.ok,
+      p_provider_message_id: sendResult.ok ? sendResult.providerMessageId : null,
+      p_error_message: sendResult.ok ? null : sendResult.errorMessage,
+    });
+
+    if (completeError) {
+      console.error("[webhook] complete_webhook_notification_v1 failed:", completeError.message);
+      allOk = false;
+      continue;
+    }
+
+    if (completeResult && completeResult.ok === false) {
+      // Lost the claim (already completed elsewhere, or expired and
+      // reclaimed by a concurrent delivery) — not this call's failure.
+      continue;
+    }
+
+    if (!sendResult.ok) {
+      allOk = false;
+    }
+  }
+
+  return allOk;
 }
 
 const KNOWN_RESULTS = new Set(["locked", "failed", "already_processed", "duplicate_payment_conflict"]);
@@ -146,7 +198,7 @@ export default async function handler(req, res) {
         "[webhook] session not paid, payment_status =",
         session?.payment_status,
         "event.id =",
-        event.id
+        maskId(event.id)
       );
       return res.status(200).json({ ok: true });
     }
@@ -157,16 +209,16 @@ export default async function handler(req, res) {
     const resolved = await resolveOrderId({ supabase, metadataOrderId, clientReferenceId });
 
     if (resolved.status === RESULT.MISSING) {
-      console.info("[webhook] order_id missing, event.id =", event.id, "session.id =", session?.id);
+      console.info("[webhook] order_id missing, event.id =", maskId(event.id), "session.id =", maskId(session?.id));
       return res.status(200).json({ ok: true });
     }
 
     if (resolved.status === RESULT.UNRESOLVABLE_CONFLICT) {
       console.error(
         "[webhook][SECURITY] unresolvable order_id conflict, event.id =",
-        event.id,
+        maskId(event.id),
         "session.id =",
-        session?.id
+        maskId(session?.id)
       );
       return res.status(500).json({ error: "order_id_conflict" });
     }
@@ -183,7 +235,12 @@ export default async function handler(req, res) {
     });
 
     if (rpcError) {
-      console.error("[webhook] process_checkout_payment_v1 failed:", rpcError.message);
+      console.error(
+        "[webhook] process_checkout_payment_v1 failed, session.id =",
+        maskId(session.id),
+        "reason =",
+        rpcError.message
+      );
       return res.status(500).json({ error: "processing_failed" });
     }
 
@@ -198,26 +255,25 @@ export default async function handler(req, res) {
       .from("orders")
       .select(
         `order_id, start_date, end_date, car_model_id, driver_lang, duration, email, name, phone,
-         wechat, total_price, deposit_amount, balance_due, email_customer_sent, email_ops_sent`
+         wechat, total_price, deposit_amount, balance_due`
       )
       .eq("order_id", orderId)
       .single();
 
     if (orderErr || !order) {
-      console.error("[webhook] post-RPC order lookup failed for email dispatch");
+      console.error("[webhook] post-RPC order lookup failed for notification dispatch");
       return res.status(500).json({ error: "order_lookup_failed" });
     }
 
-    const emailsOk = await sendEmailsForOutcome({
+    const notificationsOk = await claimAndProcessNotifications({
+      orderId,
+      sessionId: session.id,
       order,
-      result,
-      inventoryStatus: inventoryStatus || (result === "locked" ? "locked" : "failed"),
       reason,
-      stripeSessionId: session.id,
     });
 
-    if (!emailsOk) {
-      return res.status(500).json({ error: "email_delivery_failed" });
+    if (!notificationsOk) {
+      return res.status(500).json({ error: "notification_delivery_failed" });
     }
 
     return res.status(200).json({ ok: true, result });
