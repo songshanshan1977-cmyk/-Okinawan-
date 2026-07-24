@@ -45,7 +45,7 @@ const ROLLBACK_CODE = stripSqlComments(ROLLBACK_SQL);
 
 const CORE_SIGNATURE = "process_checkout_payment_v1(text, text, integer, text, boolean)";
 const CLAIM_SIGNATURE = "claim_webhook_notification_v1(text, text)";
-const FREEZE_SIGNATURE = "freeze_webhook_notification_payload_v1(text, uuid, text, text, text)";
+const FREEZE_SIGNATURE = "freeze_webhook_notification_payload_v1(text, uuid, text, text, text, text, text)";
 const COMPLETE_SIGNATURE = "complete_webhook_notification_v1(text, uuid, text, text, text)";
 
 function countOccurrences(text, re) {
@@ -219,8 +219,27 @@ describe("B-03/B-04/R2 §三/§四: notification outbox structural checks (stati
     expect(OUTBOX_MIGRATION).toMatch(/first_dispatch_at = COALESCE\(first_dispatch_at, now\(\)\)/);
   });
 
-  test("freeze_webhook_notification_payload_v1: only writes recipient_email/subject/html when payload_frozen_at IS NULL (first-writer-wins)", () => {
-    expect(OUTBOX_MIGRATION).toMatch(/IF v_row\.payload_frozen_at IS NULL THEN/);
+  test("R3 §一: freeze_webhook_notification_payload_v1 only writes sender_email/recipient_email/subject/html/provider_idempotency_key when payload_frozen_at IS NULL (first-writer-wins, ALL fields together)", () => {
+    const freezeStart = OUTBOX_MIGRATION.indexOf("FUNCTION public.freeze_webhook_notification_payload_v1");
+    const freezeEnd = OUTBOX_MIGRATION.indexOf("$function$;", freezeStart);
+    const body = OUTBOX_MIGRATION.slice(freezeStart, freezeEnd);
+    expect(body).toMatch(/IF v_row\.payload_frozen_at IS NULL THEN/);
+    const writeBlockStart = body.indexOf("IF v_row.payload_frozen_at IS NULL THEN");
+    const writeBlockEnd = body.indexOf("END IF;", writeBlockStart);
+    const writeBlock = body.slice(writeBlockStart, writeBlockEnd);
+    ["sender_email = p_sender_email", "recipient_email = p_recipient_email", "email_subject = p_email_subject", "email_html = p_email_html", "provider_idempotency_key = p_provider_idempotency_key"].forEach(
+      (fragment) => expect(writeBlock).toContain(fragment)
+    );
+  });
+
+  test("R3 §一 item 3: freeze_webhook_notification_payload_v1 rejects blank sender/recipient/subject/html/provider_idempotency_key before ever touching a row", () => {
+    const freezeStart = OUTBOX_MIGRATION.indexOf("FUNCTION public.freeze_webhook_notification_payload_v1");
+    const freezeEnd = OUTBOX_MIGRATION.indexOf("$function$;", freezeStart);
+    const body = OUTBOX_MIGRATION.slice(freezeStart, freezeEnd);
+    ["p_sender_email", "p_recipient_email", "p_email_subject", "p_email_html", "p_provider_idempotency_key"].forEach((param) => {
+      expect(body).toMatch(new RegExp(`length\\(trim\\(coalesce\\(${param}, ''\\)\\)\\) = 0`));
+    });
+    expect(body).toMatch(/all payload fields must be non-blank/);
   });
 
   test("freeze_webhook_notification_payload_v1 requires the current claim_token (same ownership check as complete)", () => {
@@ -228,6 +247,22 @@ describe("B-03/B-04/R2 §三/§四: notification outbox structural checks (stati
     const freezeEnd = OUTBOX_MIGRATION.indexOf("$function$;", freezeStart);
     const body = OUTBOX_MIGRATION.slice(freezeStart, freezeEnd);
     expect(body).toMatch(/WHERE dedupe_key = p_dedupe_key\s*\n\s*AND claim_token = p_claim_token/);
+  });
+
+  test("R3 §一: freeze returns the frozen from/to/subject/html/provider_idempotency_key under a `frozen` key", () => {
+    const freezeStart = OUTBOX_MIGRATION.indexOf("FUNCTION public.freeze_webhook_notification_payload_v1");
+    const freezeEnd = OUTBOX_MIGRATION.indexOf("$function$;", freezeStart);
+    const body = OUTBOX_MIGRATION.slice(freezeStart, freezeEnd);
+    expect(body).toMatch(/'from', v_row\.sender_email/);
+    expect(body).toMatch(/'to', v_row\.recipient_email/);
+    expect(body).toMatch(/'subject', v_row\.email_subject/);
+    expect(body).toMatch(/'html', v_row\.email_html/);
+    expect(body).toMatch(/'provider_idempotency_key', v_row\.provider_idempotency_key/);
+  });
+
+  test("R3 §一: send_logs has sender_email and provider_idempotency_key columns", () => {
+    expect(OUTBOX_MIGRATION).toMatch(/ALTER TABLE public\.send_logs ADD COLUMN IF NOT EXISTS sender_email text;/);
+    expect(OUTBOX_MIGRATION).toMatch(/ALTER TABLE public\.send_logs ADD COLUMN IF NOT EXISTS provider_idempotency_key text;/);
   });
 
   test("complete_webhook_notification_v1 validates p_outcome is one of sent/failed/dead_letter", () => {
@@ -258,6 +293,34 @@ describe("B-03/B-04/R2 §三/§四: notification outbox structural checks (stati
   });
 });
 
+describe("R3 §三: missing_customer_email dead-letter atomically creates an ops_missing_customer_email alert", () => {
+  test("8/9. complete_webhook_notification_v1 inserts an ops_missing_customer_email row exactly when outcome='dead_letter' and error_message='missing_customer_email'", () => {
+    expect(OUTBOX_MIGRATION).toMatch(
+      /IF p_outcome = 'dead_letter' AND p_error_message = 'missing_customer_email' THEN/
+    );
+    const triggerIdx = OUTBOX_MIGRATION.indexOf("IF p_outcome = 'dead_letter' AND p_error_message = 'missing_customer_email' THEN");
+    const blockEnd = OUTBOX_MIGRATION.indexOf("END IF;", triggerIdx);
+    const block = OUTBOX_MIGRATION.slice(triggerIdx, blockEnd);
+    expect(block).toMatch(/INSERT INTO public\.send_logs/);
+    expect(block).toMatch(/'ops', 'ops_missing_customer_email'/);
+    expect(block).toMatch(/ON CONFLICT \(dedupe_key\) DO NOTHING;/);
+  });
+
+  test("10. the new alert's dedupe_key includes order_id, stripe_session_id, ops, and ops_missing_customer_email", () => {
+    expect(OUTBOX_MIGRATION).toMatch(
+      /v_order_id \|\| ':' \|\| v_session_id \|\| ':ops:ops_missing_customer_email'/
+    );
+  });
+
+  test("this insert happens in the SAME transaction as the dead_letter status UPDATE (same function body, not a separate call)", () => {
+    const fnStart = OUTBOX_MIGRATION.indexOf("FUNCTION public.complete_webhook_notification_v1");
+    const fnEnd = OUTBOX_MIGRATION.indexOf("$function$;", fnStart);
+    const body = OUTBOX_MIGRATION.slice(fnStart, fnEnd);
+    expect(body).toMatch(/status = 'dead_letter'/);
+    expect(body).toMatch(/ops_missing_customer_email/);
+  });
+});
+
 describe("20. legacy lock_inventory_v2 is not modified by either forward migration", () => {
   test("no CREATE/ALTER/DROP statement targets lock_inventory_v2", () => {
     [CORE_MIGRATION, OUTBOX_MIGRATION].forEach((sql) => {
@@ -275,10 +338,12 @@ describe("20. legacy lock_inventory_v2 is not modified by either forward migrati
 });
 
 describe("R2 §八: non-destructive rollback (rewritten this round)", () => {
-  test("23. rollback drops all FOUR RPCs (core + claim + freeze + complete) via DROP FUNCTION IF EXISTS", () => {
+  test("19/23. rollback drops all FOUR RPCs (core + claim + freeze + complete) via DROP FUNCTION IF EXISTS, with freeze's CURRENT 7-parameter signature", () => {
     expect(ROLLBACK_SQL).toMatch(/DROP FUNCTION IF EXISTS public\.process_checkout_payment_v1\(text, text, integer, text, boolean\);/);
     expect(ROLLBACK_SQL).toMatch(/DROP FUNCTION IF EXISTS public\.claim_webhook_notification_v1\(text, text\);/);
-    expect(ROLLBACK_SQL).toMatch(/DROP FUNCTION IF EXISTS public\.freeze_webhook_notification_payload_v1\(text, uuid, text, text, text\);/);
+    expect(ROLLBACK_SQL).toMatch(
+      /DROP FUNCTION IF EXISTS public\.freeze_webhook_notification_payload_v1\(text, uuid, text, text, text, text, text\);/
+    );
     expect(ROLLBACK_SQL).toMatch(/DROP FUNCTION IF EXISTS public\.complete_webhook_notification_v1\(text, uuid, text, text, text\);/);
   });
 

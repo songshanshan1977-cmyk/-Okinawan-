@@ -21,3 +21,12 @@ delete process.env.STRIPE_SECRET_KEY;
 delete process.env.STRIPE_WEBHOOK_SECRET;
 delete process.env.RESEND_API_KEY;
 process.env.NEXT_PUBLIC_SITE_URL = "https://sandbox.invalid";
+
+// R3 §四: production code has NO hardcoded sender/ops-recipient fallback
+// anymore — these two vars are the ONLY source for them. Set sane sandbox
+// defaults here so the great majority of tests (which are not specifically
+// testing the "env var missing" fail-closed path) don't each have to set
+// them individually. The handful of tests that DO exercise the
+// missing-env-var path explicitly delete/restore these around themselves.
+process.env.RESEND_FROM = "Test Sender <test-sender@sandbox.invalid>";
+process.env.NOTIFY_TO_EMAIL = "test-ops@sandbox.invalid";

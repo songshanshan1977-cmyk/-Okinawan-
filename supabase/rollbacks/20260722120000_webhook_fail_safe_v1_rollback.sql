@@ -46,8 +46,9 @@
 -- processing_reason / processed_at; every send_logs outbox column
 -- (dedupe_key, notification_type, audience, stripe_session_id,
 -- claim_token, claim_expires_at, attempt_count, sent_at, updated_at,
--- recipient_email, email_subject, email_html, payload_frozen_at,
--- first_dispatch_at); payments_stripe_session_id_unique_idx;
+-- sender_email, recipient_email, email_subject, email_html,
+-- provider_idempotency_key, payload_frozen_at, first_dispatch_at);
+-- payments_stripe_session_id_unique_idx;
 -- send_logs_dedupe_key_unique_idx; send_logs_claimable_idx;
 -- provider_message_id on either table. Does not touch
 -- public.lock_inventory_v2.
@@ -81,7 +82,7 @@ BEGIN;
 -- Delete or disable the four new RPCs — the ONLY thing this file does.
 -- =============================================================
 DROP FUNCTION IF EXISTS public.complete_webhook_notification_v1(text, uuid, text, text, text);
-DROP FUNCTION IF EXISTS public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text);
+DROP FUNCTION IF EXISTS public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text, text, text);
 DROP FUNCTION IF EXISTS public.claim_webhook_notification_v1(text, text);
 DROP FUNCTION IF EXISTS public.process_checkout_payment_v1(text, text, integer, text, boolean);
 
@@ -114,9 +115,9 @@ COMMIT;
 --   WHERE table_schema = 'public' AND table_name = 'send_logs'
 --     AND column_name IN ('dedupe_key','notification_type','audience','stripe_session_id',
 --                          'claim_token','claim_expires_at','attempt_count','sent_at','updated_at',
---                          'recipient_email','email_subject','email_html','payload_frozen_at',
---                          'first_dispatch_at');
---   -- expect: 14 rows — these columns are UNCHANGED by this rollback.
+--                          'sender_email','recipient_email','email_subject','email_html',
+--                          'provider_idempotency_key','payload_frozen_at','first_dispatch_at');
+--   -- expect: 16 rows — these columns are UNCHANGED by this rollback.
 --
 --   SELECT indexname FROM pg_indexes
 --   WHERE schemaname = 'public'

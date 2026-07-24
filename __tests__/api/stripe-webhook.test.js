@@ -1,33 +1,41 @@
 // __tests__/api/stripe-webhook.test.js
 //
-// Covers the Node-orchestration slice of both review rounds' scenario
-// lists (the original 30 from round 1, plus the 26 required by the R2
-// blocking-fix instructions). SQL-only mechanics — row-level locking, the
-// 23-hour dead_letter sweep's actual timing, generate_series day coverage,
-// the unique indexes, SECURITY DEFINER/REVOKE/GRANT enforcement — are NOT
-// executable here (no local Postgres/psql/docker) and are instead covered
-// by __tests__/sql/migrationStatic.test.js plus manual review. Every test
-// below scripts the FOUR RPCs' (process_checkout_payment_v1,
-// claim_webhook_notification_v1, freeze_webhook_notification_payload_v1,
-// complete_webhook_notification_v1) responses the way they are documented
-// to behave, and verifies Node's HTTP status mapping, freeze/send/complete
-// orchestration, Resend Idempotency-Key usage, and log scrubbing around
-// those responses.
+// Covers the Node-orchestration slice of all three review rounds'
+// scenario lists (original 30, R2's 26, R3's 22). SQL-only mechanics —
+// row-level locking, the 23-hour dead_letter sweep's actual timing,
+// generate_series day coverage, the unique indexes, SECURITY DEFINER/
+// REVOKE/GRANT enforcement, the atomic ops_missing_customer_email insert
+// inside complete_webhook_notification_v1 — are NOT executable here (no
+// local Postgres/psql/docker) and are instead covered by
+// __tests__/sql/migrationStatic.test.js plus manual review. Every test
+// below scripts the FOUR RPCs' responses the way they are documented to
+// behave, and verifies Node's HTTP status mapping, freeze/send/complete
+// orchestration, Resend Idempotency-Key usage, and log scrubbing.
 //
-// NOTE ON "86 original tests continue to pass" (R2 §十一 item 25): the
-// complete_webhook_notification_v1 contract itself changed (boolean
-// p_success -> 3-way p_outcome) and a mandatory freeze step was inserted
-// between claim and send — so the LITERAL test code from the R1 round
-// cannot be byte-identical (it mocked an interface that no longer exists).
-// What is preserved is every SCENARIO the R1 tests exercised: this file
-// re-implements each of them against the new contract, so the same
-// observable behaviors (HTTP status codes, which emails get attempted,
-// idempotent redelivery, partial-failure retry-only-the-failed-half) are
-// still verified end to end.
+// IMPORTANT MOCK-DESIGN NOTE (R3): claimAndProcessNotifications now ALWAYS
+// makes exactly TWO claim_webhook_notification_v1 calls per webhook
+// delivery — the second pass exists to pick up an
+// ops_missing_customer_email row that complete_webhook_notification_v1
+// may have atomically inserted mid-way through the first pass, which
+// obviously didn't exist yet when the first claim ran. A `claim` mock that
+// just returns the same batch every time would make every test think the
+// SAME rows got reprocessed on the second pass — every claim mock below
+// is therefore a `claimSeq(...)` sequence: each call consumes the next
+// queued batch, and any call beyond the queue falls back to an empty
+// result (matching what the real claim RPC would return once nothing is
+// left pending/failed/expired).
+//
+// NOTE ON "118 prior tests continue to pass" (R3 §九 item 21): the
+// freeze_webhook_notification_payload_v1 contract changed (2 new required
+// params, new `frozen` field names) and claim is now called twice per
+// delivery — so the LITERAL test code from R1/R2 cannot be byte-identical.
+// What is preserved is every SCENARIO those rounds' tests exercised: this
+// file re-implements each of them against the current contract.
 
 const { createMockSupabase } = require("../helpers/mockSupabase");
 const { createMockReq, createMockRes } = require("../helpers/mockReqRes");
 const { loadWebhookHandler, fakeCheckoutSessionCompletedEvent } = require("../helpers/webhookHarness");
+const { computeProviderIdempotencyKey } = require("../../lib/webhook/providerIdempotencyKey");
 
 const BASE_ORDER = {
   order_id: "ORD-20260722-11111",
@@ -43,6 +51,8 @@ const BASE_ORDER = {
   total_price: 1600,
   deposit_amount: 500,
   balance_due: 1100,
+  payment_status: "paid",
+  inventory_status: "locked",
 };
 
 function okResend() {
@@ -84,19 +94,31 @@ function pendingClaimRows(orderId, sessionId = "cs_test_1") {
   ];
 }
 
+// See the file-level note above: claimAndProcessNotifications always makes
+// exactly 2 claim calls per webhook delivery. Pass one array per expected
+// call; any call beyond the supplied batches returns an empty result.
+function claimSeq(...batches) {
+  const fn = jest.fn();
+  batches.forEach((rows) => fn.mockReturnValueOnce({ data: rows, error: null }));
+  fn.mockReturnValue({ data: [], error: null });
+  return fn;
+}
+
 // Default freeze behavior: first-writer-wins simulation — echoes back
-// exactly the candidate content Node just built, as the real RPC would on
-// a row's first-ever freeze. Tests exercising "retry re-sends the ALREADY
-// frozen content" override this to return a DIFFERENT payload than the
-// candidate, so the assertion can tell the two apart.
+// exactly the candidate content + provider_idempotency_key Node just
+// built/computed, as the real RPC would on a row's first-ever freeze.
+// Tests exercising "retry re-sends the ALREADY frozen content" override
+// this to return a DIFFERENT payload than the candidate.
 function echoFreeze(args) {
   return {
     data: {
       ok: true,
       frozen: {
-        recipient_email: args.p_recipient_email,
+        from: args.p_sender_email,
+        to: args.p_recipient_email,
         subject: args.p_email_subject,
         html: args.p_email_html,
+        provider_idempotency_key: args.p_provider_idempotency_key,
       },
     },
     error: null,
@@ -119,6 +141,31 @@ function rpcRouter({ processCheckoutPayment, claim, freeze, complete }) {
 
 function lockedResult(orderId, extra = {}) {
   return { data: { result: "locked", reason: null, order_id: orderId, inventory_status: "locked", ...extra }, error: null };
+}
+
+// R3 §四: withTempEnv temporarily deletes/sets an env var, runs `fn`, then
+// always restores the ORIGINAL value (present or absent) — required by
+// §四's testing instructions: use the real production code path (delete
+// the real env var, reload the real handler), never a content-override
+// hook, and always clean up afterward so other tests in this file are
+// unaffected.
+async function withTempEnv(varName, tempValue, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, varName);
+  const original = process.env[varName];
+  if (tempValue === undefined) {
+    delete process.env[varName];
+  } else {
+    process.env[varName] = tempValue;
+  }
+  try {
+    await fn();
+  } finally {
+    if (had) {
+      process.env[varName] = original;
+    } else {
+      delete process.env[varName];
+    }
+  }
 }
 
 describe("HTTP-boundary scenarios (1-5 of the original list)", () => {
@@ -188,9 +235,10 @@ describe("core RPC error paths -> 500, nothing claimed", () => {
   });
 });
 
-describe("successful payment -> claim, freeze, send with idempotencyKey, complete", () => {
-  test("7/15. first-time success -> locked, both rows sent with the outbox row's own dedupe_key as Idempotency-Key, 200", async () => {
+describe("successful payment -> claim, freeze, send with provider Idempotency-Key, complete", () => {
+  test("7/15. first-time success -> locked, both rows sent, second claim pass finds nothing new, 200", async () => {
     const orderRow = { ...BASE_ORDER };
+    const rows = successClaimRows(orderRow.order_id);
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
@@ -204,10 +252,7 @@ describe("successful payment -> claim, freeze, send with idempotencyKey, complet
           });
           return lockedResult(orderRow.order_id);
         },
-        claim: (args) => {
-          expect(args).toEqual({ p_order_id: orderRow.order_id, p_stripe_session_id: "cs_test_1" });
-          return { data: successClaimRows(orderRow.order_id), error: null };
-        },
+        claim: claimSeq(rows),
       }),
     });
     const resendSend = okResend();
@@ -218,22 +263,28 @@ describe("successful payment -> claim, freeze, send with idempotencyKey, complet
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({ ok: true, result: "locked" });
     expect(resendSend).toHaveBeenCalledTimes(2);
+    // exactly 2 claim calls total (main pass + the mandatory second pass).
+    expect(supabase.rpc.mock.calls.filter((c) => c[0] === "claim_webhook_notification_v1").length).toBe(2);
 
-    // 4. every send carries the outbox row's own stable dedupe_key as the
-    // Resend Idempotency-Key, as the SECOND argument (real per-call option).
-    const rows = successClaimRows(orderRow.order_id);
+    // 4/11. every send carries {idempotencyKey} as the SECOND real argument,
+    // and it is the SHA-256-derived provider key, not the raw dedupe_key.
     resendSend.mock.calls.forEach((call, i) => {
-      expect(call[1]).toEqual({ idempotencyKey: rows[i].dedupe_key });
+      const expectedKey = computeProviderIdempotencyKey(rows[i].dedupe_key);
+      expect(call[1]).toEqual({ idempotencyKey: expectedKey });
+      expect(call[1].idempotencyKey).not.toBe(rows[i].dedupe_key);
     });
 
     // 6. customer and ops rows get DIFFERENT keys.
     expect(resendSend.mock.calls[0][1].idempotencyKey).not.toBe(resendSend.mock.calls[1][1].idempotencyKey);
 
-    // freeze called with the same dedupe_key + claim_token pairing as claim handed out.
+    // freeze called with sender_email + provider_idempotency_key, and the
+    // same dedupe_key/claim_token pairing claim handed out.
     const freezeCalls = supabase.rpc.mock.calls.filter((c) => c[0] === "freeze_webhook_notification_payload_v1");
     expect(freezeCalls.length).toBe(2);
     expect(freezeCalls[0][1].p_dedupe_key).toBe(rows[0].dedupe_key);
     expect(freezeCalls[0][1].p_claim_token).toBe(rows[0].claim_token);
+    expect(freezeCalls[0][1].p_sender_email).toBe(process.env.RESEND_FROM);
+    expect(freezeCalls[0][1].p_provider_idempotency_key).toBe(computeProviderIdempotencyKey(rows[0].dedupe_key));
 
     // complete called with outcome:'sent' and a real provider_message_id.
     const completeCalls = supabase.rpc.mock.calls.filter((c) => c[0] === "complete_webhook_notification_v1");
@@ -241,15 +292,15 @@ describe("successful payment -> claim, freeze, send with idempotencyKey, complet
   });
 });
 
-describe("7/8. payload freeze: first-time vs retry (R2 §三)", () => {
-  test("first claim of a row freezes the candidate content Node just built", async () => {
+describe("R3 §一: sender + provider-key freeze (first-time vs retry)", () => {
+  test("1/4/7. first claim freezes sender_email + a correctly-computed provider_idempotency_key alongside recipient content", async () => {
     const orderRow = { ...BASE_ORDER };
     let seenFreezeArgs = null;
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
         freeze: (args) => {
           seenFreezeArgs = args;
           return echoFreeze(args);
@@ -261,20 +312,29 @@ describe("7/8. payload freeze: first-time vs retry (R2 §三)", () => {
     const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
     await runHandler(handler, {});
 
+    expect(seenFreezeArgs.p_sender_email).toBe(process.env.RESEND_FROM);
     expect(seenFreezeArgs.p_recipient_email).toBe(orderRow.email);
     expect(seenFreezeArgs.p_email_subject).toContain("预约确认");
-    // sent content matches the frozen (== just-built, first time) payload
+    expect(seenFreezeArgs.p_provider_idempotency_key).toBe(computeProviderIdempotencyKey(successClaimRows(orderRow.order_id)[0].dedupe_key));
+    // sent content matches the frozen (== just-built, first time) payload.
+    expect(resendSend.mock.calls[0][0].from).toBe(seenFreezeArgs.p_sender_email);
     expect(resendSend.mock.calls[0][0].subject).toBe(seenFreezeArgs.p_email_subject);
   });
 
-  test("8. retry (row already frozen with DIFFERENT content than order data would now produce) sends the FROZEN content, not a freshly rebuilt one", async () => {
+  test("2/3. retry (row already frozen with a DIFFERENT sender/content than current env/order data would now produce) sends the FROZEN request verbatim", async () => {
     const orderRow = { ...BASE_ORDER, total_price: 9999 }; // order data has since "changed"
-    const alreadyFrozen = { recipient_email: "frozen@example.com", subject: "FROZEN SUBJECT — do not rebuild", html: "<p>frozen html</p>" };
+    const alreadyFrozen = {
+      from: "Old Sender <old@example.com>", // simulates RESEND_FROM having changed since this row was first frozen
+      to: "frozen@example.com",
+      subject: "FROZEN SUBJECT — do not rebuild",
+      html: "<p>frozen html</p>",
+      provider_idempotency_key: "webhook-" + "a".repeat(64),
+    };
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => ({ data: { result: "already_processed", reason: null, order_id: orderRow.order_id, inventory_status: "locked" }, error: null }),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
         freeze: () => ({ data: { ok: true, frozen: alreadyFrozen }, error: null }), // simulates "already frozen" — discards Node's candidate
       }),
     });
@@ -283,12 +343,15 @@ describe("7/8. payload freeze: first-time vs retry (R2 §三)", () => {
     const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
     await runHandler(handler, {});
 
+    // 7. same provider key -> completely identical from/to/subject/html.
     expect(resendSend.mock.calls[0][0]).toEqual({
-      from: expect.any(String),
-      to: alreadyFrozen.recipient_email,
+      from: alreadyFrozen.from,
+      to: alreadyFrozen.to,
       subject: alreadyFrozen.subject,
       html: alreadyFrozen.html,
     });
+    expect(resendSend.mock.calls[0][0].from).not.toBe(process.env.RESEND_FROM);
+    expect(resendSend.mock.calls[0][1]).toEqual({ idempotencyKey: alreadyFrozen.provider_idempotency_key });
   });
 
   test("9. freeze with a stale/expired claim_token -> overall failure, no send attempted", async () => {
@@ -297,7 +360,7 @@ describe("7/8. payload freeze: first-time vs retry (R2 §三)", () => {
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
         freeze: () => ({ data: { ok: false, reason: "claim_token_mismatch_or_expired" }, error: null }),
       }),
     });
@@ -312,13 +375,13 @@ describe("7/8. payload freeze: first-time vs retry (R2 §三)", () => {
 });
 
 describe("R2-B01 (§一): every complete_webhook_notification_v1 result is strictly validated", () => {
-  test("1. complete resolves {ok:false} -> overall 500, never a silent 200", async () => {
+  test("complete resolves {ok:false} -> overall 500, never a silent 200", async () => {
     const orderRow = { ...BASE_ORDER };
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
         complete: () => ({ data: { ok: false, reason: "claim_token_mismatch_or_expired" }, error: null }),
       }),
     });
@@ -330,13 +393,13 @@ describe("R2-B01 (§一): every complete_webhook_notification_v1 result is stric
     expect(res.json).toHaveBeenCalledWith({ error: "notification_delivery_failed" });
   });
 
-  test("2. complete resolves {data:null,error:null} -> overall 500", async () => {
+  test("complete resolves {data:null,error:null} -> overall 500", async () => {
     const orderRow = { ...BASE_ORDER };
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
         complete: () => ({ data: null, error: null }),
       }),
     });
@@ -347,13 +410,13 @@ describe("R2-B01 (§一): every complete_webhook_notification_v1 result is stric
     expect(res.status).toHaveBeenCalledWith(500);
   });
 
-  test("3. complete resolves with a top-level error -> overall 500", async () => {
+  test("complete resolves with a top-level error -> overall 500", async () => {
     const orderRow = { ...BASE_ORDER };
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
         complete: () => ({ data: null, error: { message: "connection reset", details: "pgbouncer timeout", hint: "retry" } }),
       }),
     });
@@ -370,7 +433,7 @@ describe("R2-B01 (§一): every complete_webhook_notification_v1 result is stric
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
         complete: () => ({ data: { ok: "yes" }, error: null }), // not literal boolean true
       }),
     });
@@ -383,14 +446,14 @@ describe("R2-B01 (§一): every complete_webhook_notification_v1 result is stric
 });
 
 describe("R2-B03 (§五): unknown notification_type, missing recipients", () => {
-  test("12. unknown notification_type -> Resend never called, complete outcome='failed'/unknown_notification_type, 5xx, never marked sent", async () => {
+  test("unknown notification_type -> Resend never called, complete outcome='failed'/unknown_notification_type, 5xx, never marked sent", async () => {
     const orderRow = { ...BASE_ORDER };
     const completeArgs = [];
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [claimRow({ dedupeKey: "x:y:z:mystery", notificationType: "mystery_type", audience: "customer", claimToken: "tok-1", orderId: orderRow.order_id })], error: null }),
+        claim: claimSeq([claimRow({ dedupeKey: "x:y:z:mystery", notificationType: "mystery_type", audience: "customer", claimToken: "tok-1", orderId: orderRow.order_id })]),
         complete: (args) => {
           completeArgs.push(args);
           return okComplete();
@@ -408,14 +471,14 @@ describe("R2-B03 (§五): unknown notification_type, missing recipients", () => 
     expect(res.status).toHaveBeenCalledWith(500);
   });
 
-  test("13/14. customer missing email -> dead_letter/missing_customer_email, not sent; matching ops alert still sends; overall 200", async () => {
+  test("customer missing email -> dead_letter/missing_customer_email, not sent; matching ops alert still sends; overall 200", async () => {
     const orderRow = { ...BASE_ORDER, email: null };
     const completeArgs = [];
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => ({ data: { result: "failed", reason: "failed_no_stock", order_id: orderRow.order_id, inventory_status: "failed" }, error: null }),
-        claim: () => ({ data: pendingClaimRows(orderRow.order_id), error: null }), // customer_manual_review + ops_manual_review
+        claim: claimSeq(pendingClaimRows(orderRow.order_id)), // customer_manual_review + ops_manual_review, then empty
         complete: (args) => {
           completeArgs.push(args);
           return okComplete();
@@ -434,7 +497,7 @@ describe("R2-B03 (§五): unknown notification_type, missing recipients", () => 
     expect(customerComplete.p_outcome).toBe("dead_letter");
     expect(customerComplete.p_error_message).toBe("missing_customer_email");
     expect(opsComplete.p_outcome).toBe("sent");
-    // 15. customer dead_letter does NOT force a 5xx by itself — ops still succeeded.
+    // customer dead_letter does NOT force a 5xx by itself — ops still succeeded.
     expect(res.status).toHaveBeenCalledWith(200);
   });
 
@@ -444,8 +507,7 @@ describe("R2-B03 (§五): unknown notification_type, missing recipients", () => 
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => ({ data: { result: "failed", reason: "failed_no_stock", order_id: orderRow.order_id, inventory_status: "failed" }, error: null }),
-        // only the customer row claimable this time (ops already sent earlier)
-        claim: () => ({ data: [pendingClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([pendingClaimRows(orderRow.order_id)[0]]),
       }),
     });
     const resendSend = okResend();
@@ -456,47 +518,14 @@ describe("R2-B03 (§五): unknown notification_type, missing recipients", () => 
     expect(resendSend).not.toHaveBeenCalled();
   });
 
-  test("15. ops recipient missing (structurally forced via a notificationContent override, since OPS_EMAIL_TO always has a hardcoded fallback in real code) -> outcome='failed'/missing_ops_recipient, 5xx, not sent", async () => {
+  test("an empty-string provider message id from Resend is treated as failure, never lets a row reach 'sent'", async () => {
     const orderRow = { ...BASE_ORDER };
     const completeArgs = [];
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [claimRow({ dedupeKey: "x:y:ops:ops_booking_confirmed", notificationType: "ops_booking_confirmed", audience: "ops", claimToken: "tok-1", orderId: orderRow.order_id })], error: null }),
-        complete: (args) => {
-          completeArgs.push(args);
-          return okComplete();
-        },
-      }),
-    });
-    const resendSend = okResend();
-    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
-    const handler = loadWebhookHandler({
-      supabase,
-      constructEvent: alwaysReturnEvent(event),
-      resendSend,
-      notificationContentOverride: ({ notificationType }) => {
-        if (notificationType === "ops_booking_confirmed") return { mail: { subject: "x", html: "y" }, to: null };
-        return null;
-      },
-    });
-    const res = await runHandler(handler, {});
-
-    expect(resendSend).not.toHaveBeenCalled();
-    expect(completeArgs[0].p_outcome).toBe("failed");
-    expect(completeArgs[0].p_error_message).toBe("missing_ops_recipient");
-    expect(res.status).toHaveBeenCalledWith(500);
-  });
-
-  test("16. an empty-string provider message id from Resend is treated as failure, never lets a row reach 'sent'", async () => {
-    const orderRow = { ...BASE_ORDER };
-    const completeArgs = [];
-    const supabase = createMockSupabase({
-      from: { orders: [{ data: orderRow, error: null }] },
-      rpc: rpcRouter({
-        processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
         complete: (args) => {
           completeArgs.push(args);
           return okComplete();
@@ -513,9 +542,95 @@ describe("R2-B03 (§五): unknown notification_type, missing recipients", () => 
   });
 });
 
-describe("R2 §六/§七: same Session bound to a different order -> ops-only conflict alert (17, 18)", () => {
-  test("17. duplicate_payment_conflict/session_order_conflict -> claim scoped to the ATTEMPTED order+session, ops conflict email sent with both order ids, no customer email, 200", async () => {
+describe("R3 §三: missing_customer_email dead-letter creates an independent ops alert, claimed on the mandatory second pass", () => {
+  test("8/9/10. customer dead-letters -> second claim pass picks up a NEW ops_missing_customer_email row (distinct dedupe_key from the ordinary business alert), sent, 200", async () => {
+    const orderRow = { ...BASE_ORDER, email: null, payment_status: "paid", inventory_status: "failed" };
+    const pending = pendingClaimRows(orderRow.order_id); // [customer_manual_review, ops_manual_review]
+    const missingEmailAlertRow = claimRow({
+      dedupeKey: `${orderRow.order_id}:cs_test_1:ops:ops_missing_customer_email`,
+      notificationType: "ops_missing_customer_email",
+      audience: "ops",
+      claimToken: "tok-alert-1",
+      orderId: orderRow.order_id,
+    });
+
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({
+        processCheckoutPayment: () => ({ data: { result: "failed", reason: "failed_no_stock", order_id: orderRow.order_id, inventory_status: "failed" }, error: null }),
+        // pass 1: the ordinary customer_manual_review + ops_manual_review rows.
+        // pass 2: the NEW alert row that complete() atomically created while
+        // dead-lettering the customer row during pass 1.
+        claim: claimSeq(pending, [missingEmailAlertRow]),
+      }),
+    });
+    const resendSend = okResend();
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    const res = await runHandler(handler, {});
+
+    // ops_manual_review (pass 1) + ops_missing_customer_email (pass 2) = 2 sends.
+    expect(resendSend).toHaveBeenCalledTimes(2);
+    const alertMail = resendSend.mock.calls.find((c) => c[0].subject.includes("需要人工联系客户"));
+    expect(alertMail).toBeDefined();
+    expect(alertMail[0].html).toContain(orderRow.order_id);
+    expect(alertMail[0].html).toContain("没有客户邮箱地址");
+    expect(res.status).toHaveBeenCalledWith(200);
+
+    // dedupe_key of the alert row is genuinely distinct from the ordinary
+    // ops_manual_review row's dedupe_key.
+    expect(missingEmailAlertRow.dedupe_key).not.toBe(pending[1].dedupe_key);
+  });
+
+  test("11. alert send failure -> overall 500 (retryable)", async () => {
+    const orderRow = { ...BASE_ORDER, email: null };
+    const pending = pendingClaimRows(orderRow.order_id);
+    const missingEmailAlertRow = claimRow({
+      dedupeKey: `${orderRow.order_id}:cs_test_1:ops:ops_missing_customer_email`,
+      notificationType: "ops_missing_customer_email",
+      audience: "ops",
+      claimToken: "tok-alert-1",
+      orderId: orderRow.order_id,
+    });
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({
+        processCheckoutPayment: () => ({ data: { result: "failed", reason: "failed_no_stock", order_id: orderRow.order_id, inventory_status: "failed" }, error: null }),
+        claim: claimSeq(pending, [missingEmailAlertRow]),
+      }),
+    });
+    // ops_manual_review (pass 1) succeeds, ops_missing_customer_email (pass 2) fails.
+    const resendSend = jest
+      .fn()
+      .mockImplementationOnce(() => Promise.resolve({ data: { id: "ops-1" }, error: null }))
+      .mockImplementationOnce(() => Promise.reject(new Error("resend down")));
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    const res = await runHandler(handler, {});
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+
+  test("customer row's own dead-letter completion succeeding is not itself a delivery failure (only the alert's own send/complete outcome matters for the 5xx decision)", async () => {
+    const orderRow = { ...BASE_ORDER, email: null };
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({
+        processCheckoutPayment: () => ({ data: { result: "failed", reason: "failed_no_stock", order_id: orderRow.order_id, inventory_status: "failed" }, error: null }),
+        claim: claimSeq([pendingClaimRows(orderRow.order_id)[0]]), // ONLY the customer row claimable; ops already sent previously
+      }),
+    });
+    const resendSend = okResend();
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    const res = await runHandler(handler, {});
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+});
+
+describe("R2 §六/§七 / R3 §五: same Session bound to a different order -> ops-only conflict alert with corrected wording", () => {
+  test("duplicate_payment_conflict/session_order_conflict -> claim scoped to the ATTEMPTED order+session, ops conflict email sent with corrected wording, no customer email, 200", async () => {
     const orderRow = { ...BASE_ORDER, order_id: "ORD-ATTEMPTED" };
+    const conflictRow = claimRow({ dedupeKey: "cs_test_1:ORD-ATTEMPTED:ops:session_order_conflict", notificationType: "ops_session_order_conflict", audience: "ops", claimToken: "tok-1", orderId: "ORD-ATTEMPTED" });
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
@@ -532,13 +647,16 @@ describe("R2 §六/§七: same Session bound to a different order -> ops-only co
             error: null,
           };
         },
-        claim: (args) => {
-          expect(args).toEqual({ p_order_id: "ORD-ATTEMPTED", p_stripe_session_id: "cs_test_1" });
-          return {
-            data: [claimRow({ dedupeKey: "cs_test_1:ORD-ATTEMPTED:ops:session_order_conflict", notificationType: "ops_session_order_conflict", audience: "ops", claimToken: "tok-1", orderId: "ORD-ATTEMPTED" })],
-            error: null,
+        claim: (() => {
+          // wrap claimSeq's single mock instance so the FIRST call is still
+          // assertable, without creating a fresh (never-exhausting) mock
+          // function on every invocation.
+          const seq = claimSeq([conflictRow]);
+          return (args) => {
+            expect(args).toEqual({ p_order_id: "ORD-ATTEMPTED", p_stripe_session_id: "cs_test_1" });
+            return seq(args);
           };
-        },
+        })(),
       }),
     });
     const resendSend = okResend();
@@ -551,10 +669,13 @@ describe("R2 §六/§七: same Session bound to a different order -> ops-only co
     expect(mail.html).toContain("ORD-ATTEMPTED");
     expect(mail.html).toContain("ORD-EXISTING");
     expect(mail.subject).not.toContain("预约确认");
+    // R3 §五: corrected wording present, old incorrect claim absent.
+    expect(mail.html).toContain("没有修改任何订单");
+    expect(mail.html).not.toContain("系统未对任何一个订单做出");
     expect(res.status).toHaveBeenCalledWith(200);
   });
 
-  test("18. repeated delivery of the same conflicting session -> claim finds nothing left to send (already 'sent'), no duplicate outbox, 200", async () => {
+  test("repeated delivery of the same conflicting session -> claim finds nothing left to send (already 'sent'), no duplicate outbox, 200", async () => {
     const orderRow = { ...BASE_ORDER, order_id: "ORD-ATTEMPTED" };
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
@@ -563,7 +684,7 @@ describe("R2 §六/§七: same Session bound to a different order -> ops-only co
           data: { result: "duplicate_payment_conflict", reason: "session_order_conflict", order_id: "ORD-ATTEMPTED", inventory_status: "pending", existing_order_id: "ORD-EXISTING" },
           error: null,
         }),
-        claim: () => ({ data: [], error: null }), // already sent -> nothing claimable
+        claim: claimSeq(), // always empty -> already sent
       }),
     });
     const resendSend = okResend();
@@ -576,14 +697,14 @@ describe("R2 §六/§七: same Session bound to a different order -> ops-only co
   });
 });
 
-describe("10/11. dead-letter observable boundary at the Node layer (SQL timing itself is DB INTEGRATION UNVERIFIED)", () => {
+describe("dead-letter observable boundary at the Node layer (SQL timing itself is DB INTEGRATION UNVERIFIED)", () => {
   test("row still within the auto-retry window -> claim returns it normally and it gets processed", async () => {
     const orderRow = { ...BASE_ORDER };
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => ({ data: { result: "already_processed", reason: null, order_id: orderRow.order_id, inventory_status: "locked" }, error: null }),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
       }),
     });
     const resendSend = okResend();
@@ -600,7 +721,7 @@ describe("10/11. dead-letter observable boundary at the Node layer (SQL timing i
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => ({ data: { result: "already_processed", reason: null, order_id: orderRow.order_id, inventory_status: "locked" }, error: null }),
-        claim: () => ({ data: [], error: null }), // simulates: row was dead-lettered by the sweep, not claimable
+        claim: claimSeq(), // simulates: row was dead-lettered by the sweep, not claimable
       }),
     });
     const resendSend = okResend();
@@ -613,13 +734,13 @@ describe("10/11. dead-letter observable boundary at the Node layer (SQL timing i
 });
 
 describe("idempotent redelivery / order_id source conflict (original scenarios 8, 9, 10, 14, 22, 26, 27)", () => {
-  test("8/9/22. exact redelivery, nothing left claimable -> no re-send, 200", async () => {
+  test("exact redelivery, nothing left claimable -> no re-send, 200", async () => {
     const orderRow = { ...BASE_ORDER };
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => ({ data: { result: "already_processed", reason: "stripe_session_id_already_recorded_for_this_order", order_id: orderRow.order_id, inventory_status: "locked" }, error: null }),
-        claim: () => ({ data: [], error: null }),
+        claim: claimSeq(), // both deliveries: always empty
       }),
     });
     const resendSend = okResend();
@@ -638,7 +759,7 @@ describe("idempotent redelivery / order_id source conflict (original scenarios 8
     expect(resendSend).not.toHaveBeenCalled();
   });
 
-  test("14a. order_id source disagreement, exactly one resolvable -> RPC called with p_id_source_conflict=true, pending+urgent sent, 200", async () => {
+  test("order_id source disagreement, exactly one resolvable -> RPC called with p_id_source_conflict=true, pending+urgent sent, 200", async () => {
     const orderRow = { ...BASE_ORDER, order_id: "ORD-REAL" };
     const supabase = createMockSupabase({
       from: {
@@ -649,7 +770,7 @@ describe("idempotent redelivery / order_id source conflict (original scenarios 8
           expect(args.p_id_source_conflict).toBe(true);
           return { data: { result: "failed", reason: "order_id_source_mismatch", order_id: "ORD-REAL", inventory_status: "failed" }, error: null };
         },
-        claim: () => ({ data: pendingClaimRows("ORD-REAL"), error: null }),
+        claim: claimSeq(pendingClaimRows("ORD-REAL")),
       }),
     });
     const resendSend = okResend();
@@ -660,7 +781,7 @@ describe("idempotent redelivery / order_id source conflict (original scenarios 8
     expect(resendSend).toHaveBeenCalledTimes(2);
   });
 
-  test("14b. order_id source disagreement, unresolvable -> 500, no RPC call, no writes", async () => {
+  test("order_id source disagreement, unresolvable -> 500, no RPC call, no writes", async () => {
     const supabase = createMockSupabase({ from: { orders: [{ data: [], error: null }] } });
     const resendSend = okResend();
     const consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
@@ -672,13 +793,13 @@ describe("idempotent redelivery / order_id source conflict (original scenarios 8
     consoleErrorSpy.mockRestore();
   });
 
-  test("27. failed outcome redelivered after both rows already sent -> no re-send, 200", async () => {
+  test("failed outcome redelivered after both rows already sent -> no re-send, 200", async () => {
     const orderRow = { ...BASE_ORDER };
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => ({ data: { result: "already_processed", reason: "failed_no_stock", order_id: orderRow.order_id, inventory_status: "failed" }, error: null }),
-        claim: () => ({ data: [], error: null }),
+        claim: claimSeq(),
       }),
     });
     const resendSend = okResend();
@@ -702,7 +823,7 @@ describe("payment validation mismatches (original 11, 12, 13) and inventory fail
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => ({ data: { result: "failed", reason, order_id: orderRow.order_id, inventory_status: "failed" }, error: null }),
-        claim: () => ({ data: pendingClaimRows(orderRow.order_id), error: null }),
+        claim: claimSeq(pendingClaimRows(orderRow.order_id)),
       }),
     });
     const resendSend = okResend();
@@ -717,7 +838,7 @@ describe("payment validation mismatches (original 11, 12, 13) and inventory fail
 });
 
 describe("partial failure then targeted retry (original 15/23/24/25)", () => {
-  test("customer succeeds, ops fails -> 500 first attempt; retry only re-sends ops, 200", async () => {
+  test("customer succeeds, ops fails -> 500 first attempt; retry only re-sends ops with the SAME provider key, 200", async () => {
     const orderRow = { ...BASE_ORDER };
     const rows = successClaimRows(orderRow.order_id);
     const supabase = createMockSupabase({
@@ -727,10 +848,9 @@ describe("partial failure then targeted retry (original 15/23/24/25)", () => {
           .fn()
           .mockReturnValueOnce(lockedResult(orderRow.order_id))
           .mockReturnValueOnce({ data: { result: "already_processed", reason: null, order_id: orderRow.order_id, inventory_status: "locked" }, error: null }),
-        claim: jest
-          .fn()
-          .mockReturnValueOnce({ data: rows, error: null }) // call1: both claimable
-          .mockReturnValueOnce({ data: [rows[1]], error: null }), // call2: only ops still claimable
+        // delivery1: pass1 = both rows, pass2 = empty.
+        // delivery2: pass1 = only the ops row (customer already sent), pass2 = empty.
+        claim: claimSeq(rows, [], [rows[1]], []),
       }),
     });
 
@@ -752,13 +872,14 @@ describe("partial failure then targeted retry (original 15/23/24/25)", () => {
     const res2 = await runHandler(handler, {});
     expect(res2.status).toHaveBeenCalledWith(200);
     expect(resendSend).toHaveBeenCalledTimes(3);
-    // retry uses the SAME idempotencyKey as the first (failed) attempt for that row.
+    // retry uses the SAME provider Idempotency-Key as the first (failed) attempt for that row.
     expect(resendSend.mock.calls[1][1].idempotencyKey).toBe(resendSend.mock.calls[2][1].idempotencyKey);
+    expect(resendSend.mock.calls[1][1].idempotencyKey).toBe(computeProviderIdempotencyKey(rows[1].dedupe_key));
   });
 });
 
 describe("R2-B05/N-01/N-02 (§七): log scrubbing — every console.* argument checked, not just the first", () => {
-  test("19. full session.id / event.id never appear anywhere in logs, only their masked digests", async () => {
+  test("full session.id / event.id never appear anywhere in logs, only their masked digests", async () => {
     const orderRow = { ...BASE_ORDER };
     const fullSessionId = "cs_test_FULLSECRETSESSIONID1234567890abcdef";
     const fullEventId = "evt_FULLSECRETEVENTID1234567890abcdef";
@@ -766,7 +887,7 @@ describe("R2-B05/N-01/N-02 (§七): log scrubbing — every console.* argument c
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: successClaimRows(orderRow.order_id), error: null }),
+        claim: claimSeq(successClaimRows(orderRow.order_id)),
       }),
     });
     const resendSend = okResend();
@@ -779,7 +900,6 @@ describe("R2-B05/N-01/N-02 (§七): log scrubbing — every console.* argument c
     const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
     await runHandler(handler, {});
 
-    // 7. inspect EVERY argument of EVERY console.* call, not just call[0].
     const allLoggedText = [...infoSpy.mock.calls, ...errorSpy.mock.calls, ...logSpy.mock.calls]
       .flat()
       .map((v) => (typeof v === "string" ? v : JSON.stringify(v)))
@@ -795,7 +915,7 @@ describe("R2-B05/N-01/N-02 (§七): log scrubbing — every console.* argument c
     logSpy.mockRestore();
   });
 
-  test("20. a raw Supabase error object (message/details/hint) never reaches any console.* argument, on every RPC failure path", async () => {
+  test("a raw Supabase error object (message/details/hint) never reaches any console.* argument, on every RPC failure path", async () => {
     const dangerousError = {
       message: "duplicate key value violates unique constraint",
       details: "Key (dedupe_key)=(ORD-1:cs_1:customer:x) already exists.",
@@ -804,7 +924,6 @@ describe("R2-B05/N-01/N-02 (§七): log scrubbing — every console.* argument c
     };
     const orderRow = { ...BASE_ORDER };
 
-    // core RPC failure
     const scenarios = [
       {
         label: "core RPC error",
@@ -823,7 +942,7 @@ describe("R2-B05/N-01/N-02 (§七): log scrubbing — every console.* argument c
           from: { orders: [{ data: orderRow, error: null }] },
           rpc: rpcRouter({
             processCheckoutPayment: () => lockedResult(orderRow.order_id),
-            claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+            claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
             freeze: () => ({ data: null, error: dangerousError }),
           }),
         }),
@@ -834,7 +953,7 @@ describe("R2-B05/N-01/N-02 (§七): log scrubbing — every console.* argument c
           from: { orders: [{ data: orderRow, error: null }] },
           rpc: rpcRouter({
             processCheckoutPayment: () => lockedResult(orderRow.order_id),
-            claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+            claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
             complete: () => ({ data: null, error: dangerousError }),
           }),
         }),
@@ -871,7 +990,7 @@ describe("R2-B05/N-01/N-02 (§七): log scrubbing — every console.* argument c
       from: { orders: [{ data: orderRow, error: null }] },
       rpc: rpcRouter({
         processCheckoutPayment: () => lockedResult(orderRow.order_id),
-        claim: () => ({ data: [successClaimRows(orderRow.order_id)[0]], error: null }),
+        claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
         complete: (args) => {
           completeArgs.push(args);
           return okComplete();
@@ -937,11 +1056,11 @@ describe("outer catch never returns 200 and never leaks exception detail (origin
 });
 
 describe("no outstanding notifications claimed -> still 200 with zero send attempts", () => {
-  test("claim returns an empty array", async () => {
+  test("claim returns an empty array on both passes", async () => {
     const orderRow = { ...BASE_ORDER };
     const supabase = createMockSupabase({
       from: { orders: [{ data: orderRow, error: null }] },
-      rpc: rpcRouter({ processCheckoutPayment: () => lockedResult(orderRow.order_id), claim: () => ({ data: [], error: null }) }),
+      rpc: rpcRouter({ processCheckoutPayment: () => lockedResult(orderRow.order_id), claim: claimSeq() }),
     });
     const resendSend = okResend();
     const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
@@ -952,12 +1071,124 @@ describe("no outstanding notifications claimed -> still 200 with zero send attem
   });
 });
 
-describe("9. Node no longer reads/writes orders.email_customer_sent / email_ops_sent as decision inputs", () => {
-  test("select() for notification content does not request the legacy boolean flags", () => {
+describe("Node no longer reads/writes orders.email_customer_sent / email_ops_sent as decision inputs", () => {
+  test("stripe-webhook.js source does not reference the legacy boolean flags", () => {
     const fs = require("fs");
     const path = require("path");
     const src = fs.readFileSync(path.join(__dirname, "../../pages/api/stripe-webhook.js"), "utf8");
     expect(src).not.toMatch(/email_customer_sent/);
     expect(src).not.toMatch(/email_ops_sent/);
+  });
+});
+
+describe("R3 §四: sender/ops env vars fail closed on the REAL production code path (12-16)", () => {
+  test("12/13. RESEND_FROM missing -> real handler returns 5xx, Resend never called", async () => {
+    await withTempEnv("RESEND_FROM", undefined, async () => {
+      const orderRow = { ...BASE_ORDER };
+      const completeArgs = [];
+      const supabase = createMockSupabase({
+        from: { orders: [{ data: orderRow, error: null }] },
+        rpc: rpcRouter({
+          processCheckoutPayment: () => lockedResult(orderRow.order_id),
+          claim: claimSeq([successClaimRows(orderRow.order_id)[0]]),
+          complete: (args) => {
+            completeArgs.push(args);
+            return okComplete();
+          },
+        }),
+      });
+      const resendSend = okResend();
+      const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+      // NOT using notificationContentOverride — this is the real production
+      // notificationContent module; only the env var is manipulated, exactly
+      // as §四's testing instructions require.
+      const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+      const res = await runHandler(handler, {});
+
+      expect(resendSend).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(500);
+      expect(completeArgs[0].p_outcome).toBe("failed");
+      expect(completeArgs[0].p_error_message).toBe("missing_sender_email");
+      // never attempts to freeze a payload with a blank sender.
+      const freezeCalls = supabase.rpc.mock.calls.filter((c) => c[0] === "freeze_webhook_notification_payload_v1");
+      expect(freezeCalls.length).toBe(0);
+    });
+  });
+
+  test("12/13/16. NOTIFY_TO_EMAIL missing -> real handler returns 5xx, reason=missing_ops_recipient, Resend not called for the ops row; RESEND_FROM restored afterward proven by a follow-up successful call", async () => {
+    const orderRow = { ...BASE_ORDER };
+    const completeArgs = [];
+
+    await withTempEnv("NOTIFY_TO_EMAIL", undefined, async () => {
+      const supabase = createMockSupabase({
+        from: { orders: [{ data: orderRow, error: null }] },
+        rpc: rpcRouter({
+          processCheckoutPayment: () => lockedResult(orderRow.order_id),
+          claim: claimSeq([successClaimRows(orderRow.order_id)[1]]), // the ops row only
+          complete: (args) => {
+            completeArgs.push(args);
+            return okComplete();
+          },
+        }),
+      });
+      const resendSend = okResend();
+      const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+      const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+      const res = await runHandler(handler, {});
+
+      expect(resendSend).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(500);
+      expect(completeArgs[0].p_outcome).toBe("failed");
+      expect(completeArgs[0].p_error_message).toBe("missing_ops_recipient");
+    });
+
+    // env var restored -> a subsequent normal call succeeds again, proving
+    // withTempEnv's cleanup actually worked and didn't leak into other tests.
+    expect(process.env.NOTIFY_TO_EMAIL).toBeDefined();
+    const supabase2 = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({ processCheckoutPayment: () => lockedResult(orderRow.order_id), claim: claimSeq([successClaimRows(orderRow.order_id)[1]]) }),
+    });
+    const resendSend2 = okResend();
+    const event2 = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler2 = loadWebhookHandler({ supabase: supabase2, constructEvent: alwaysReturnEvent(event2), resendSend: resendSend2 });
+    const res2 = await runHandler(handler2, {});
+    expect(res2.status).toHaveBeenCalledWith(200);
+    expect(resendSend2).toHaveBeenCalledTimes(1);
+  });
+
+  test("15. customer row is not incorrectly marked sent when RESEND_FROM is missing (customer send never attempted either)", async () => {
+    await withTempEnv("RESEND_FROM", "", async () => {
+      const orderRow = { ...BASE_ORDER };
+      const completeArgs = [];
+      const supabase = createMockSupabase({
+        from: { orders: [{ data: orderRow, error: null }] },
+        rpc: rpcRouter({
+          processCheckoutPayment: () => lockedResult(orderRow.order_id),
+          claim: claimSeq([successClaimRows(orderRow.order_id)[0]]), // customer row
+          complete: (args) => {
+            completeArgs.push(args);
+            return okComplete();
+          },
+        }),
+      });
+      const resendSend = okResend();
+      const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+      const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+      await runHandler(handler, {});
+
+      expect(resendSend).not.toHaveBeenCalled();
+      expect(completeArgs.every((a) => a.p_outcome !== "sent")).toBe(true);
+    });
+  });
+
+  test("14. source code has no hardcoded operations email address (no @gmail.com / @resend / literal address string as a fallback)", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const src = fs.readFileSync(path.join(__dirname, "../../pages/api/stripe-webhook.js"), "utf8");
+    expect(src).not.toMatch(/OPS_EMAIL_TO\s*=\s*process\.env\.NOTIFY_TO_EMAIL\s*\|\|/);
+    expect(src).not.toMatch(/SENDER_EMAIL\s*=\s*process\.env\.RESEND_FROM\s*\|\|/);
+    expect(src).not.toContain("songshanshan1977@gmail.com");
+    expect(src).not.toContain("HonestOki <noreply@");
   });
 });

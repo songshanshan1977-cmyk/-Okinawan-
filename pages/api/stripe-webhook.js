@@ -1,6 +1,6 @@
 // pages/api/stripe-webhook.js
 //
-// v1 fail-safe rewrite (sandbox/webhook-fail-safe-v1), revised across two
+// v1 fail-safe rewrite (sandbox/webhook-fail-safe-v1), revised across three
 // Codex review rounds. All business-content writes (orders/payments/
 // inventory/notification outbox) happen inside the single atomic
 // process_checkout_payment_v1 RPC (see supabase/migrations/
@@ -14,15 +14,18 @@
 // 200 — only genuinely inert cases (unrelated event, unpaid session,
 // unresolvable order_id) do.
 //
+// R3 §四: SENDER_EMAIL and OPS_EMAIL_TO come from exactly one environment
+// variable each (RESEND_FROM, NOTIFY_TO_EMAIL) with NO hardcoded fallback.
+// Either being missing/blank fails the affected notification closed — it
+// is never silently sent from/to a baked-in address.
+//
 // R2-B05/N-01/N-02: no log line in this file may contain a Stripe Session
 // ID, Event ID, PaymentIntent ID, claim_token, provider_message_id, or any
 // customer PII — always go through maskId() (irreversible hash, not a
 // truncation). No log line may contain a raw Supabase/Postgres error
 // object, error.message/details/hint, SQL text, constraint name, table
 // name, or connection info — every failure is logged as one of a small
-// set of stable string codes (core_rpc_failed, claim_rpc_failed,
-// freeze_rpc_failed, complete_rpc_failed, notification_content_invalid,
-// provider_send_failed, ...), never the underlying error's own text.
+// set of stable string codes, never the underlying error's own text.
 
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
@@ -31,6 +34,7 @@ import { Resend } from "resend";
 const { resolveOrderId, RESULT } = require("../../lib/webhook/resolveOrderId");
 const { buildNotificationContent } = require("../../lib/webhook/notificationContent");
 const { maskId } = require("../../lib/webhook/maskId");
+const { computeProviderIdempotencyKey } = require("../../lib/webhook/providerIdempotencyKey");
 
 export const config = { api: { bodyParser: false } };
 
@@ -47,9 +51,15 @@ const supabase = createClient(
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const RESEND_FROM =
-  process.env.RESEND_FROM || "HonestOki <noreply@xn--okinawa-n14kh45a.com>";
-const OPS_EMAIL_TO = process.env.NOTIFY_TO_EMAIL || "songshanshan1977@gmail.com";
+// R3 §四: exactly one official env var each, NO hardcoded fallback. A
+// missing/blank value is a real production misconfiguration, not
+// something this code should silently paper over with a baked-in address.
+const SENDER_EMAIL = process.env.RESEND_FROM;
+const OPS_EMAIL_TO = process.env.NOTIFY_TO_EMAIL;
+
+function isBlank(v) {
+  return !v || String(v).trim().length === 0;
+}
 
 async function buffer(readable) {
   const chunks = [];
@@ -77,34 +87,19 @@ function safeTruncateForDb(msg, max = 300) {
 //   - a top-level Supabase/PostgREST error
 //   - data is null/undefined
 //   - data.ok is not literally true
-// (This subsumes "RPC affected 0 rows" and "reason =
-// claim_token_mismatch_or_expired" — both of those surface as
-// data.ok === false from these two RPCs, which this check already
-// rejects.)
 function isRpcEnvelopeOk({ data, error }) {
   return !error && !!data && data.ok === true;
 }
 
-// R2-B03: the installed Resend SDK's response shape is
+// R2-B03/R3 §一: the installed Resend SDK's response shape is
 // `{ data: { id } | null, error: ErrorResponse | null }` — a resolved
-// promise is NOT proof of delivery. All three of these must be treated as
-// failures, not just a thrown/rejected promise:
-//   - the promise rejects (network/SDK-level failure)
-//   - it resolves with a non-null `error`
-//   - it resolves with no `data` (or `data.id` missing) AND no `error`
-//     either (defensive: an SDK/API contract violation should never be
-//     silently treated as success)
-// R2-B02: idempotencyKey is REQUIRED here, not optional — every call site
-// passes the claimed outbox row's own stable dedupe_key, so a retry that
-// re-sends the SAME frozen payload (see freezePayload below) is safe even
-// within Resend's own 24-hour Idempotency-Key window.
-async function sendViaResend({ to, mail, idempotencyKey }) {
+// promise is NOT proof of delivery. `from`/`to`/`subject`/`html` and the
+// Idempotency-Key MUST all come from the caller's already-frozen payload —
+// this function never reads SENDER_EMAIL or rebuilds content itself.
+async function sendViaResend({ from, to, subject, html, idempotencyKey }) {
   let response;
   try {
-    response = await resend.emails.send(
-      { from: RESEND_FROM, to, subject: mail.subject, html: mail.html },
-      { idempotencyKey }
-    );
+    response = await resend.emails.send({ from, to, subject, html }, { idempotencyKey });
   } catch (err) {
     return { ok: false, errorMessage: safeTruncateForDb(err && err.message) };
   }
@@ -129,25 +124,34 @@ async function completeNotification({ dedupeKey, claimToken, outcome, providerMe
   });
 }
 
-// R2 §四: claim/freeze/send/complete one already-claimed outbox row.
-// Recovers correctly no matter where a PREVIOUS attempt died:
-//   - died before claiming at all -> row is still 'pending', claimed fresh
-//   - died between claim and calling Resend -> claim_expires_at lapses
-//     (2 min lease), a later retry's claim picks the row back up, and
-//     freeze_webhook_notification_payload_v1 hands back the SAME frozen
-//     content (or freezes it for the first time if this really is the
-//     first attempt)
-//   - died between Resend accepting the email and calling complete() ->
-//     same recovery path; the retry resends via sendViaResend with the
-//     SAME idempotencyKey (the row's own dedupe_key) and the SAME frozen
-//     payload, so Resend's own Idempotency-Key protection (24h window)
-//     absorbs the duplicate — this closes the gap the R1 round explicitly
-//     flagged as unresolved.
-//   - the row has been "dispatching" for >= 23h without ever reaching
-//     'sent' -> claim_webhook_notification_v1 itself will have already
-//     moved it to 'dead_letter' before this function ever sees it again;
-//     no code here needs to special-case that.
+// R2 §四 / R3 §一/§二: claim/freeze/send/complete one already-claimed
+// outbox row. Recovers correctly no matter where a PREVIOUS attempt died
+// (before claiming, between claim and Resend, between Resend accepting
+// the email and complete()) — see the round's completion report for the
+// full recovery-path breakdown. R3 additions:
+//   - the frozen payload now covers the SENDER address and the
+//     provider_idempotency_key too, not just recipient/subject/html, so a
+//     retry can never pair the same Idempotency-Key with a different
+//     `from` even if RESEND_FROM changes between attempts;
+//   - SENDER_EMAIL / OPS_EMAIL_TO missing now fails the row closed instead
+//     of silently substituting a hardcoded address — there is no fallback
+//     left to fall back to.
 async function processClaimedRow({ row, order, reason, stripeSessionId, attemptedOrderId, existingOrderId }) {
+  if (isBlank(SENDER_EMAIL)) {
+    // Infrastructure/config problem, not row-specific — potentially
+    // transient (a redeploy with the env var set fixes it), stays
+    // retryable. Never calls Resend, never freezes a payload with a blank
+    // sender.
+    const completeResult = await completeNotification({
+      dedupeKey: row.dedupe_key,
+      claimToken: row.claim_token,
+      outcome: "failed",
+      errorMessage: "missing_sender_email",
+    });
+    if (!isRpcEnvelopeOk(completeResult)) console.error("[webhook] complete_rpc_failed");
+    return false;
+  }
+
   const content = buildNotificationContent({
     notificationType: row.notification_type,
     order,
@@ -174,14 +178,18 @@ async function processClaimedRow({ row, order, reason, stripeSessionId, attempte
     return false;
   }
 
-  if (!content.to) {
+  if (isBlank(content.to)) {
     if (row.audience === "customer") {
       // R2-B03: a missing customer email is a DETERMINISTIC data problem —
       // retrying will never produce an email address. Dead-letter it
-      // immediately rather than waiting out the 23h auto-retry window,
-      // and — critically — this does NOT force the whole webhook to 5xx:
-      // the matching ops alert for this same session still gets its own
-      // chance to send, and once THAT succeeds the webhook can return 200.
+      // immediately rather than waiting out the 23h auto-retry window.
+      // R3 §三: complete_webhook_notification_v1 itself atomically inserts
+      // a dedicated ops_missing_customer_email alert row when it sees this
+      // exact (outcome='dead_letter', error_message='missing_customer_email')
+      // combination — nothing further to do here. This does NOT force the
+      // whole webhook to 5xx: the matching alert gets its own claim/send
+      // chance (see the second claim pass below), and once THAT succeeds
+      // the webhook can return 200.
       const completeResult = await completeNotification({
         dedupeKey: row.dedupe_key,
         claimToken: row.claim_token,
@@ -194,8 +202,9 @@ async function processClaimedRow({ row, order, reason, stripeSessionId, attempte
       }
       return true;
     }
-    // Ops recipient missing (misconfiguration) IS potentially transient
-    // (a redeploy with the right env var fixes it) — stays retryable.
+    // Ops recipient missing (NOTIFY_TO_EMAIL unset/blank) IS potentially
+    // transient (a redeploy with the env var set fixes it) — stays
+    // retryable, never silently sent anywhere else.
     const completeResult = await completeNotification({
       dedupeKey: row.dedupe_key,
       claimToken: row.claim_token,
@@ -206,12 +215,16 @@ async function processClaimedRow({ row, order, reason, stripeSessionId, attempte
     return false;
   }
 
+  const providerIdempotencyKey = computeProviderIdempotencyKey(row.dedupe_key);
+
   const freezeResult = await supabase.rpc("freeze_webhook_notification_payload_v1", {
     p_dedupe_key: row.dedupe_key,
     p_claim_token: row.claim_token,
+    p_sender_email: SENDER_EMAIL,
     p_recipient_email: content.to,
     p_email_subject: content.mail.subject,
     p_email_html: content.mail.html,
+    p_provider_idempotency_key: providerIdempotencyKey,
   });
 
   if (!isRpcEnvelopeOk(freezeResult)) {
@@ -219,12 +232,17 @@ async function processClaimedRow({ row, order, reason, stripeSessionId, attempte
     return false;
   }
 
+  // R3 §一 item 6/7: use ONLY the database-returned frozen payload for the
+  // actual send — never SENDER_EMAIL or the candidate `content` built
+  // above (a concurrent delivery may have frozen different values first).
   const frozen = freezeResult.data.frozen;
 
   const sendResult = await sendViaResend({
-    to: frozen.recipient_email,
-    mail: { subject: frozen.subject, html: frozen.html },
-    idempotencyKey: row.dedupe_key,
+    from: frozen.from,
+    to: frozen.to,
+    subject: frozen.subject,
+    html: frozen.html,
+    idempotencyKey: frozen.provider_idempotency_key,
   });
 
   if (!sendResult.ok) {
@@ -247,7 +265,7 @@ async function processClaimedRow({ row, order, reason, stripeSessionId, attempte
   return sendResult.ok;
 }
 
-async function claimAndProcessNotifications({ orderId, sessionId, order, reason, existingOrderId }) {
+async function claimAndProcessOnce({ orderId, sessionId, order, reason, existingOrderId }) {
   const { data: claimed, error: claimError } = await supabase.rpc("claim_webhook_notification_v1", {
     p_order_id: orderId,
     p_stripe_session_id: sessionId,
@@ -255,7 +273,7 @@ async function claimAndProcessNotifications({ orderId, sessionId, order, reason,
 
   if (claimError) {
     console.error("[webhook] claim_rpc_failed");
-    return false;
+    return null;
   }
 
   const rows = claimed || [];
@@ -274,6 +292,23 @@ async function claimAndProcessNotifications({ orderId, sessionId, order, reason,
   }
 
   return allOk;
+}
+
+// R3 §三: a customer row dead-lettering for a missing email atomically
+// creates a NEW ops_missing_customer_email outbox row (inside
+// complete_webhook_notification_v1's own transaction) — a row that did not
+// exist yet when the FIRST claim call ran, so it would never be seen or
+// sent without a second claim pass. Always runs exactly once more after
+// the main pass, bounded and deterministic (no unbounded loop): on the
+// overwhelmingly common path this second claim simply returns nothing.
+async function claimAndProcessNotifications(args) {
+  const firstPassOk = await claimAndProcessOnce(args);
+  if (firstPassOk === null) return false;
+
+  const secondPassOk = await claimAndProcessOnce(args);
+  if (secondPassOk === null) return false;
+
+  return firstPassOk && secondPassOk;
 }
 
 const KNOWN_RESULTS = new Set(["locked", "failed", "already_processed", "duplicate_payment_conflict"]);
@@ -355,7 +390,7 @@ export default async function handler(req, res) {
       .from("orders")
       .select(
         `order_id, start_date, end_date, car_model_id, driver_lang, duration, email, name, phone,
-         wechat, total_price, deposit_amount, balance_due`
+         wechat, total_price, deposit_amount, balance_due, payment_status, inventory_status`
       )
       .eq("order_id", orderId)
       .single();

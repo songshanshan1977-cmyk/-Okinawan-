@@ -24,6 +24,23 @@
 --     customer email on file) without waiting out the 23-hour window
 --     (§五).
 --
+-- Revised a third time (R3) to address the last 3 blocking findings:
+--   - the frozen payload now covers the SENDER address and the
+--     provider-facing Idempotency-Key too, not just the recipient side —
+--     R2 left a gap where the same Resend Idempotency-Key could be
+--     replayed with a different `from` if RESEND_FROM changed between
+--     attempts (§一/§二);
+--   - a customer row dead-lettering specifically for a missing email now
+--     atomically creates its own dedicated ops_missing_customer_email
+--     alert row — previously operations only ever saw the ordinary
+--     business-outcome email, with no independent signal that the
+--     customer's own copy never went out (§三);
+--   - the hardcoded operations-email fallback is gone from the Node code
+--     this migration's RPCs serve; a missing NOTIFY_TO_EMAIL now fails
+--     closed at the application layer rather than silently substituting a
+--     baked-in address (§四, enforced in pages/api/stripe-webhook.js, not
+--     in this SQL file).
+--
 -- MUST be applied AFTER 20260722120000_webhook_fail_safe_v1.sql, which
 -- inserts into the columns this file adds.
 --
@@ -50,22 +67,40 @@ ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS sent_at timestamptz;
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 -- provider_message_id and error_message are reused as-is (already exist).
 
--- R2 §三: the frozen payload. Written exactly once per row (by
+-- R2 §三 / R3 §一: the frozen payload. Written exactly once per row (by
 -- freeze_webhook_notification_payload_v1, first-writer-wins) so every
--- retry — including ones using the SAME Resend Idempotency-Key — sends
--- byte-identical content, never content re-derived from `orders` data
--- that may have changed between attempts.
+-- retry — including ones using the SAME Resend Idempotency-Key — sends a
+-- byte-identical request, never content re-derived from `orders` data (or
+-- from the RESEND_FROM environment variable) that may have changed
+-- between attempts. R3 extends this to the SENDER address and the
+-- provider-facing idempotency key itself — R2 only froze the recipient
+-- side, which left the door open for the same Idempotency-Key to be
+-- replayed with a different `from` if RESEND_FROM changed between
+-- attempts.
+ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS sender_email text;
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS recipient_email text;
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS email_subject text;
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS email_html text;
+-- R3 §二: the provider-facing Idempotency-Key Node computes as
+-- `webhook-` + sha256(dedupe_key) — never the raw dedupe_key itself (which
+-- embeds the order_id/session_id/audience/notification_type in the clear).
+-- Frozen alongside the rest of the payload on first freeze; every retry
+-- reads this back rather than recomputing it, so "same key, same content"
+-- holds even though the computation is deterministic and recomputing it
+-- would happen to produce the same value anyway — reading the frozen
+-- value keeps a single, auditable source of truth for what was actually
+-- sent to the provider.
+ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS provider_idempotency_key text;
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS payload_frozen_at timestamptz;
 
--- R2 §四: the moment Node is first about to attempt a real delivery for
--- this row (set by claim_webhook_notification_v1 the first time it claims
--- a row whose first_dispatch_at is still NULL). Anchors the 23-hour
--- automatic-retry cutoff, which is deliberately ONE HOUR inside Resend's
--- documented 24-hour Idempotency-Key validity window — see §9 of the
--- round's completion report for why 23h and not 24h.
+-- R2 §四: the moment a claim first picks up this row for real dispatch
+-- (set by claim_webhook_notification_v1 the first time it claims a row
+-- whose first_dispatch_at is still NULL). This marks when the row entered
+-- the SEND pipeline — it does NOT mean Resend received or acknowledged
+-- any request; the actual attempt could still fail before, during, or
+-- after the provider call. Anchors the 23-hour automatic-retry cutoff,
+-- deliberately ONE HOUR inside Resend's documented 24-hour Idempotency-Key
+-- validity window.
 ALTER TABLE public.send_logs ADD COLUMN IF NOT EXISTS first_dispatch_at timestamptz;
 
 -- dedupe_key composition varies by notification family (see the core
@@ -133,6 +168,13 @@ BEGIN
   END IF;
 
   -- (a) 23-hour dead-letter sweep — see the function-level comment above.
+  -- 'provider_delivery_uncertain' means exactly that and nothing more:
+  -- this pipeline can no longer confirm one way or the other whether
+  -- Resend ever received or sent this specific email — NOT "Resend never
+  -- got it" and NOT "Resend definitely sent it". After this point nothing
+  -- in this codebase acts on the row again; a human (via direct DB query —
+  -- no admin/monitoring surface for this was built this round) has to
+  -- decide what, if anything, to do about it.
   UPDATE public.send_logs
   SET status = 'dead_letter',
       claim_token = NULL,
@@ -164,6 +206,10 @@ BEGIN
     SET status = 'processing',
         claim_token = v_token,
         claim_expires_at = now() + interval '2 minutes',
+        -- Audit-only counter — NOT a retry limit. Nothing in this codebase
+        -- reads attempt_count to decide whether to stop retrying; the
+        -- 23-hour first_dispatch_at cutoff above is the only hard stop on
+        -- automatic retries.
         attempt_count = attempt_count + 1,
         -- Only ever set on this row's FIRST claim; every later reclaim
         -- (after a crash, an expired lease, or a failed send) leaves the
@@ -191,14 +237,26 @@ GRANT EXECUTE ON FUNCTION public.claim_webhook_notification_v1(text, text) TO se
 -- =============================================================
 -- 3. freeze_webhook_notification_payload_v1 — first-writer-wins content
 -- =============================================================
+-- R3 §一/§二: freezes the COMPLETE outbound request, not just the
+-- recipient side — sender_email, recipient_email, subject, html, AND the
+-- provider_idempotency_key Node computed for this row. R2's version only
+-- froze recipient/subject/html, which left a real hazard: the SAME
+-- Resend Idempotency-Key could be replayed with a DIFFERENT `from` address
+-- if RESEND_FROM changed between attempts (a redeploy, a config change).
+-- Freezing the sender and the idempotency key together with the content
+-- guarantees "same key -> same complete request" holds unconditionally.
+--
 -- Called by Node immediately after claiming a row and building a
--- CANDIDATE email from current `orders` data. If this row has never been
--- frozen before, the candidate becomes authoritative and is stored. If it
--- HAS already been frozen (a retry, possibly after `orders` data has since
--- changed), the candidate is discarded and the ALREADY-frozen content is
--- returned instead — so the actual bytes sent to Resend, and the
--- Idempotency-Key request, are always self-consistent across every retry
--- of the same outbox row.
+-- CANDIDATE email from current `orders` data / current env vars. If this
+-- row has never been frozen before, the candidate becomes authoritative
+-- and is stored. If it HAS already been frozen (a retry, possibly after
+-- `orders` data or RESEND_FROM has since changed), the candidate is
+-- discarded and the ALREADY-frozen content is returned instead — so the
+-- actual bytes sent to Resend, and the Idempotency-Key request, are always
+-- self-consistent across every retry of the same outbox row. Node MUST
+-- use only the returned `frozen.*` fields for the actual send — never its
+-- own freshly-built candidate, even on what it believes is the first
+-- attempt (a concurrent delivery could have frozen it moments earlier).
 --
 -- Only succeeds if p_claim_token matches the row's CURRENT claim_token —
 -- exactly the same ownership check as complete_webhook_notification_v1, so
@@ -207,9 +265,11 @@ GRANT EXECUTE ON FUNCTION public.claim_webhook_notification_v1(text, text) TO se
 CREATE OR REPLACE FUNCTION public.freeze_webhook_notification_payload_v1(
   p_dedupe_key text,
   p_claim_token uuid,
+  p_sender_email text,
   p_recipient_email text,
   p_email_subject text,
-  p_email_html text
+  p_email_html text,
+  p_provider_idempotency_key text
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -224,6 +284,20 @@ BEGIN
       USING ERRCODE = 'P0006';
   END IF;
 
+  -- R3 §一 item 3: every field of a NEW payload must be non-blank. This is
+  -- a defense-in-depth guard against a caller bug — Node's own logic
+  -- should never reach this call with a blank field (it dead-letters/fails
+  -- the row itself first, see pages/api/stripe-webhook.js), but the
+  -- database must not silently accept and freeze garbage either.
+  IF length(trim(coalesce(p_sender_email, ''))) = 0
+     OR length(trim(coalesce(p_recipient_email, ''))) = 0
+     OR length(trim(coalesce(p_email_subject, ''))) = 0
+     OR length(trim(coalesce(p_email_html, ''))) = 0
+     OR length(trim(coalesce(p_provider_idempotency_key, ''))) = 0 THEN
+    RAISE EXCEPTION 'freeze_webhook_notification_payload_v1: all payload fields must be non-blank'
+      USING ERRCODE = 'P0008';
+  END IF;
+
   SELECT * INTO v_row
   FROM public.send_logs
   WHERE dedupe_key = p_dedupe_key
@@ -236,9 +310,11 @@ BEGIN
 
   IF v_row.payload_frozen_at IS NULL THEN
     UPDATE public.send_logs
-    SET recipient_email = p_recipient_email,
+    SET sender_email = p_sender_email,
+        recipient_email = p_recipient_email,
         email_subject = p_email_subject,
         email_html = p_email_html,
+        provider_idempotency_key = p_provider_idempotency_key,
         payload_frozen_at = now(),
         updated_at = now()
     WHERE dedupe_key = p_dedupe_key
@@ -247,22 +323,26 @@ BEGIN
   END IF;
   -- else: already frozen — v_row already holds the existing payload as
   -- read above; the candidate this call was passed is silently discarded.
+  -- This is not a log-worthy event: it is the expected, correct outcome
+  -- of every retry after the first.
 
   RETURN jsonb_build_object(
     'ok', true,
     'frozen', jsonb_build_object(
-      'recipient_email', v_row.recipient_email,
+      'from', v_row.sender_email,
+      'to', v_row.recipient_email,
       'subject', v_row.email_subject,
-      'html', v_row.email_html
+      'html', v_row.email_html,
+      'provider_idempotency_key', v_row.provider_idempotency_key
     )
   );
 END;
 $function$;
 
-REVOKE ALL ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text) FROM anon;
-REVOKE ALL ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text) FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text) TO service_role;
+REVOKE ALL ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text, text, text) FROM anon;
+REVOKE ALL ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text, text, text) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text, text, text) TO service_role;
 
 -- =============================================================
 -- 4. complete_webhook_notification_v1 — finish a claimed outbox row
@@ -293,6 +373,8 @@ SET search_path = pg_catalog, public
 AS $function$
 DECLARE
   v_updated integer;
+  v_order_id text;
+  v_session_id text;
 BEGIN
   IF p_dedupe_key IS NULL OR p_claim_token IS NULL THEN
     RAISE EXCEPTION 'complete_webhook_notification_v1: p_dedupe_key and p_claim_token are required'
@@ -367,7 +449,29 @@ BEGIN
     FROM public.send_logs sl
     WHERE sl.dedupe_key = p_dedupe_key
       AND o.order_id = sl.order_id
-      AND sl.notification_type IN ('ops_booking_confirmed', 'ops_manual_review', 'ops_session_order_conflict');
+      AND sl.notification_type IN ('ops_booking_confirmed', 'ops_manual_review', 'ops_session_order_conflict', 'ops_missing_customer_email');
+  END IF;
+
+  -- R3 §三: a customer-audience row dead-lettering specifically because
+  -- the order has no email on file is not just "stop retrying it" — it is
+  -- a fact operations needs to know and currently has NO independent
+  -- signal for (they'd otherwise only see whatever the ORIGINAL business
+  -- outcome email said, with no indication the customer never got their
+  -- own copy). Atomically insert a dedicated, ops-only alert row for it,
+  -- in the SAME transaction as the dead-letter status change, so the two
+  -- facts can never separate (one without the other). ON CONFLICT (dedupe_key)
+  -- DO NOTHING makes this safe against Stripe redelivering the same event.
+  IF p_outcome = 'dead_letter' AND p_error_message = 'missing_customer_email' THEN
+    SELECT sl.order_id, sl.stripe_session_id INTO v_order_id, v_session_id
+    FROM public.send_logs sl
+    WHERE sl.dedupe_key = p_dedupe_key;
+
+    INSERT INTO public.send_logs
+      (order_id, stripe_session_id, audience, notification_type, dedupe_key, status)
+    VALUES
+      (v_order_id, v_session_id, 'ops', 'ops_missing_customer_email',
+       v_order_id || ':' || v_session_id || ':ops:ops_missing_customer_email', 'pending')
+    ON CONFLICT (dedupe_key) DO NOTHING;
   END IF;
 
   RETURN jsonb_build_object('ok', true);

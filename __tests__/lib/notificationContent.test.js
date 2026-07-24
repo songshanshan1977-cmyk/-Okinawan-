@@ -120,5 +120,66 @@ describe("buildNotificationContent", () => {
       });
       expect(r.to).toBe("ops@x.com");
     });
+
+    test("17. R3 §五 (N-03 fix): wording no longer claims neither order was confirmed — order A's original state is explicitly said to be UNCHANGED, only order B is said to be unpaid/unlocked", () => {
+      const r = buildNotificationContent({
+        notificationType: "ops_session_order_conflict",
+        order: ORDER,
+        stripeSessionId: "cs_test_wording_check_1234567890",
+        opsEmailTo: "ops@x.com",
+        attemptedOrderId: "ORD-B-ATTEMPTED",
+        existingOrderId: "ORD-A-EXISTING",
+      });
+      // the old, incorrect claim must be gone
+      expect(r.mail.html).not.toContain("系统未对任何一个订单做出");
+      // the corrected claims must be present: no order was modified by this
+      // conflict attempt; order A's state is explicitly preserved/unaffected;
+      // order B (the attempted one) is explicitly unpaid/unlocked.
+      expect(r.mail.html).toContain("没有修改任何订单");
+      expect(r.mail.html).toMatch(/未被这次冲突影响|未被.*撤销/);
+      expect(r.mail.html).toContain("未被标记为已付款");
+      expect(r.mail.html).toContain("未锁定库存");
+    });
+  });
+
+  describe("R3 §三: ops_missing_customer_email", () => {
+    test("8/9. ops address; body explicitly states payment/processing status, missing email, no customer notification, stopped auto-retry, need for manual contact, order id, payment_status, inventory_status, and a masked Session ID", () => {
+      const orderWithStatus = {
+        ...ORDER,
+        email: null,
+        payment_status: "paid",
+        inventory_status: "failed",
+      };
+      const fullSessionId = "cs_test_missing_email_1234567890abcdef";
+      const r = buildNotificationContent({
+        notificationType: "ops_missing_customer_email",
+        order: orderWithStatus,
+        stripeSessionId: fullSessionId,
+        opsEmailTo: "ops@x.com",
+      });
+
+      expect(r.to).toBe("ops@x.com");
+      expect(r.mail.subject).not.toContain("预约确认");
+      expect(r.mail.subject).not.toContain("新订单");
+      expect(r.mail.html).toContain(orderWithStatus.order_id);
+      expect(r.mail.html).toContain("付款"); // "已经付款或正在进行付款处理"
+      expect(r.mail.html).toContain("没有客户邮箱地址");
+      expect(r.mail.html).toContain("完全没有收到系统的任何通知");
+      expect(r.mail.html).toContain("自动邮件重试已经停止");
+      expect(r.mail.html).toMatch(/电话|微信|人工联系/);
+      expect(r.mail.html).toContain("paid"); // payment_status
+      expect(r.mail.html).toContain("failed"); // inventory_status
+      expect(r.mail.html).not.toContain(fullSessionId);
+    });
+
+    test("never reads as a routine booking-confirmed notice", () => {
+      const r = buildNotificationContent({
+        notificationType: "ops_missing_customer_email",
+        order: { ...ORDER, email: null, payment_status: "paid", inventory_status: "pending" },
+        stripeSessionId: "cs_test_x",
+        opsEmailTo: "ops@x.com",
+      });
+      expect(r.mail.html).not.toContain("预约已确认");
+    });
   });
 });
