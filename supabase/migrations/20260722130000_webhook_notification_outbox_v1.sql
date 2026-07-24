@@ -41,6 +41,32 @@
 --     baked-in address (§四, enforced in pages/api/stripe-webhook.js, not
 --     in this SQL file).
 --
+-- Revised a fourth time (R4) to fix a real duplicate-notification-loss bug
+-- (R4-B01) plus one non-blocking hardening item (N-01):
+--   - claim_webhook_notification_v1 now returns payload_frozen_at and, when
+--     it is non-null, the complete frozen payload (sender_email/
+--     recipient_email/email_subject/email_html/provider_idempotency_key)
+--     alongside the routing metadata it already returned. Previously Node
+--     had no way to know a row was already frozen without a SEPARATE call,
+--     so a real bug slipped in: on retry, Node rebuilt notification content
+--     from CURRENT `orders` data, and if the order's email had since gone
+--     blank, dead-lettered the row and never even attempted to send the
+--     ALREADY-frozen (and possibly still deliverable) content that had been
+--     waiting since the first attempt. The frozen payload must outrank
+--     current order data on every retry, unconditionally — this migration
+--     makes that possible by handing Node the frozen state up front;
+--     pages/api/stripe-webhook.js now branches on it before doing anything
+--     else (see the round's completion report §六/§七 for the exact
+--     before/after flow);
+--   - complete_webhook_notification_v1's ops_missing_customer_email
+--     auto-creation is now gated on the ORIGINAL row actually being a
+--     customer-audience row of an allowed notification_type
+--     (customer_booking_confirmed / customer_manual_review) — previously it
+--     keyed ONLY on (outcome='dead_letter', error_message=
+--     'missing_customer_email'), which a bug or a future caller could in
+--     principle trigger against an ops-audience row (including
+--     ops_missing_customer_email itself), creating a recursive alert loop.
+--
 -- MUST be applied AFTER 20260722120000_webhook_fail_safe_v1.sql, which
 -- inserts into the columns this file adds.
 --
@@ -137,11 +163,19 @@ CREATE INDEX IF NOT EXISTS send_logs_claimable_idx
 --       row's FIRST ever claim (first_dispatch_at IS NULL) that moment is
 --       recorded as first_dispatch_at.
 --
--- Returns only routing metadata — dedupe_key/notification_type/audience/
--- claim_token/order_id — never email/subject/customer PII. The frozen
--- payload (if any) is fetched separately via
--- freeze_webhook_notification_payload_v1, which is also where a
--- not-yet-frozen row gets its content written for the first time.
+-- R4-B01: also returns payload_frozen_at and — whenever it is non-null —
+-- the row's complete already-frozen payload (sender_email/recipient_email/
+-- email_subject/email_html/provider_idempotency_key). R2/R3 only returned
+-- routing metadata here and made Node call freeze_webhook_notification_v1
+-- separately to discover/fetch frozen content; the real bug that exposed
+-- was that Node's OWN pre-freeze logic (rebuild content from current
+-- `orders`, dead-letter on missing email, etc.) ran unconditionally on
+-- every claim, frozen or not — so a retry of an ALREADY-frozen row could
+-- get dead-lettered by CURRENT order data before ever reaching the freeze
+-- call that would have told it the row was already frozen. Returning the
+-- frozen state directly from claim lets Node check it FIRST, before doing
+-- anything else. Still never returns unrelated order PII (name/phone/
+-- wechat/etc.) — only the exact fields that make up the frozen request.
 CREATE OR REPLACE FUNCTION public.claim_webhook_notification_v1(
   p_order_id text,
   p_stripe_session_id text
@@ -151,7 +185,13 @@ RETURNS TABLE (
   notification_type text,
   audience text,
   claim_token uuid,
-  order_id text
+  order_id text,
+  payload_frozen_at timestamptz,
+  sender_email text,
+  recipient_email text,
+  email_subject text,
+  email_html text,
+  provider_idempotency_key text
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -160,6 +200,12 @@ AS $function$
 DECLARE
   r RECORD;
   v_token uuid;
+  v_payload_frozen_at timestamptz;
+  v_sender_email text;
+  v_recipient_email text;
+  v_email_subject text;
+  v_email_html text;
+  v_provider_idempotency_key text;
 BEGIN
   IF p_order_id IS NULL OR length(trim(p_order_id)) = 0
      OR p_stripe_session_id IS NULL OR length(trim(p_stripe_session_id)) = 0 THEN
@@ -217,13 +263,23 @@ BEGIN
         -- 23-hour cutoff above is measured from.
         first_dispatch_at = COALESCE(first_dispatch_at, now()),
         updated_at = now()
-    WHERE id = r.id;
+    WHERE id = r.id
+    RETURNING
+      payload_frozen_at, sender_email, recipient_email, email_subject, email_html, provider_idempotency_key
+    INTO
+      v_payload_frozen_at, v_sender_email, v_recipient_email, v_email_subject, v_email_html, v_provider_idempotency_key;
 
     dedupe_key := r.dedupe_key;
     notification_type := r.notification_type;
     audience := r.audience;
     claim_token := v_token;
     order_id := p_order_id;
+    payload_frozen_at := v_payload_frozen_at;
+    sender_email := v_sender_email;
+    recipient_email := v_recipient_email;
+    email_subject := v_email_subject;
+    email_html := v_email_html;
+    provider_idempotency_key := v_provider_idempotency_key;
     RETURN NEXT;
   END LOOP;
 END;
@@ -375,6 +431,8 @@ DECLARE
   v_updated integer;
   v_order_id text;
   v_session_id text;
+  v_orig_audience text;
+  v_orig_notification_type text;
 BEGIN
   IF p_dedupe_key IS NULL OR p_claim_token IS NULL THEN
     RAISE EXCEPTION 'complete_webhook_notification_v1: p_dedupe_key and p_claim_token are required'
@@ -452,26 +510,41 @@ BEGIN
       AND sl.notification_type IN ('ops_booking_confirmed', 'ops_manual_review', 'ops_session_order_conflict', 'ops_missing_customer_email');
   END IF;
 
-  -- R3 §三: a customer-audience row dead-lettering specifically because
-  -- the order has no email on file is not just "stop retrying it" — it is
-  -- a fact operations needs to know and currently has NO independent
-  -- signal for (they'd otherwise only see whatever the ORIGINAL business
-  -- outcome email said, with no indication the customer never got their
-  -- own copy). Atomically insert a dedicated, ops-only alert row for it,
-  -- in the SAME transaction as the dead-letter status change, so the two
-  -- facts can never separate (one without the other). ON CONFLICT (dedupe_key)
+  -- R3 §三 / R4 §五 (N-01): a customer-audience row dead-lettering
+  -- specifically because the order has no email on file is not just "stop
+  -- retrying it" — it is a fact operations needs to know and currently has
+  -- NO independent signal for. Atomically insert a dedicated, ops-only
+  -- alert row for it, in the SAME transaction as the dead-letter status
+  -- change, so the two facts can never separate. ON CONFLICT (dedupe_key)
   -- DO NOTHING makes this safe against Stripe redelivering the same event.
+  --
+  -- N-01: this must ONLY ever fire for the row it is genuinely about — the
+  -- ORIGINAL row being completed must itself be a customer-audience row of
+  -- an allowed notification_type. Checking only (outcome='dead_letter',
+  -- error_message='missing_customer_email') was not enough: nothing
+  -- structurally prevented an ops-audience row (including
+  -- ops_missing_customer_email itself) from being completed with that
+  -- exact outcome/error combination — by a caller bug today, or a future
+  -- caller tomorrow — which would create a recursive alert loop (an alert
+  -- about an alert). Re-reading the row's own audience/notification_type
+  -- here, inside the same function, and gating the INSERT on both, closes
+  -- that off structurally rather than relying on Node never making the
+  -- mistake.
   IF p_outcome = 'dead_letter' AND p_error_message = 'missing_customer_email' THEN
-    SELECT sl.order_id, sl.stripe_session_id INTO v_order_id, v_session_id
+    SELECT sl.order_id, sl.stripe_session_id, sl.audience, sl.notification_type
+    INTO v_order_id, v_session_id, v_orig_audience, v_orig_notification_type
     FROM public.send_logs sl
     WHERE sl.dedupe_key = p_dedupe_key;
 
-    INSERT INTO public.send_logs
-      (order_id, stripe_session_id, audience, notification_type, dedupe_key, status)
-    VALUES
-      (v_order_id, v_session_id, 'ops', 'ops_missing_customer_email',
-       v_order_id || ':' || v_session_id || ':ops:ops_missing_customer_email', 'pending')
-    ON CONFLICT (dedupe_key) DO NOTHING;
+    IF v_orig_audience = 'customer'
+       AND v_orig_notification_type IN ('customer_booking_confirmed', 'customer_manual_review') THEN
+      INSERT INTO public.send_logs
+        (order_id, stripe_session_id, audience, notification_type, dedupe_key, status)
+      VALUES
+        (v_order_id, v_session_id, 'ops', 'ops_missing_customer_email',
+         v_order_id || ':' || v_session_id || ':ops:ops_missing_customer_email', 'pending')
+      ON CONFLICT (dedupe_key) DO NOTHING;
+    END IF;
   END IF;
 
   RETURN jsonb_build_object('ok', true);

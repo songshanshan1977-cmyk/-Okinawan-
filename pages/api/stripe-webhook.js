@@ -1,6 +1,6 @@
 // pages/api/stripe-webhook.js
 //
-// v1 fail-safe rewrite (sandbox/webhook-fail-safe-v1), revised across three
+// v1 fail-safe rewrite (sandbox/webhook-fail-safe-v1), revised across four
 // Codex review rounds. All business-content writes (orders/payments/
 // inventory/notification outbox) happen inside the single atomic
 // process_checkout_payment_v1 RPC (see supabase/migrations/
@@ -26,6 +26,14 @@
 // object, error.message/details/hint, SQL text, constraint name, table
 // name, or connection info — every failure is logged as one of a small
 // set of stable string codes, never the underlying error's own text.
+//
+// R4-B01: once a send_logs row has ever been frozen (payload_frozen_at is
+// non-null, as reported directly by claim_webhook_notification_v1), its
+// frozen sender/recipient/subject/html/provider_idempotency_key are the
+// ONLY source of truth for every subsequent send attempt — current
+// `orders` data, current RESEND_FROM/NOTIFY_TO_EMAIL, and any freshly
+// built candidate content are never consulted again for that row. See
+// processClaimedRow below.
 
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
@@ -124,19 +132,61 @@ async function completeNotification({ dedupeKey, claimToken, outcome, providerMe
   });
 }
 
-// R2 §四 / R3 §一/§二: claim/freeze/send/complete one already-claimed
-// outbox row. Recovers correctly no matter where a PREVIOUS attempt died
-// (before claiming, between claim and Resend, between Resend accepting
-// the email and complete()) — see the round's completion report for the
-// full recovery-path breakdown. R3 additions:
-//   - the frozen payload now covers the SENDER address and the
-//     provider_idempotency_key too, not just recipient/subject/html, so a
-//     retry can never pair the same Idempotency-Key with a different
-//     `from` even if RESEND_FROM changes between attempts;
-//   - SENDER_EMAIL / OPS_EMAIL_TO missing now fails the row closed instead
-//     of silently substituting a hardcoded address — there is no fallback
-//     left to fall back to.
-async function processClaimedRow({ row, order, reason, stripeSessionId, attemptedOrderId, existingOrderId }) {
+// R4-B01: send a row using ONLY its already-frozen payload — no rebuild,
+// no re-check of current order data, no re-read of current env vars, no
+// second freeze call. This is the ONLY path allowed to run once
+// row.payload_frozen_at is non-null; see processClaimedRow below for why
+// that priority must be absolute.
+async function sendFrozenRow(row) {
+  const from = row.sender_email;
+  const to = row.recipient_email;
+  const subject = row.email_subject;
+  const html = row.email_html;
+  const idempotencyKey = row.provider_idempotency_key;
+
+  if (isBlank(from) || isBlank(to) || isBlank(subject) || isBlank(html) || isBlank(idempotencyKey)) {
+    // Should never happen — freeze_webhook_notification_payload_v1 rejects
+    // blank fields at write time — but if it ever does, this is a data
+    // problem, not something to paper over by falling back to current
+    // order/env data (that would defeat the entire point of freezing).
+    console.error("[webhook] frozen_payload_invalid");
+    const completeResult = await completeNotification({
+      dedupeKey: row.dedupe_key,
+      claimToken: row.claim_token,
+      outcome: "failed",
+      errorMessage: "frozen_payload_invalid",
+    });
+    if (!isRpcEnvelopeOk(completeResult)) console.error("[webhook] complete_rpc_failed");
+    return false;
+  }
+
+  const sendResult = await sendViaResend({ from, to, subject, html, idempotencyKey });
+
+  if (!sendResult.ok) {
+    console.error("[webhook] provider_send_failed");
+  }
+
+  const completeResult = await completeNotification({
+    dedupeKey: row.dedupe_key,
+    claimToken: row.claim_token,
+    outcome: sendResult.ok ? "sent" : "failed",
+    providerMessageId: sendResult.ok ? sendResult.providerMessageId : null,
+    errorMessage: sendResult.ok ? null : sendResult.errorMessage,
+  });
+
+  if (!isRpcEnvelopeOk(completeResult)) {
+    console.error("[webhook] complete_rpc_failed");
+    return false;
+  }
+
+  return sendResult.ok;
+}
+
+// R4-B01: build a candidate from CURRENT order/env data, validate it, and
+// freeze it — the row's FIRST-EVER attempt only (row.payload_frozen_at was
+// null when claimed). Every later retry of this same row goes through
+// sendFrozenRow above instead, never back through here.
+async function buildAndFreezeThenSend({ row, order, reason, stripeSessionId, attemptedOrderId, existingOrderId }) {
   if (isBlank(SENDER_EMAIL)) {
     // Infrastructure/config problem, not row-specific — potentially
     // transient (a redeploy with the env var set fixes it), stays
@@ -180,16 +230,20 @@ async function processClaimedRow({ row, order, reason, stripeSessionId, attempte
 
   if (isBlank(content.to)) {
     if (row.audience === "customer") {
-      // R2-B03: a missing customer email is a DETERMINISTIC data problem —
-      // retrying will never produce an email address. Dead-letter it
-      // immediately rather than waiting out the 23h auto-retry window.
-      // R3 §三: complete_webhook_notification_v1 itself atomically inserts
-      // a dedicated ops_missing_customer_email alert row when it sees this
-      // exact (outcome='dead_letter', error_message='missing_customer_email')
-      // combination — nothing further to do here. This does NOT force the
-      // whole webhook to 5xx: the matching alert gets its own claim/send
-      // chance (see the second claim pass below), and once THAT succeeds
-      // the webhook can return 200.
+      // R2-B03: a missing customer email is a DETERMINISTIC data problem
+      // for a row that has NEVER been frozen — retrying the BUILD will
+      // never produce an email address (a row that WAS already frozen with
+      // a real address skips this whole function entirely — see
+      // processClaimedRow). Dead-letter it immediately rather than waiting
+      // out the 23h auto-retry window. R3 §三/N-01: complete_webhook_
+      // notification_v1 itself atomically inserts a dedicated
+      // ops_missing_customer_email alert row when it sees this exact
+      // (outcome='dead_letter', error_message='missing_customer_email')
+      // combination on a genuinely customer-audience row of an allowed
+      // type — nothing further to do here. This does NOT force the whole
+      // webhook to 5xx: the matching alert gets its own claim/send chance
+      // (see the second claim pass), and once THAT succeeds the webhook
+      // can return 200.
       const completeResult = await completeNotification({
         dedupeKey: row.dedupe_key,
         claimToken: row.claim_token,
@@ -263,6 +317,26 @@ async function processClaimedRow({ row, order, reason, stripeSessionId, attempte
   }
 
   return sendResult.ok;
+}
+
+// R4-B01 (root cause fix): claim_webhook_notification_v1 now returns
+// row.payload_frozen_at (and the frozen fields themselves) directly — this
+// MUST be checked FIRST, before anything else runs. The bug this closes:
+// previously every claimed row unconditionally went through "rebuild
+// content from current `orders` data, dead-letter on missing email" BEFORE
+// ever discovering whether it was already frozen. A row frozen on attempt
+// 1 with a valid customer email, whose Resend call then failed, would — on
+// a later retry, if the ORDER'S email had since gone blank for any reason
+// — get dead-lettered by the CURRENT (blank) order data and never even
+// reach the code that would have told it "you're already frozen, just
+// resend the frozen payload". The already-frozen payload must always
+// outrank current order/env state; it is the sole source of truth for
+// every retry from its first freeze onward.
+async function processClaimedRow({ row, order, reason, stripeSessionId, attemptedOrderId, existingOrderId }) {
+  if (row.payload_frozen_at) {
+    return sendFrozenRow(row);
+  }
+  return buildAndFreezeThenSend({ row, order, reason, stripeSessionId, attemptedOrderId, existingOrderId });
 }
 
 async function claimAndProcessOnce({ orderId, sessionId, order, reason, existingOrderId }) {

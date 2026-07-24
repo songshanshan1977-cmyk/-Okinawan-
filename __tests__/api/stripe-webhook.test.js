@@ -77,6 +77,33 @@ function claimRow({ dedupeKey, notificationType, audience, claimToken, orderId }
     audience: audience || (notificationType.startsWith("customer") ? "customer" : "ops"),
     claim_token: claimToken,
     order_id: orderId,
+    // R4-B01: real claim_webhook_notification_v1 responses ALWAYS include
+    // these six fields now, null/undefined for a row that has never been
+    // frozen. Explicit here (rather than just omitted) so it reads clearly
+    // as "not yet frozen" wherever this base builder is used directly.
+    payload_frozen_at: null,
+    sender_email: null,
+    recipient_email: null,
+    email_subject: null,
+    email_html: null,
+    provider_idempotency_key: null,
+  };
+}
+
+// R4-B01: an ALREADY-frozen claim row — the shape claim_webhook_
+// notification_v1 returns on a retry of a row some earlier attempt froze.
+// `frozen` supplies the six real database fields; deliberately independent
+// of whatever buildNotificationContent would produce from current order
+// data, so tests can prove the frozen values (not fresh ones) get used.
+function frozenClaimRow({ dedupeKey, notificationType, audience, claimToken, orderId, frozen }) {
+  return {
+    ...claimRow({ dedupeKey, notificationType, audience, claimToken, orderId }),
+    payload_frozen_at: "2026-07-20T00:00:00.000Z",
+    sender_email: frozen.from,
+    recipient_email: frozen.to,
+    email_subject: frozen.subject,
+    email_html: frozen.html,
+    provider_idempotency_key: frozen.idempotencyKey,
   };
 }
 
@@ -1190,5 +1217,280 @@ describe("R3 §四: sender/ops env vars fail closed on the REAL production code 
     expect(src).not.toMatch(/SENDER_EMAIL\s*=\s*process\.env\.RESEND_FROM\s*\|\|/);
     expect(src).not.toContain("songshanshan1977@gmail.com");
     expect(src).not.toContain("HonestOki <noreply@");
+  });
+});
+
+describe("R4-B01/§三: frozen payload outranks current order/env data on every retry", () => {
+  const FROZEN = {
+    from: "Old Sender <old-sender@example.com>",
+    to: "old@example.com",
+    subject: "FROZEN SUBJECT — first attempt",
+    html: "<p>frozen html from first attempt</p>",
+    idempotencyKey: "webhook-" + "a".repeat(64),
+  };
+
+  test("1. already-frozen customer row, order's CURRENT email is now blank -> does NOT dead_letter, does NOT rebuild content, sends the frozen recipient", async () => {
+    const orderRow = { ...BASE_ORDER, email: null }; // current order data: NO email at all
+    const row = frozenClaimRow({
+      dedupeKey: `${orderRow.order_id}:cs_test_1:customer:customer_booking_confirmed`,
+      notificationType: "customer_booking_confirmed",
+      claimToken: "tok-retry-1",
+      orderId: orderRow.order_id,
+      frozen: FROZEN,
+    });
+    const completeArgs = [];
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({
+        processCheckoutPayment: () => ({ data: { result: "already_processed", reason: null, order_id: orderRow.order_id, inventory_status: "locked" }, error: null }),
+        claim: claimSeq([row]),
+        complete: (args) => {
+          completeArgs.push(args);
+          return okComplete();
+        },
+      }),
+    });
+    const resendSend = okResend();
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    const res = await runHandler(handler, {});
+
+    // never calls freeze — already frozen.
+    expect(supabase.rpc.mock.calls.filter((c) => c[0] === "freeze_webhook_notification_payload_v1").length).toBe(0);
+    // sends to the FROZEN recipient, not the (blank) current order email.
+    expect(resendSend).toHaveBeenCalledTimes(1);
+    expect(resendSend.mock.calls[0][0]).toEqual({ from: FROZEN.from, to: FROZEN.to, subject: FROZEN.subject, html: FROZEN.html });
+    expect(resendSend.mock.calls[0][1]).toEqual({ idempotencyKey: FROZEN.idempotencyKey });
+    // never dead-lettered for missing_customer_email.
+    expect(completeArgs.every((a) => a.p_error_message !== "missing_customer_email")).toBe(true);
+    expect(completeArgs[0].p_outcome).toBe("sent");
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test("2. already-frozen customer row, order's CURRENT email changed to a DIFFERENT address -> still sends to the ORIGINAL frozen address, never the new one", async () => {
+    const orderRow = { ...BASE_ORDER, email: "new-address@example.com" }; // order data has since changed
+    const row = frozenClaimRow({
+      dedupeKey: `${orderRow.order_id}:cs_test_1:customer:customer_booking_confirmed`,
+      notificationType: "customer_booking_confirmed",
+      claimToken: "tok-retry-1",
+      orderId: orderRow.order_id,
+      frozen: FROZEN,
+    });
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({
+        processCheckoutPayment: () => lockedResult(orderRow.order_id),
+        claim: claimSeq([row]),
+      }),
+    });
+    const resendSend = okResend();
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    await runHandler(handler, {});
+
+    expect(resendSend.mock.calls[0][0].to).toBe(FROZEN.to);
+    expect(resendSend.mock.calls[0][0].to).not.toBe(orderRow.email);
+  });
+
+  test("3. already-frozen row, RESEND_FROM currently missing -> still uses the frozen sender, does not fail due to the missing env var", async () => {
+    await withTempEnv("RESEND_FROM", undefined, async () => {
+      const orderRow = { ...BASE_ORDER };
+      const row = frozenClaimRow({
+        dedupeKey: `${orderRow.order_id}:cs_test_1:customer:customer_booking_confirmed`,
+        notificationType: "customer_booking_confirmed",
+        claimToken: "tok-retry-1",
+        orderId: orderRow.order_id,
+        frozen: FROZEN,
+      });
+      const supabase = createMockSupabase({
+        from: { orders: [{ data: orderRow, error: null }] },
+        rpc: rpcRouter({ processCheckoutPayment: () => lockedResult(orderRow.order_id), claim: claimSeq([row]) }),
+      });
+      const resendSend = okResend();
+      const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+      const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+      const res = await runHandler(handler, {});
+
+      expect(resendSend).toHaveBeenCalledTimes(1);
+      expect(resendSend.mock.calls[0][0].from).toBe(FROZEN.from);
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+  });
+
+  test("4. already-frozen ops row, NOTIFY_TO_EMAIL currently missing -> still uses the frozen recipient, does not fail due to the missing env var", async () => {
+    await withTempEnv("NOTIFY_TO_EMAIL", undefined, async () => {
+      const orderRow = { ...BASE_ORDER };
+      const row = frozenClaimRow({
+        dedupeKey: `${orderRow.order_id}:cs_test_1:ops:ops_booking_confirmed`,
+        notificationType: "ops_booking_confirmed",
+        claimToken: "tok-retry-1",
+        orderId: orderRow.order_id,
+        frozen: { ...FROZEN, to: "frozen-ops@example.com" },
+      });
+      const supabase = createMockSupabase({
+        from: { orders: [{ data: orderRow, error: null }] },
+        rpc: rpcRouter({ processCheckoutPayment: () => lockedResult(orderRow.order_id), claim: claimSeq([row]) }),
+      });
+      const resendSend = okResend();
+      const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+      const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+      const res = await runHandler(handler, {});
+
+      expect(resendSend).toHaveBeenCalledTimes(1);
+      expect(resendSend.mock.calls[0][0].to).toBe("frozen-ops@example.com");
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+  });
+
+  test("5. already-frozen row with a missing/blank frozen field -> does NOT call Resend, does NOT fall back to current order/env data, complete outcome='failed'/frozen_payload_invalid, 5xx", async () => {
+    const orderRow = { ...BASE_ORDER };
+    const row = frozenClaimRow({
+      dedupeKey: `${orderRow.order_id}:cs_test_1:customer:customer_booking_confirmed`,
+      notificationType: "customer_booking_confirmed",
+      claimToken: "tok-retry-1",
+      orderId: orderRow.order_id,
+      frozen: { ...FROZEN, to: "  " }, // blank after trim
+    });
+    const completeArgs = [];
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({
+        processCheckoutPayment: () => lockedResult(orderRow.order_id),
+        claim: claimSeq([row]),
+        complete: (args) => {
+          completeArgs.push(args);
+          return okComplete();
+        },
+      }),
+    });
+    const resendSend = okResend();
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    const res = await runHandler(handler, {});
+
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(completeArgs[0].p_outcome).toBe("failed");
+    expect(completeArgs[0].p_error_message).toBe("frozen_payload_invalid");
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+
+  test("6. NOT-yet-frozen customer row, order email missing -> still dead-letters and still triggers the ops_missing_customer_email pathway (unchanged R3 behavior)", async () => {
+    const orderRow = { ...BASE_ORDER, email: null };
+    const row = claimRow({ dedupeKey: `${orderRow.order_id}:cs_test_1:customer:customer_manual_review`, notificationType: "customer_manual_review", claimToken: "tok-1", orderId: orderRow.order_id });
+    const completeArgs = [];
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({
+        processCheckoutPayment: () => ({ data: { result: "failed", reason: "failed_no_stock", order_id: orderRow.order_id, inventory_status: "failed" }, error: null }),
+        claim: claimSeq([row]),
+        complete: (args) => {
+          completeArgs.push(args);
+          return okComplete();
+        },
+      }),
+    });
+    const resendSend = okResend();
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    const res = await runHandler(handler, {});
+
+    expect(completeArgs[0].p_outcome).toBe("dead_letter");
+    expect(completeArgs[0].p_error_message).toBe("missing_customer_email");
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test("7/8. NOT-yet-frozen ordinary row -> builds candidate, calls freeze exactly once, sends using freeze's OWN returned payload", async () => {
+    const orderRow = { ...BASE_ORDER };
+    const row = claimRow({ dedupeKey: `${orderRow.order_id}:cs_test_1:customer:customer_booking_confirmed`, notificationType: "customer_booking_confirmed", claimToken: "tok-1", orderId: orderRow.order_id });
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({ processCheckoutPayment: () => lockedResult(orderRow.order_id), claim: claimSeq([row]) }),
+    });
+    const resendSend = okResend();
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    await runHandler(handler, {});
+
+    const freezeCalls = supabase.rpc.mock.calls.filter((c) => c[0] === "freeze_webhook_notification_payload_v1");
+    expect(freezeCalls.length).toBe(1);
+    expect(resendSend).toHaveBeenCalledTimes(1);
+    expect(resendSend.mock.calls[0][0].to).toBe(orderRow.email);
+  });
+
+  test("8. already-frozen row NEVER calls freeze_webhook_notification_payload_v1 (contrast with test 7)", async () => {
+    const orderRow = { ...BASE_ORDER };
+    const row = frozenClaimRow({
+      dedupeKey: `${orderRow.order_id}:cs_test_1:customer:customer_booking_confirmed`,
+      notificationType: "customer_booking_confirmed",
+      claimToken: "tok-retry-1",
+      orderId: orderRow.order_id,
+      frozen: FROZEN,
+    });
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({ processCheckoutPayment: () => lockedResult(orderRow.order_id), claim: claimSeq([row]) }),
+    });
+    const resendSend = okResend();
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    await runHandler(handler, {});
+
+    expect(supabase.rpc.mock.calls.filter((c) => c[0] === "freeze_webhook_notification_payload_v1").length).toBe(0);
+  });
+
+  test("§七: order-email-blank AND claim-returns-frozen-old@example.com appear TOGETHER in one test, proving frozen priority is genuinely exercised (not just individually plausible)", async () => {
+    const orderRow = { ...BASE_ORDER, email: null }; // current order: blank email
+    const row = frozenClaimRow({
+      dedupeKey: `${orderRow.order_id}:cs_test_1:customer:customer_booking_confirmed`,
+      notificationType: "customer_booking_confirmed",
+      claimToken: "tok-retry-1",
+      orderId: orderRow.order_id,
+      frozen: { ...FROZEN, to: "old@example.com" }, // frozen: real address from attempt 1
+    });
+    const completeArgs = [];
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: orderRow, error: null }] },
+      rpc: rpcRouter({
+        processCheckoutPayment: () => lockedResult(orderRow.order_id),
+        claim: claimSeq([row]),
+        complete: (args) => {
+          completeArgs.push(args);
+          return okComplete();
+        },
+      }),
+    });
+    const resendSend = okResend();
+    const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+    const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend });
+    const res = await runHandler(handler, {});
+
+    expect(resendSend).toHaveBeenCalledTimes(1);
+    expect(resendSend.mock.calls[0][0].to).toBe("old@example.com");
+    expect(completeArgs[0].p_outcome).toBe("sent");
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test("14. both allowed customer notification_types (customer_booking_confirmed, customer_manual_review) independently reach the SAME missing_customer_email dead-letter path when not yet frozen", async () => {
+    for (const notificationType of ["customer_booking_confirmed", "customer_manual_review"]) {
+      const orderRow = { ...BASE_ORDER, email: null };
+      const row = claimRow({ dedupeKey: `${orderRow.order_id}:cs_test_1:customer:${notificationType}`, notificationType, claimToken: "tok-1", orderId: orderRow.order_id });
+      const completeArgs = [];
+      const supabase = createMockSupabase({
+        from: { orders: [{ data: orderRow, error: null }] },
+        rpc: rpcRouter({
+          processCheckoutPayment: () => lockedResult(orderRow.order_id),
+          claim: claimSeq([row]),
+          complete: (args) => {
+            completeArgs.push(args);
+            return okComplete();
+          },
+        }),
+      });
+      const event = fakeCheckoutSessionCompletedEvent({ orderId: orderRow.order_id });
+      const handler = loadWebhookHandler({ supabase, constructEvent: alwaysReturnEvent(event), resendSend: okResend() });
+      await runHandler(handler, {});
+      expect(completeArgs[0].p_outcome).toBe("dead_letter");
+      expect(completeArgs[0].p_error_message).toBe("missing_customer_email");
+    }
   });
 });

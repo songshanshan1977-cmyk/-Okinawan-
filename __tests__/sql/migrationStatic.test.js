@@ -219,6 +219,51 @@ describe("B-03/B-04/R2 §三/§四: notification outbox structural checks (stati
     expect(OUTBOX_MIGRATION).toMatch(/first_dispatch_at = COALESCE\(first_dispatch_at, now\(\)\)/);
   });
 
+  describe("R4-B01/§二: claim_webhook_notification_v1 returns payload_frozen_at + the complete frozen payload", () => {
+    test("9. RETURNS TABLE includes all six frozen-state columns alongside the existing routing metadata", () => {
+      const fnStart = OUTBOX_MIGRATION.indexOf("FUNCTION public.claim_webhook_notification_v1");
+      const returnsStart = OUTBOX_MIGRATION.indexOf("RETURNS TABLE (", fnStart);
+      const returnsEnd = OUTBOX_MIGRATION.indexOf(")", OUTBOX_MIGRATION.indexOf("provider_idempotency_key text", returnsStart));
+      const returnsBlock = OUTBOX_MIGRATION.slice(returnsStart, returnsEnd);
+      ["dedupe_key", "notification_type", "audience", "claim_token", "order_id"].forEach((col) =>
+        expect(returnsBlock).toMatch(new RegExp(`\\b${col}\\b`))
+      );
+      expect(returnsBlock).toMatch(/payload_frozen_at timestamptz/);
+      expect(returnsBlock).toMatch(/sender_email text/);
+      expect(returnsBlock).toMatch(/recipient_email text/);
+      expect(returnsBlock).toMatch(/email_subject text/);
+      expect(returnsBlock).toMatch(/email_html text/);
+      expect(returnsBlock).toMatch(/provider_idempotency_key text/);
+    });
+
+    test("the claim UPDATE...RETURNING captures all six frozen-state fields from the row it just claimed", () => {
+      const fnStart = OUTBOX_MIGRATION.indexOf("FUNCTION public.claim_webhook_notification_v1");
+      const fnEnd = OUTBOX_MIGRATION.indexOf("$function$;", fnStart);
+      const body = OUTBOX_MIGRATION.slice(fnStart, fnEnd);
+      expect(body).toMatch(/RETURNING\s*\n\s*payload_frozen_at, sender_email, recipient_email, email_subject, email_html, provider_idempotency_key/);
+      expect(body).toMatch(/INTO\s*\n\s*v_payload_frozen_at, v_sender_email, v_recipient_email, v_email_subject, v_email_html, v_provider_idempotency_key/);
+    });
+
+    test("every claimed row's OUT parameters are assigned from the captured frozen-state locals before RETURN NEXT", () => {
+      const fnStart = OUTBOX_MIGRATION.indexOf("FUNCTION public.claim_webhook_notification_v1");
+      const fnEnd = OUTBOX_MIGRATION.indexOf("$function$;", fnStart);
+      const body = OUTBOX_MIGRATION.slice(fnStart, fnEnd);
+      const returnNextIdx = body.indexOf("RETURN NEXT;");
+      const assignBlock = body.slice(0, returnNextIdx);
+      expect(assignBlock).toMatch(/payload_frozen_at := v_payload_frozen_at;/);
+      expect(assignBlock).toMatch(/sender_email := v_sender_email;/);
+      expect(assignBlock).toMatch(/recipient_email := v_recipient_email;/);
+      expect(assignBlock).toMatch(/email_subject := v_email_subject;/);
+      expect(assignBlock).toMatch(/email_html := v_email_html;/);
+      expect(assignBlock).toMatch(/provider_idempotency_key := v_provider_idempotency_key;/);
+    });
+
+    test("10. claim_webhook_notification_v1's signature is unchanged (text, text) — no REVOKE/GRANT/rollback update was needed for it", () => {
+      expect(OUTBOX_MIGRATION).toMatch(/REVOKE ALL ON FUNCTION public\.claim_webhook_notification_v1\(text, text\) FROM PUBLIC;/);
+      expect(OUTBOX_MIGRATION).toMatch(/GRANT EXECUTE ON FUNCTION public\.claim_webhook_notification_v1\(text, text\) TO service_role;/);
+    });
+  });
+
   test("R3 §一: freeze_webhook_notification_payload_v1 only writes sender_email/recipient_email/subject/html/provider_idempotency_key when payload_frozen_at IS NULL (first-writer-wins, ALL fields together)", () => {
     const freezeStart = OUTBOX_MIGRATION.indexOf("FUNCTION public.freeze_webhook_notification_payload_v1");
     const freezeEnd = OUTBOX_MIGRATION.indexOf("$function$;", freezeStart);
@@ -318,6 +363,38 @@ describe("R3 §三: missing_customer_email dead-letter atomically creates an ops
     const body = OUTBOX_MIGRATION.slice(fnStart, fnEnd);
     expect(body).toMatch(/status = 'dead_letter'/);
     expect(body).toMatch(/ops_missing_customer_email/);
+  });
+
+  describe("N-01/§五: the alert is gated on the ORIGINAL row genuinely being an allowed customer-audience type", () => {
+    test("11/12/13. the INSERT is nested inside an IF that checks v_orig_audience = 'customer' AND v_orig_notification_type IN an allowed set, BEFORE the INSERT statement", () => {
+      const triggerIdx = OUTBOX_MIGRATION.indexOf("IF p_outcome = 'dead_letter' AND p_error_message = 'missing_customer_email' THEN");
+      const insertIdx = OUTBOX_MIGRATION.indexOf("INSERT INTO public.send_logs", triggerIdx);
+      const gateIdx = OUTBOX_MIGRATION.indexOf("IF v_orig_audience = 'customer'", triggerIdx);
+      expect(gateIdx).toBeGreaterThan(triggerIdx);
+      expect(gateIdx).toBeLessThan(insertIdx);
+      expect(OUTBOX_MIGRATION.slice(gateIdx, insertIdx)).toMatch(
+        /AND v_orig_notification_type IN \('customer_booking_confirmed', 'customer_manual_review'\) THEN/
+      );
+    });
+
+    test("14. the original row's own audience/notification_type is re-read from send_logs inside this same function call, not trusted from the caller", () => {
+      const fnStart = OUTBOX_MIGRATION.indexOf("FUNCTION public.complete_webhook_notification_v1");
+      const fnEnd = OUTBOX_MIGRATION.indexOf("$function$;", fnStart);
+      const body = OUTBOX_MIGRATION.slice(fnStart, fnEnd);
+      expect(body).toMatch(/SELECT sl\.order_id, sl\.stripe_session_id, sl\.audience, sl\.notification_type/);
+      expect(body).toMatch(/INTO v_order_id, v_session_id, v_orig_audience, v_orig_notification_type/);
+    });
+
+    test("12. an ops-audience row (including ops_missing_customer_email itself) can never satisfy the gate, structurally preventing a recursive alert loop", () => {
+      // The gate requires v_orig_audience = 'customer' — an ops-audience
+      // row's own audience column is 'ops', which this equality can never
+      // match, regardless of what error_message/outcome a caller (buggy or
+      // otherwise) passes. No special-case exclusion of
+      // 'ops_missing_customer_email' is needed because 'ops' != 'customer'
+      // already excludes every ops-audience notification_type uniformly.
+      expect(OUTBOX_MIGRATION).not.toMatch(/v_orig_audience = 'ops'/);
+      expect(OUTBOX_MIGRATION).toMatch(/v_orig_audience = 'customer'/);
+    });
   });
 });
 
