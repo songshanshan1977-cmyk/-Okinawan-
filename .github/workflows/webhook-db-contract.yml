@@ -1,0 +1,98 @@
+name: webhook-db-contract
+
+# Phase 1 POSTGRES CONTRACT FIXTURE workflow DRAFT.
+#
+# Committed to sandbox/webhook-db-integration-v1 ONLY — not pushed, so this
+# never actually triggers on GitHub in this round. Runs the two REAL,
+# unmodified forward migrations and the REAL, unmodified rollback file
+# against a disposable postgres:17 service container that exists only for
+# the lifetime of this job. It connects to NOTHING outside this job: no
+# repository Secret is referenced anywhere below, and DATABASE_URL always
+# points at 127.0.0.1 on the service container port.
+#
+# A passing run of this workflow proves POSTGRES CONTRACT FIXTURE VERIFIED
+# only — see db-integration/schema-assumptions.md and db-integration/README.md
+# for exactly what that does and does not mean. It is NOT DB INTEGRATION
+# VERIFIED, NOT PRODUCTION SCHEMA VERIFIED, and this workflow passing is NOT
+# a statement that anything is READY TO MERGE or READY TO DEPLOY.
+
+on:
+  workflow_dispatch: {}
+  # Intentionally no `push`/`pull_request` trigger yet in this draft — this
+  # round only commits the file locally; wiring up real triggers is a
+  # decision for a future round once this draft itself has been reviewed.
+
+jobs:
+  contract-fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Fixed, non-secret, CI-local-only credentials for a container that
+    # lives only for this job and is destroyed when the job ends. Never a
+    # repository Secret, never a production value.
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres_ci_only
+      PGDATABASE: postgres
+      DATABASE_URL: postgresql://postgres:postgres_ci_only@127.0.0.1:5432/postgres
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_ci_only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Wait for Postgres health check
+        run: |
+          for i in $(seq 1 20); do
+            if pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER"; then
+              echo "Postgres is ready."
+              exit 0
+            fi
+            echo "Waiting for Postgres... ($i/20)"
+            sleep 2
+          done
+          echo "Postgres did not become ready in time." >&2
+          exit 1
+
+      - name: Apply bootstrap + base schema contract + real migrations + seed
+        run: bash db-integration/scripts/apply-migrations.sh
+
+      - name: Run DB-integration Jest suites (real Postgres)
+        run: npx jest tests/db-integration --ci --runInBand
+
+      - name: Apply real rollback + verify idempotent re-run
+        run: |
+          bash db-integration/scripts/apply-rollback.sh
+          bash db-integration/scripts/apply-rollback.sh
+
+      - name: Diagnostics on failure (non-sensitive only)
+        if: always()
+        run: |
+          echo "PGHOST=$PGHOST PGPORT=$PGPORT PGDATABASE=$PGDATABASE"
+          echo "(password and full connection string intentionally not printed)"
+          psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace ORDER BY proname;" || true
+          psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "SELECT schemaname, tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename;" || true
