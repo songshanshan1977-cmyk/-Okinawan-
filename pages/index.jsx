@@ -6,12 +6,16 @@ import { useRouter } from "next/router";
 import { translations } from "../lib/i18n/bookingTranslations";
 
 const VALID_UI_LANGS = ["zh", "zh-TW", "ja", "en", "ko"];
+const SOURCE_REGEX = /^[A-Za-z0-9_-]{1,100}$/;
+const ARTICLE_CODE_REGEX = /^[A-Za-z0-9_-]{1,100}$/;
 
 export default function Home() {
   const router = useRouter();
 
   // ⭐ 页面显示语言（不写入 localStorage，不改 URL）
   const [bookingUiLang, setBookingUiLang] = useState("zh");
+  const [validFrom, setValidFrom] = useState(null);
+  const [validArticleCode, setValidArticleCode] = useState(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -20,6 +24,10 @@ export default function Home() {
     if (VALID_UI_LANGS.includes(langParam)) {
       setBookingUiLang(langParam);
     }
+    const fromParam = params.get("from") || "";
+    if (SOURCE_REGEX.test(fromParam)) setValidFrom(fromParam);
+    const articleCodeParam = params.get("article_code") || "";
+    if (ARTICLE_CODE_REGEX.test(articleCodeParam)) setValidArticleCode(articleCodeParam);
   }, []);
 
   const t = translations[bookingUiLang] || translations["zh"];
@@ -183,9 +191,15 @@ export default function Home() {
             </div>
           </div>
 
-          {/* CTA —— 根据当前语言跳转对应 /booking?lang=xx */}
+          {/* CTA —— 根据当前语言跳转，透传归因参数 */}
           <button
-            onClick={() => router.push(`/booking?lang=${bookingUiLang}`)}
+            onClick={() => {
+              const q = new URLSearchParams();
+              q.set("lang", bookingUiLang);
+              if (validFrom) q.set("from", validFrom);
+              if (validArticleCode) q.set("article_code", validArticleCode);
+              router.push(`/booking?${q.toString()}`);
+            }}
             style={{
               background: "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)",
               color: "#ffffff",
