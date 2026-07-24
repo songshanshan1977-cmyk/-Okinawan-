@@ -117,6 +117,9 @@ export default async function handler(req, res) {
           itinerary: data.itinerary ?? null,
           wechat: data.wechat ?? null,
 
+          // 归因：来源和文章码（可选，不影响原逻辑）
+          article_code: data.article_code ?? null,
+
           payment_status: "draft",
           inventory_status: "pending",
           email_status: "pending",

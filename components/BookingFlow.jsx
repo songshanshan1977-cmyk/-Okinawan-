@@ -14,6 +14,9 @@ const CAR_MODEL_IDS = {
   car3: "453df662-d350-4ab9-b811-61ffcda40d4b",
 };
 
+const SOURCE_REGEX = /^[A-Za-z0-9_-]{1,100}$/;
+const ARTICLE_CODE_REGEX = /^[A-Za-z0-9_-]{1,100}$/;
+
 // ⭐ 订单号生成（仅用于"正常流程"）
 function generateOrderId() {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
@@ -56,6 +59,7 @@ export default function BookingFlow() {
     pax: 1,
     luggage: 0,
     source: "direct",
+    article_code: null,
   }));
 
   // =====================================================
@@ -73,6 +77,15 @@ export default function BookingFlow() {
     if (VALID_UI_LANGS.includes(langParam)) {
       setBookingUiLang(langParam);
     }
+
+    // 归因：读取来源和文章码（只在客户端解析，不影响 SSR）
+    const fromParam = params.get("from") || "";
+    const articleCodeParam = params.get("article_code") || "";
+    setFormData((prev) => ({
+      ...prev,
+      source: SOURCE_REGEX.test(fromParam) ? fromParam : "direct",
+      article_code: ARTICLE_CODE_REGEX.test(articleCodeParam) ? articleCodeParam : null,
+    }));
 
     setStep(stepFromUrl);
 
