@@ -1,0 +1,146 @@
+-- 20260722120000_webhook_fail_safe_v1_rollback.sql
+--
+-- NON-DESTRUCTIVE rollback, rewritten in the second Codex review round
+-- (R2 §八) after the original version of this file was correctly flagged
+-- as destructive: it DROPped the processing_result/processing_reason/
+-- processed_at columns on payments and every outbox column on send_logs —
+-- which is deleting payment-processing and notification-delivery AUDIT
+-- DATA, not just "undoing a migration". A payments row's
+-- processing_result telling you WHY a real Stripe charge did or didn't
+-- get confirmed is exactly the kind of record that must survive a
+-- rollback of the CODE that produced it.
+--
+-- This file now does exactly one thing: makes the four new RPCs stop
+-- existing (or stop being callable, which DROP already guarantees), and
+-- touches NOTHING else. It does not know or care whether any given column
+-- or index was added by the two forward migrations or predates them — it
+-- simply never issues a DROP COLUMN or DROP INDEX statement at all.
+--
+-- REQUIRED DEPLOYMENT ORDER (this file alone does not enforce this — it
+-- is an operational sequencing requirement, not something SQL can check):
+--   1. First roll the Vercel deployment back to a version of
+--      pages/api/stripe-webhook.js that does NOT call
+--      process_checkout_payment_v1 / claim_webhook_notification_v1 /
+--      freeze_webhook_notification_payload_v1 /
+--      complete_webhook_notification_v1 (i.e. redeploy the pre-this-branch
+--      webhook, or take the endpoint offline).
+--   2. ONLY THEN run this file. Running this file first, while the live
+--      webhook still calls these functions, will make every incoming
+--      Stripe delivery fail with "function does not exist" until step 1
+--      catches up — a self-inflicted, avoidable outage.
+--
+-- Idempotent and safe to run against any of these states, in any order,
+-- any number of times: both forward migrations applied; only the first
+-- applied (second failed/never ran); neither ever applied; this rollback
+-- already run once before. `DROP FUNCTION IF EXISTS` with the function's
+-- exact signature is a no-op when that exact signature doesn't exist,
+-- which covers all of the above without needing a separate existence
+-- check.
+--
+-- DB INTEGRATION UNVERIFIED: statically reviewed only (see
+-- __tests__/sql/migrationStatic.test.js) — never executed against any
+-- real or local Postgres instance in this environment.
+--
+-- Explicitly preserved (never touched by this file): every row in
+-- payments/send_logs/orders/inventory; payments.processing_result /
+-- processing_reason / processed_at; every send_logs outbox column
+-- (dedupe_key, notification_type, audience, stripe_session_id,
+-- claim_token, claim_expires_at, attempt_count, sent_at, updated_at,
+-- sender_email, recipient_email, email_subject, email_html,
+-- provider_idempotency_key, payload_frozen_at, first_dispatch_at);
+-- payments_stripe_session_id_unique_idx;
+-- send_logs_dedupe_key_unique_idx; send_logs_claimable_idx;
+-- provider_message_id on either table. Does not touch
+-- public.lock_inventory_v2.
+
+BEGIN;
+
+-- =============================================================
+-- PRE-ROLLBACK VERIFICATION (read the output before proceeding)
+-- =============================================================
+-- Confirm nothing is relying on these functions RIGHT NOW (should already
+-- be true if the deployment-order requirement above was followed):
+--   SELECT count(*) AS outbox_rows_still_pending_or_processing
+--   FROM public.send_logs
+--   WHERE status IN ('pending', 'processing');
+--   -- Non-zero here just means those notifications will sit un-claimable
+--   -- until the RPCs exist again (e.g. a future roll-forward) — no data
+--   -- is lost, nothing here is destructive, but it IS a real operational
+--   -- gap worth knowing about before proceeding.
+--
+--   SELECT proname, prosecdef, proconfig
+--   FROM pg_proc
+--   WHERE pronamespace = 'public'::regnamespace
+--     AND proname IN (
+--       'process_checkout_payment_v1',
+--       'claim_webhook_notification_v1',
+--       'freeze_webhook_notification_payload_v1',
+--       'complete_webhook_notification_v1'
+--     );
+
+-- =============================================================
+-- Delete or disable the four new RPCs — the ONLY thing this file does.
+-- =============================================================
+DROP FUNCTION IF EXISTS public.complete_webhook_notification_v1(text, uuid, text, text, text);
+DROP FUNCTION IF EXISTS public.freeze_webhook_notification_payload_v1(text, uuid, text, text, text, text, text);
+DROP FUNCTION IF EXISTS public.claim_webhook_notification_v1(text, text);
+DROP FUNCTION IF EXISTS public.process_checkout_payment_v1(text, text, integer, text, boolean);
+
+COMMIT;
+
+-- =============================================================
+-- POST-ROLLBACK VERIFICATION (run manually)
+-- =============================================================
+--   SELECT proname FROM pg_proc
+--   WHERE pronamespace = 'public'::regnamespace
+--     AND proname IN (
+--       'process_checkout_payment_v1',
+--       'claim_webhook_notification_v1',
+--       'freeze_webhook_notification_payload_v1',
+--       'complete_webhook_notification_v1'
+--     );
+--   -- expect: 0 rows
+--
+--   SELECT proname FROM pg_proc
+--   WHERE pronamespace = 'public'::regnamespace AND proname = 'lock_inventory_v2';
+--   -- expect: exactly 1 row, unchanged — confirms this rollback did not
+--   -- touch the legacy function.
+--
+--   SELECT column_name FROM information_schema.columns
+--   WHERE table_schema = 'public' AND table_name = 'payments'
+--     AND column_name IN ('processing_result', 'processing_reason', 'processed_at');
+--   -- expect: 3 rows — these columns are UNCHANGED by this rollback.
+--
+--   SELECT column_name FROM information_schema.columns
+--   WHERE table_schema = 'public' AND table_name = 'send_logs'
+--     AND column_name IN ('dedupe_key','notification_type','audience','stripe_session_id',
+--                          'claim_token','claim_expires_at','attempt_count','sent_at','updated_at',
+--                          'sender_email','recipient_email','email_subject','email_html',
+--                          'provider_idempotency_key','payload_frozen_at','first_dispatch_at');
+--   -- expect: 16 rows — these columns are UNCHANGED by this rollback.
+--
+--   SELECT indexname FROM pg_indexes
+--   WHERE schemaname = 'public'
+--     AND indexname IN ('payments_stripe_session_id_unique_idx', 'send_logs_dedupe_key_unique_idx',
+--                        'send_logs_claimable_idx');
+--   -- expect: 3 rows — these indexes are UNCHANGED by this rollback.
+--
+--   SELECT count(*) FROM public.orders;
+--   SELECT count(*) FROM public.payments;
+--   SELECT count(*) FROM public.send_logs;
+--   SELECT count(*) FROM public.inventory;
+--   -- expect: EXACTLY the same row counts as immediately before this
+--   -- rollback ran — no business or audit data was deleted.
+
+-- =============================================================
+-- Destructive cleanup (columns/indexes) is INTENTIONALLY NOT provided in
+-- this round. If a future round genuinely needs to physically remove
+-- these columns/indexes (e.g. after archiving the audit data elsewhere
+-- and confirming it is no longer needed), that belongs in a SEPARATELY
+-- named file such as
+-- supabase/rollbacks/20260722120000_webhook_fail_safe_v1_destructive_cleanup.sql
+-- with its own prominent warning header, never run by default, and only
+-- ever executed by a human after archival is confirmed complete. No such
+-- file exists yet — it was not needed this round and was deliberately not
+-- created ahead of an actual requirement for it.
+-- =============================================================
