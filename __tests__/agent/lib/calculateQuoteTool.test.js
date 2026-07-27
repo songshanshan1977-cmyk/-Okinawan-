@@ -89,4 +89,30 @@ describe("calculateQuoteTool", () => {
     expect(result.total_price).toBe(100);
     expect(result.balance_due).toBe(0); // max(100-500, 0)
   });
+
+  describe("A1-B03: shared validation runs first", () => {
+    test("missing end_date -> invalid_request, zero RPC calls (never defaulted to start_date)", async () => {
+      const supabase = createMockSupabase({ from: {}, rpc: () => ({ data: 1600, error: null }) });
+      const result = await calculateQuoteTool({ supabase, start_date: "2026-09-01", car_model_id: CAR, driver_lang: "ZH", duration: 8 });
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe(AGENT_ERROR_CODES.INVALID_REQUEST);
+      expect(supabase.rpc).not.toHaveBeenCalled();
+    });
+
+    test("fake calendar date (2026-02-30) -> invalid_request, zero RPC calls", async () => {
+      const supabase = createMockSupabase({ from: {}, rpc: () => ({ data: 1600, error: null }) });
+      const result = await calculateQuoteTool({ supabase, start_date: "2026-02-30", end_date: "2026-02-30", car_model_id: CAR, driver_lang: "ZH", duration: 8 });
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe(AGENT_ERROR_CODES.INVALID_REQUEST);
+      expect(supabase.rpc).not.toHaveBeenCalled();
+    });
+
+    test("driver_lang alias 'ja' -> invalid_request, never normalized to ZH", async () => {
+      const supabase = createMockSupabase({ from: {}, rpc: () => ({ data: 1600, error: null }) });
+      const result = await calculateQuoteTool({ supabase, start_date: "2026-09-01", end_date: "2026-09-01", car_model_id: CAR, driver_lang: "ja", duration: 8 });
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe(AGENT_ERROR_CODES.INVALID_REQUEST);
+      expect(supabase.rpc).not.toHaveBeenCalled();
+    });
+  });
 });

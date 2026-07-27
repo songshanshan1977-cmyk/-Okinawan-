@@ -1,0 +1,95 @@
+-- 20260727090000_agent_booking_idempotency_v1_rollback.sql
+--
+-- NON-DESTRUCTIVE rollback, following the exact same philosophy already
+-- established elsewhere in this project's own migration history (see the
+-- separate webhook engagement's rollback file for the fuller rationale):
+-- a rollback undoes the ACTIVE DATABASE BEHAVIOR the forward migration
+-- introduced, it does not delete anything that could be real accumulated
+-- data.
+--
+-- For this migration specifically, that means:
+--   - DROP the unique index. The index is what makes
+--     `INSERT ... ON CONFLICT (agent_idempotency_key_hash) DO NOTHING`
+--     work at all; once dropped, that exact upsert call from
+--     lib/agent/tools/createBookingDraft.js will fail with a real Postgres
+--     error ("no unique or exclusion constraint matching ON CONFLICT
+--     specification") the next time it runs — which is the correct,
+--     loud failure mode for "this feature has been rolled back", not a
+--     silent behavior change.
+--   - Do NOT drop agent_idempotency_key_hash / agent_idempotency_request_hash.
+--     If this migration were ever actually deployed and Agent drafts had
+--     already been created, those two columns are the only durable record
+--     of which orders came from which idempotent Agent request — exactly
+--     the kind of audit trail this project's established convention
+--     (payments.processing_result/reason, send_logs' whole outbox column
+--     set) always preserves across a rollback rather than deletes.
+--
+-- REQUIRED DEPLOYMENT ORDER (same operational requirement as the existing
+-- webhook engagement's rollback — this file cannot enforce it, only
+-- document it):
+--   1. Roll back the Vercel deployment to a version of
+--      pages/api/agent/create-booking-draft.js that does NOT call
+--      createBookingDraftTool's idempotent-insert path (or take the Agent
+--      A1 endpoints offline entirely).
+--   2. ONLY THEN run this file. Running it first, while the live Agent
+--      endpoint still calls .upsert(..., {onConflict:
+--      "agent_idempotency_key_hash"}), makes every create_booking_draft
+--      call fail immediately with a real database error until step 1
+--      catches up.
+--
+-- Idempotent and safe to run any number of times, in any state (index
+-- present, already dropped, migration never applied): `DROP INDEX IF
+-- EXISTS` is a no-op when the index doesn't exist.
+--
+-- NEVER EXECUTED against any real or local Postgres in this round — see
+-- the forward migration file's header and the completion report's
+-- "Migration" section.
+--
+-- Explicitly preserved (never touched by this file): every row in
+-- public.orders; agent_idempotency_key_hash; agent_idempotency_request_hash;
+-- orders_agent_idempotency_request_hash_idx (the non-unique convenience
+-- index — dropping it would not restore any behavior, only lose a debug
+-- aid, so it is left alone too).
+
+BEGIN;
+
+-- =============================================================
+-- PRE-ROLLBACK VERIFICATION (read the output before proceeding)
+-- =============================================================
+--   SELECT count(*) AS agent_drafts_created
+--   FROM public.orders
+--   WHERE agent_idempotency_key_hash IS NOT NULL;
+--   -- Informational only — confirms whether this feature has ever
+--   -- actually been used. Non-zero does not block this rollback (nothing
+--   -- destructive happens either way), it is just useful context.
+
+DROP INDEX IF EXISTS public.orders_agent_idempotency_key_hash_unique_idx;
+
+COMMIT;
+
+-- =============================================================
+-- POST-ROLLBACK VERIFICATION (run manually)
+-- =============================================================
+--   SELECT indexname FROM pg_indexes
+--   WHERE schemaname = 'public' AND indexname = 'orders_agent_idempotency_key_hash_unique_idx';
+--   -- expect: 0 rows
+--
+--   SELECT column_name FROM information_schema.columns
+--   WHERE table_schema = 'public' AND table_name = 'orders'
+--     AND column_name IN ('agent_idempotency_key_hash', 'agent_idempotency_request_hash');
+--   -- expect: 2 rows — UNCHANGED by this rollback.
+--
+--   SELECT count(*) FROM public.orders;
+--   -- expect: EXACTLY the same row count as immediately before this
+--   -- rollback ran — no business data was deleted.
+
+-- =============================================================
+-- Destructive cleanup (actually dropping the two columns) is
+-- INTENTIONALLY NOT provided in this round, for the same reason the
+-- separate webhook engagement's rollback withholds column drops: if a
+-- future round genuinely needs to physically remove them (e.g. after
+-- confirming the Agent idempotency feature is permanently discontinued and
+-- any audit value in the columns has been archived elsewhere), that
+-- belongs in a SEPARATELY named file with its own prominent warning
+-- header, never run by default. No such file exists yet.
+-- =============================================================

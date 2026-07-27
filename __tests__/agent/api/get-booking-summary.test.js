@@ -31,8 +31,8 @@ const ORDER_ROW = {
 
 describe("pages/api/agent/get-booking-summary — two-layer auth", () => {
   beforeEach(() => {
-    process.env.AGENT_SERVICE_KEY = "test-service-key";
-    process.env.AGENT_BOOKING_TOKEN_SECRET = "test-hmac-secret";
+    process.env.AGENT_SERVICE_KEY = "test-service-key-0123456789abcdef";
+    process.env.AGENT_BOOKING_TOKEN_SECRET = "test-hmac-secret-0123456789abcdef";
   });
   afterEach(() => {
     delete process.env.AGENT_SERVICE_KEY;
@@ -59,7 +59,7 @@ describe("pages/api/agent/get-booking-summary — two-layer auth", () => {
     const handler = loadHandler(supabase);
     const req = {
       method: "POST",
-      headers: { authorization: "Bearer test-service-key" },
+      headers: { authorization: "Bearer test-service-key-0123456789abcdef" },
       body: { order_id: ORDER_ROW.order_id },
     };
     const res = createMockRes();
@@ -75,7 +75,7 @@ describe("pages/api/agent/get-booking-summary — two-layer auth", () => {
     const handler = loadHandler(supabase);
     const req = {
       method: "POST",
-      headers: { authorization: "Bearer test-service-key", "x-booking-access-token": issued.token },
+      headers: { authorization: "Bearer test-service-key-0123456789abcdef", "x-booking-access-token": issued.token },
       body: { order_id: ORDER_ROW.order_id },
     };
     const res = createMockRes();
@@ -94,7 +94,7 @@ describe("pages/api/agent/get-booking-summary — two-layer auth", () => {
     const handler = loadHandler(supabase);
     const req = {
       method: "POST",
-      headers: { authorization: "Bearer test-service-key", "x-booking-access-token": issued.token },
+      headers: { authorization: "Bearer test-service-key-0123456789abcdef", "x-booking-access-token": issued.token },
       body: { order_id: ORDER_ROW.order_id },
     };
     const res = createMockRes();
@@ -110,7 +110,7 @@ describe("pages/api/agent/get-booking-summary — two-layer auth", () => {
     const handler = loadHandler(supabase);
     const req = {
       method: "POST",
-      headers: { authorization: "Bearer test-service-key", "x-booking-access-token": issued.token },
+      headers: { authorization: "Bearer test-service-key-0123456789abcdef", "x-booking-access-token": issued.token },
       body: { order_id: ORDER_ROW.order_id },
     };
     const res = createMockRes();
@@ -125,7 +125,7 @@ describe("pages/api/agent/get-booking-summary — two-layer auth", () => {
     const handler = loadHandler(supabase);
     const req = {
       method: "POST",
-      headers: { authorization: "Bearer test-service-key", "x-booking-access-token": issued.token },
+      headers: { authorization: "Bearer test-service-key-0123456789abcdef", "x-booking-access-token": issued.token },
       query: { order_id: "ORD-FROM-QUERY-STRING-SHOULD-BE-IGNORED" },
       body: { order_id: ORDER_ROW.order_id },
     };

@@ -7,6 +7,15 @@
 // payment_status / inventory_status / stripe_session_id from the request
 // body even if present — lib/agent/tools/createBookingDraft.js structurally
 // never reads those fields off `data`.
+//
+// A1-B01: `existing_order_id`/`order_id` in the body are rejected by
+// lib/agent/validation/validateBookingInput.js before any database call —
+// this tool only ever creates a fresh, server-generated-id draft.
+//
+// A1-B02: requires an `Idempotency-Key` header. The RAW value is read here
+// and passed straight into createBookingDraftTool, which hashes it before
+// it ever reaches a log line or the database — this handler itself never
+// logs req.headers["idempotency-key"] anywhere.
 
 import { verifyAgentService } from "../../../lib/agent/auth/verifyAgentService";
 import { getSupabaseClient } from "../../../lib/agent/supabaseClient";
@@ -29,12 +38,13 @@ export default async function handler(req, res) {
 
   try {
     const body = req.body || {};
+    const idempotencyKey = req.headers["idempotency-key"];
     const supabase = getSupabaseClient();
 
-    const result = await createBookingDraftTool({ supabase, data: body });
+    const result = await createBookingDraftTool({ supabase, data: body, idempotencyKey });
 
     if (!result.ok) {
-      logAgentToolCall({ tool_name: TOOL_NAME, order_id: body.existing_order_id, outcome: "failure", error_code: result.code });
+      logAgentToolCall({ tool_name: TOOL_NAME, outcome: "failure", error_code: result.code });
       return res.status(statusForCode(result.code)).json({ ok: false, error: result.code });
     }
 

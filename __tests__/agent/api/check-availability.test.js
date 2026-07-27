@@ -16,7 +16,7 @@ const CAR = "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca";
 describe("pages/api/agent/check-availability", () => {
   const ORIGINAL_KEY = process.env.AGENT_SERVICE_KEY;
   beforeEach(() => {
-    process.env.AGENT_SERVICE_KEY = "test-service-key";
+    process.env.AGENT_SERVICE_KEY = "test-service-key-0123456789abcdef";
   });
   afterEach(() => {
     if (ORIGINAL_KEY === undefined) delete process.env.AGENT_SERVICE_KEY;
@@ -60,7 +60,7 @@ describe("pages/api/agent/check-availability", () => {
     const handler = loadHandler(supabase);
     const req = {
       method: "POST",
-      headers: { authorization: "Bearer test-service-key" },
+      headers: { authorization: "Bearer test-service-key-0123456789abcdef" },
       body: { start_date: "2026-09-01", end_date: "2026-09-01", car_model_id: CAR, driver_lang: "zh" },
     };
     const res = createMockRes();
@@ -74,7 +74,7 @@ describe("pages/api/agent/check-availability", () => {
     const handler = loadHandler(supabase);
     const req = {
       method: "POST",
-      headers: { authorization: "Bearer test-service-key" },
+      headers: { authorization: "Bearer test-service-key-0123456789abcdef" },
       body: { start_date: "2026-09-01", end_date: "2026-09-01", car_model_id: CAR, driver_lang: "fr" },
     };
     const res = createMockRes();
@@ -86,7 +86,7 @@ describe("pages/api/agent/check-availability", () => {
   test("no CORS header is ever set on the response", async () => {
     const supabase = createMockSupabase({ from: { inventory_rules_v2: { data: [], error: null } } });
     const handler = loadHandler(supabase);
-    const req = { method: "POST", headers: { authorization: "Bearer test-service-key" }, body: { car_model_id: CAR, driver_lang: "zh", start_date: "2026-09-01", end_date: "2026-09-01" } };
+    const req = { method: "POST", headers: { authorization: "Bearer test-service-key-0123456789abcdef" }, body: { car_model_id: CAR, driver_lang: "zh", start_date: "2026-09-01", end_date: "2026-09-01" } };
     const res = createMockRes();
     res.setHeader = jest.fn();
     await handler(req, res);

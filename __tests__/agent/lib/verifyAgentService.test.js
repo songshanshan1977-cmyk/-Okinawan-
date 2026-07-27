@@ -23,34 +23,34 @@ describe("verifyAgentService", () => {
   });
 
   test("missing Authorization header -> agent_unauthorized", () => {
-    process.env.AGENT_SERVICE_KEY = "correct-service-key";
+    process.env.AGENT_SERVICE_KEY = "correct-service-key-0123456789ab";
     const result = verifyAgentService({ headers: {} });
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.AGENT_UNAUTHORIZED);
   });
 
   test("malformed header (no Bearer prefix) -> agent_unauthorized", () => {
-    process.env.AGENT_SERVICE_KEY = "correct-service-key";
-    const result = verifyAgentService({ headers: { authorization: "correct-service-key" } });
+    process.env.AGENT_SERVICE_KEY = "correct-service-key-0123456789ab";
+    const result = verifyAgentService({ headers: { authorization: "correct-service-key-0123456789ab" } });
     expect(result.code).toBe(AGENT_ERROR_CODES.AGENT_UNAUTHORIZED);
   });
 
   test("wrong token -> agent_unauthorized", () => {
-    process.env.AGENT_SERVICE_KEY = "correct-service-key";
+    process.env.AGENT_SERVICE_KEY = "correct-service-key-0123456789ab";
     const result = verifyAgentService({ headers: { authorization: "Bearer wrong-key" } });
     expect(result.code).toBe(AGENT_ERROR_CODES.AGENT_UNAUTHORIZED);
   });
 
   test("wrong token of a totally different length -> still agent_unauthorized, does not throw", () => {
-    process.env.AGENT_SERVICE_KEY = "correct-service-key";
+    process.env.AGENT_SERVICE_KEY = "correct-service-key-0123456789ab";
     expect(() => verifyAgentService({ headers: { authorization: "Bearer x" } })).not.toThrow();
     const result = verifyAgentService({ headers: { authorization: "Bearer x" } });
     expect(result.code).toBe(AGENT_ERROR_CODES.AGENT_UNAUTHORIZED);
   });
 
   test("correct token -> ok:true", () => {
-    process.env.AGENT_SERVICE_KEY = "correct-service-key";
-    const result = verifyAgentService({ headers: { authorization: "Bearer correct-service-key" } });
+    process.env.AGENT_SERVICE_KEY = "correct-service-key-0123456789ab";
+    const result = verifyAgentService({ headers: { authorization: "Bearer correct-service-key-0123456789ab" } });
     expect(result).toEqual({ ok: true });
   });
 
@@ -64,6 +64,29 @@ describe("verifyAgentService", () => {
     expect(extractBearerToken("Bearer abc123")).toBe("abc123");
     expect(extractBearerToken("Basic abc123")).toBeNull();
     expect(extractBearerToken(undefined)).toBeNull();
+  });
+
+  describe("A1-B02 安全配置: length + equality fail-close (wiring, see lib/agent/config.test.js for the underlying primitive)", () => {
+    const ORIGINAL_TOKEN_SECRET = process.env.AGENT_BOOKING_TOKEN_SECRET;
+    afterEach(() => {
+      if (ORIGINAL_TOKEN_SECRET === undefined) delete process.env.AGENT_BOOKING_TOKEN_SECRET;
+      else process.env.AGENT_BOOKING_TOKEN_SECRET = ORIGINAL_TOKEN_SECRET;
+    });
+
+    test("AGENT_SERVICE_KEY shorter than 32 bytes -> agent_auth_not_configured even though non-blank", () => {
+      process.env.AGENT_SERVICE_KEY = "too-short";
+      process.env.AGENT_BOOKING_TOKEN_SECRET = "a-completely-different-long-secret-value";
+      const result = verifyAgentService({ headers: { authorization: "Bearer too-short" } });
+      expect(result.code).toBe(AGENT_ERROR_CODES.AGENT_AUTH_NOT_CONFIGURED);
+    });
+
+    test("AGENT_SERVICE_KEY equal to AGENT_BOOKING_TOKEN_SECRET -> agent_auth_not_configured", () => {
+      const shared = "shared-value-used-for-both-secrets-0123456789";
+      process.env.AGENT_SERVICE_KEY = shared;
+      process.env.AGENT_BOOKING_TOKEN_SECRET = shared;
+      const result = verifyAgentService({ headers: { authorization: `Bearer ${shared}` } });
+      expect(result.code).toBe(AGENT_ERROR_CODES.AGENT_AUTH_NOT_CONFIGURED);
+    });
   });
 
   test("no CORS wildcard: this module never sets any response header itself", () => {

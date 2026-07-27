@@ -15,7 +15,7 @@ const CAR = "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca";
 
 describe("pages/api/agent/calculate-quote", () => {
   beforeEach(() => {
-    process.env.AGENT_SERVICE_KEY = "test-service-key";
+    process.env.AGENT_SERVICE_KEY = "test-service-key-0123456789abcdef";
   });
   afterEach(() => {
     delete process.env.AGENT_SERVICE_KEY;
@@ -35,7 +35,7 @@ describe("pages/api/agent/calculate-quote", () => {
     const handler = loadHandler(supabase);
     const req = {
       method: "POST",
-      headers: { authorization: "Bearer test-service-key" },
+      headers: { authorization: "Bearer test-service-key-0123456789abcdef" },
       body: { start_date: "2026-09-01", end_date: "2026-09-01", car_model_id: CAR, driver_lang: "ZH", duration: 8, total_price: 1 },
     };
     const res = createMockRes();
@@ -51,7 +51,7 @@ describe("pages/api/agent/calculate-quote", () => {
     const handler = loadHandler(supabase);
     const req = {
       method: "POST",
-      headers: { authorization: "Bearer test-service-key" },
+      headers: { authorization: "Bearer test-service-key-0123456789abcdef" },
       body: { start_date: "2026-09-01", end_date: "2026-09-01", car_model_id: CAR, driver_lang: "ZH", duration: 8 },
     };
     const res = createMockRes();

@@ -5,7 +5,7 @@ describe("bookingAccessToken", () => {
   const ORIGINAL_SECRET = process.env.AGENT_BOOKING_TOKEN_SECRET;
 
   beforeEach(() => {
-    process.env.AGENT_BOOKING_TOKEN_SECRET = "test-hmac-secret-value";
+    process.env.AGENT_BOOKING_TOKEN_SECRET = "test-hmac-secret-value-0123456789ab";
   });
 
   afterEach(() => {
@@ -88,6 +88,30 @@ describe("bookingAccessToken", () => {
   test("empty/missing token -> booking_access_invalid", () => {
     expect(verifyBookingAccessToken({ token: undefined, order_id: "ORD-1" }).code).toBe(AGENT_ERROR_CODES.BOOKING_ACCESS_INVALID);
     expect(verifyBookingAccessToken({ token: "", order_id: "ORD-1" }).code).toBe(AGENT_ERROR_CODES.BOOKING_ACCESS_INVALID);
+  });
+
+  describe("A1-B02 安全配置: length + equality fail-close (wiring)", () => {
+    const ORIGINAL_SERVICE_KEY = process.env.AGENT_SERVICE_KEY;
+    afterEach(() => {
+      if (ORIGINAL_SERVICE_KEY === undefined) delete process.env.AGENT_SERVICE_KEY;
+      else process.env.AGENT_SERVICE_KEY = ORIGINAL_SERVICE_KEY;
+    });
+
+    test("AGENT_BOOKING_TOKEN_SECRET shorter than 32 bytes -> agent_auth_not_configured", () => {
+      process.env.AGENT_BOOKING_TOKEN_SECRET = "too-short";
+      const issued = issueBookingAccessToken({ order_id: "ORD-1" });
+      expect(issued.ok).toBe(false);
+      expect(issued.code).toBe(AGENT_ERROR_CODES.AGENT_AUTH_NOT_CONFIGURED);
+    });
+
+    test("AGENT_BOOKING_TOKEN_SECRET equal to AGENT_SERVICE_KEY -> agent_auth_not_configured", () => {
+      const shared = "shared-value-used-for-both-secrets-0123456789";
+      process.env.AGENT_BOOKING_TOKEN_SECRET = shared;
+      process.env.AGENT_SERVICE_KEY = shared;
+      const issued = issueBookingAccessToken({ order_id: "ORD-1" });
+      expect(issued.ok).toBe(false);
+      expect(issued.code).toBe(AGENT_ERROR_CODES.AGENT_AUTH_NOT_CONFIGURED);
+    });
   });
 
   test("the exported API surface has no payment-authorization function — only issue/verify for read access", () => {
