@@ -26,7 +26,17 @@ const rollbackSqlRaw = fs.readFileSync(ROLLBACK_PATH, "utf8");
 // against the comment-STRIPPED text, so it only ever sees real, executable
 // SQL, never prose that happens to mention a keyword.
 function stripSqlLineComments(sql) {
+  // Normalize CRLF -> LF FIRST. Without this, a file checked out with
+  // Windows line endings (a real, observed case: git's core.autocrlf can
+  // convert a committed LF file to CRLF on checkout into a fresh worktree)
+  // leaves each split line ending in a trailing "\r" that `.` cannot
+  // consume (JS regex "." excludes line terminators, "\r" included) — so
+  // `--.*$` silently fails to match at all and the "strip" is a no-op,
+  // leaving full comment prose in what this file treats as "executable
+  // SQL only". Discovered when this exact failure mode reproduced after a
+  // fresh `git worktree add` converted this file's line endings.
   return sql
+    .replace(/\r\n/g, "\n")
     .split("\n")
     .map((line) => line.replace(/--.*$/, ""))
     .join("\n");
