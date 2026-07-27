@@ -7,8 +7,15 @@
 -- introduced, it does not delete anything that could be real accumulated
 -- data.
 --
+-- A1-R1-B05 (this revision): the forward migration no longer creates a
+-- partial unique INDEX — it creates a named, table-wide UNIQUE CONSTRAINT
+-- (orders_agent_idempotency_key_hash_key), because a partial index cannot
+-- be used as a plain `ON CONFLICT (columns) DO NOTHING` arbiter (see the
+-- forward migration file's header for the full explanation). This file is
+-- updated to match: it drops the CONSTRAINT, not an index.
+--
 -- For this migration specifically, that means:
---   - DROP the unique index. The index is what makes
+--   - DROP the named UNIQUE constraint. The constraint is what makes
 --     `INSERT ... ON CONFLICT (agent_idempotency_key_hash) DO NOTHING`
 --     work at all; once dropped, that exact upsert call from
 --     lib/agent/tools/createBookingDraft.js will fail with a real Postgres
@@ -37,9 +44,9 @@
 --      call fail immediately with a real database error until step 1
 --      catches up.
 --
--- Idempotent and safe to run any number of times, in any state (index
--- present, already dropped, migration never applied): `DROP INDEX IF
--- EXISTS` is a no-op when the index doesn't exist.
+-- Idempotent and safe to run any number of times, in any state (constraint
+-- present, already dropped, migration never applied): `DROP CONSTRAINT IF
+-- EXISTS` is a no-op when the constraint doesn't exist.
 --
 -- NEVER EXECUTED against any real or local Postgres in this round — see
 -- the forward migration file's header and the completion report's
@@ -63,21 +70,23 @@ BEGIN;
 --   -- actually been used. Non-zero does not block this rollback (nothing
 --   -- destructive happens either way), it is just useful context.
 
-DROP INDEX IF EXISTS public.orders_agent_idempotency_key_hash_unique_idx;
+ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_agent_idempotency_key_hash_key;
 
 COMMIT;
 
 -- =============================================================
 -- POST-ROLLBACK VERIFICATION (run manually)
 -- =============================================================
---   SELECT indexname FROM pg_indexes
---   WHERE schemaname = 'public' AND indexname = 'orders_agent_idempotency_key_hash_unique_idx';
+--   SELECT conname FROM pg_constraint
+--   WHERE conname = 'orders_agent_idempotency_key_hash_key'
+--     AND conrelid = 'public.orders'::regclass;
 --   -- expect: 0 rows
 --
 --   SELECT column_name FROM information_schema.columns
 --   WHERE table_schema = 'public' AND table_name = 'orders'
 --     AND column_name IN ('agent_idempotency_key_hash', 'agent_idempotency_request_hash');
---   -- expect: 2 rows — UNCHANGED by this rollback.
+--   -- expect: 2 rows — UNCHANGED by this rollback. Not DROP COLUMN, not
+--   -- DELETE, not TRUNCATE.
 --
 --   SELECT count(*) FROM public.orders;
 --   -- expect: EXACTLY the same row count as immediately before this

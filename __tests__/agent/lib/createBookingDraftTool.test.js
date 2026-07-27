@@ -22,6 +22,12 @@ const VALID_INPUT = {
 
 const KEY = "test-idempotency-key-1";
 
+function computeValidInputRequestHash() {
+  const { computeFieldsHash } = require("../../../lib/agent/hashUtils");
+  const { IDEMPOTENCY_REQUEST_FIELDS } = require("../../../lib/agent/tools/createBookingDraft");
+  return computeFieldsHash(IDEMPOTENCY_REQUEST_FIELDS, VALID_INPUT);
+}
+
 const AVAILABLE_INVENTORY = { inventory_rules_v2: { data: [{ date: "2099-09-01", remaining_qty_calc: 3 }], error: null } };
 const SOLD_OUT_INVENTORY = { inventory_rules_v2: { data: [{ date: "2099-09-01", remaining_qty_calc: 0 }], error: null } };
 
@@ -189,6 +195,65 @@ describe("createBookingDraftTool — A1-B02: Idempotency-Key", () => {
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.IDEMPOTENCY_CONFLICT);
     expect(result.order_id).toBeUndefined();
+  });
+
+  describe("A1-R1-B05: defensive handling of every real upsert().select() response shape", () => {
+    test("ignored duplicate returns data: [] -> queries the winner by key hash, does not treat it as a failure", async () => {
+      const existingRow = { ...INSERTED_ORDER_FIXTURE, agent_idempotency_request_hash: computeValidInputRequestHash() };
+      const supabase = createMockSupabase({
+        from: { ...AVAILABLE_INVENTORY, orders: [{ data: [], error: null }, { data: existingRow, error: null }] },
+        rpc: () => ({ data: 1600, error: null }),
+      });
+
+      const result = await createBookingDraftTool({ supabase, data: VALID_INPUT, idempotencyKey: KEY });
+
+      expect(result.ok).toBe(true);
+      expect(result.order_id).toBe(existingRow.order_id);
+      expect(supabase.__tableCalls.orders.select.mock.calls.length).toBeGreaterThanOrEqual(1); // the follow-up read actually happened
+    });
+
+    test("ignored duplicate returns data: null -> ALSO queries the winner by key hash (not treated as an unknown/error shape)", async () => {
+      const existingRow = { ...INSERTED_ORDER_FIXTURE, agent_idempotency_request_hash: computeValidInputRequestHash() };
+      const supabase = createMockSupabase({
+        from: { ...AVAILABLE_INVENTORY, orders: [{ data: null, error: null }, { data: existingRow, error: null }] },
+        rpc: () => ({ data: 1600, error: null }),
+      });
+
+      const result = await createBookingDraftTool({ supabase, data: VALID_INPUT, idempotencyKey: KEY });
+
+      expect(result.ok).toBe(true);
+      expect(result.order_id).toBe(existingRow.order_id);
+    });
+
+    test("upsert unexpectedly returns MULTIPLE rows -> stable failure, no token issued, no follow-up read attempted", async () => {
+      const supabase = createMockSupabase({
+        from: { ...AVAILABLE_INVENTORY, orders: { data: [INSERTED_ORDER_FIXTURE, { ...INSERTED_ORDER_FIXTURE, order_id: "ORD-OTHER" }], error: null } },
+        rpc: () => ({ data: 1600, error: null }),
+      });
+
+      const result = await createBookingDraftTool({ supabase, data: VALID_INPUT, idempotencyKey: KEY });
+
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe(AGENT_ERROR_CODES.DRAFT_CREATION_FAILED);
+      expect(result.booking_access_token).toBeUndefined();
+      // Only the one upsert call happened — no second .from("orders") call
+      // for a "read the winner" lookup, since this isn't the "ignored
+      // duplicate" case at all.
+      expect(supabase.__tableCalls.orders.upsert.mock.calls.length).toBe(1);
+    });
+
+    test("upsert returns a completely unrecognized data shape (a bare object, neither null nor an array) -> stable failure, no token issued", async () => {
+      const supabase = createMockSupabase({
+        from: { ...AVAILABLE_INVENTORY, orders: { data: { unexpected: "shape" }, error: null } },
+        rpc: () => ({ data: 1600, error: null }),
+      });
+
+      const result = await createBookingDraftTool({ supabase, data: VALID_INPUT, idempotencyKey: KEY });
+
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe(AGENT_ERROR_CODES.DRAFT_CREATION_FAILED);
+      expect(result.booking_access_token).toBeUndefined();
+    });
   });
 
   test("concurrent-duplicate simulation: two sequential tool calls with the SAME key both resolve correctly without ever both inserting real content — the second's upsert is pre-configured to already observe the conflict, exactly as the real unique index would force at the DB level", async () => {

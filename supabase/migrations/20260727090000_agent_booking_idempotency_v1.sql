@@ -6,14 +6,37 @@
 -- consistent with every other migration in this overall engagement) —
 -- static text review and mocked-RPC-contract Jest tests only.
 --
--- A1-B02: adds the two columns and the one partial unique index
--- lib/agent/tools/createBookingDraft.js's insertIdempotentDraft() needs to
--- make its `INSERT ... ON CONFLICT (agent_idempotency_key_hash) DO NOTHING`
--- (via supabase-js .upsert(row, {onConflict, ignoreDuplicates:true}))
--- genuinely atomic at the database level — this is the real concurrency
--- primitive the A1-B02 instructions require ("不得用『先查再插』冒充并发
--- 安全"): two concurrent requests carrying the SAME Idempotency-Key race
--- on this index, not on any application-level check-then-act sequence.
+-- A1-R1-B05 (this revision): the FIRST version of this migration created a
+-- PARTIAL unique index (`... WHERE agent_idempotency_key_hash IS NOT NULL`)
+-- and claimed it could serve as the arbiter for
+-- `.upsert(row, {onConflict: "agent_idempotency_key_hash", ignoreDuplicates:
+-- true})`. That claim was wrong and has been removed: PostgREST's
+-- `onConflict` parameter only ever passes a column list to Postgres's
+-- `ON CONFLICT (columns)` inference — it has no way to also repeat a
+-- partial index's WHERE predicate (Postgres's own `ON CONFLICT (columns)
+-- DO NOTHING` syntax, without a WHERE clause of its own, can only infer a
+-- NON-partial unique index/constraint on those exact columns; a partial
+-- index is only usable as an arbiter via `ON CONFLICT (columns) WHERE
+-- <same predicate> DO NOTHING`, which PostgREST has no way to emit). Left
+-- as it was, the real Postgres/PostgREST call would have failed with "there
+-- is no unique or exclusion constraint matching the ON CONFLICT
+-- specification" the first time it actually ran — undetectable without a
+-- real database, exactly the kind of gap this migration must not leave
+-- undocumented.
+--
+-- Fix: replace the partial unique index with an ordinary, table-wide
+-- UNIQUE constraint on agent_idempotency_key_hash (no WHERE clause at all).
+-- PostgreSQL's UNIQUE constraints follow the SQL standard's NULL handling —
+-- every NULL is considered distinct from every other NULL, including from
+-- itself — so a plain (non-partial) UNIQUE constraint on a nullable column
+-- already tolerates an arbitrary number of NULL rows without any special
+-- partial-index treatment. Every historical order (NULL in this column,
+-- since it did not exist before this migration) remains completely
+-- unaffected; the constraint only ever actually fires between two rows
+-- that both have the SAME non-NULL key hash, which is exactly the
+-- Idempotency-Key collision this feature exists to catch. This is also now
+-- correctly inferable by a plain `ON CONFLICT (agent_idempotency_key_hash)
+-- DO NOTHING`, with no predicate mismatch.
 --
 -- =============================================================
 -- SCHEMA ASSUMPTIONS (this migration has NOT been verified against any
@@ -25,14 +48,9 @@
 --     pages/api/create-order.js / lib/orders/generateOrderId.js, which
 --     this migration does not alter.
 --   - Every EXISTING row in public.orders has NULL for both new columns
---     (they did not exist before this migration ran) — Postgres unique
---     indexes treat every NULL as distinct from every other NULL, so this
---     is compatible with the table's full existing history without a
---     backfill of any kind, whether or not the partial WHERE clause below
---     is present. The partial WHERE clause is used anyway (matching the
---     existing payments_stripe_session_id_unique_idx precedent from the
---     separate webhook engagement, for the same reason: a smaller index
---     that only exists for the rows that actually use this feature).
+--     (they did not exist before this migration ran) — safe under a plain
+--     UNIQUE constraint precisely because Postgres never treats two NULLs
+--     as equal, so no backfill of any kind is required.
 
 -- =============================================================
 -- 1. orders columns (both nullable — no backfill required, no NOT NULL
@@ -43,35 +61,47 @@ ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS agent_idempotency_key_hash te
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS agent_idempotency_request_hash text;
 
 -- =============================================================
--- 2. Partial unique index — the actual concurrency primitive.
+-- 2. Named UNIQUE constraint — the actual concurrency primitive, and the
+--    exact arbiter lib/agent/tools/createBookingDraft.js's
+--    `.upsert(row, {onConflict: "agent_idempotency_key_hash",
+--    ignoreDuplicates: true})` infers.
 -- =============================================================
--- UNIQUE + a partial WHERE clause: only rows where an Agent draft actually
--- set agent_idempotency_key_hash participate in the uniqueness check at
--- all — every pre-existing / non-Agent-created row (NULL in this column)
--- is completely unaffected, both because it is excluded by the WHERE
--- clause AND because Postgres unique indexes already never consider two
--- NULLs to conflict with each other even without a partial clause.
+-- Postgres has no `ADD CONSTRAINT IF NOT EXISTS` syntax, so existence is
+-- checked explicitly against pg_constraint first — this keeps the
+-- migration safe to run more than once, the same idempotency guarantee
+-- `CREATE UNIQUE INDEX IF NOT EXISTS` gave the (now removed) partial index,
+-- expressed the only way a plain ALTER TABLE ADD CONSTRAINT can be.
 --
--- This is the target lib/agent/tools/createBookingDraft.js's
--- `.upsert(row, {onConflict: "agent_idempotency_key_hash", ignoreDuplicates:
--- true})` names via PostgREST's `on_conflict` parameter — PostgREST/Postgres
--- requires a real unique index or constraint matching the named column(s)
--- for ON CONFLICT to target; without this index, that upsert call would
--- fail at the database level with "there is no unique or exclusion
--- constraint matching the ON CONFLICT specification" (a real, sharp
--- failure mode if this migration were ever skipped — noted here so it is
--- never mistaken for a soft/optional index).
-CREATE UNIQUE INDEX IF NOT EXISTS orders_agent_idempotency_key_hash_unique_idx
-  ON public.orders (agent_idempotency_key_hash)
-  WHERE agent_idempotency_key_hash IS NOT NULL;
+-- Deliberately NOT partial (no WHERE clause): see the file header for why
+-- a partial index cannot be used as a plain `ON CONFLICT (columns) DO
+-- NOTHING` arbiter, and why an ordinary UNIQUE constraint needs no partial
+-- predicate to safely coexist with an arbitrary number of historical NULL
+-- rows.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'orders_agent_idempotency_key_hash_key'
+      AND conrelid = 'public.orders'::regclass
+  ) THEN
+    ALTER TABLE public.orders
+      ADD CONSTRAINT orders_agent_idempotency_key_hash_key UNIQUE (agent_idempotency_key_hash);
+  END IF;
+END
+$$;
 
--- Non-unique index on the request hash: NOT required for the concurrency
--- guarantee (only the key-hash index is), but makes the "read existing row
--- by key_hash, compare request_hash" follow-up lookup (the request_hash
--- comparison itself, not the row lookup, which already uses the unique
--- index above) cheap to audit/debug without a full table scan if this
+-- Non-unique index on the request hash: unrelated to the ON CONFLICT
+-- arbiter question above (it is not, and was never, a unique index, and is
+-- never named in any onConflict parameter) — NOT required for the
+-- concurrency guarantee (only the named UNIQUE constraint above is), but
+-- makes the "read existing row by key_hash, compare request_hash"
+-- follow-up lookup cheap to audit/debug without a full table scan if this
 -- table grows large. Optional, additive, safe to omit without affecting
--- correctness — included here as a low-cost convenience.
+-- correctness — included here as a low-cost convenience. Kept partial
+-- (WHERE ... IS NOT NULL) since a non-unique partial index has no ON
+-- CONFLICT inference requirement to satisfy in the first place — the
+-- A1-R1-B05 fix only concerns UNIQUE indexes/constraints used as an
+-- ON CONFLICT arbiter.
 CREATE INDEX IF NOT EXISTS orders_agent_idempotency_request_hash_idx
   ON public.orders (agent_idempotency_request_hash)
   WHERE agent_idempotency_request_hash IS NOT NULL;
