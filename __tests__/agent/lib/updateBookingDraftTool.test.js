@@ -1,5 +1,5 @@
-const { updateBookingDraftTool, ALLOWED_CHANGE_FIELDS } = require("../../../lib/agent/tools/updateBookingDraft");
-const { computeSummaryHash } = require("../../../lib/agent/bookingSummary");
+const { updateBookingDraftTool, ALLOWED_CHANGE_FIELDS, ORDER_MERGE_COLUMNS } = require("../../../lib/agent/tools/updateBookingDraft");
+const { computeSummaryHash, HASHED_FIELDS } = require("../../../lib/agent/bookingSummary");
 const { createMockSupabase } = require("../../helpers/mockSupabase");
 const { AGENT_ERROR_CODES } = require("../../../lib/agent/errorCodes");
 
@@ -251,5 +251,63 @@ describe("updateBookingDraftTool — successful update", () => {
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.UPDATE_FAILED);
+  });
+});
+
+describe("regression: ORDER_MERGE_COLUMNS must cover every HASHED_FIELDS field", () => {
+  test("invariant: every field computeSummaryHash reads is present in the pre-read column whitelist", () => {
+    // If this ever regresses (a HASHED_FIELDS field added to
+    // lib/agent/bookingSummary.js without a matching addition here),
+    // computeSummaryHash(currentOrder) inside updateBookingDraftTool would
+    // silently hash `undefined` for the missing field(s) against a real
+    // Supabase response (which honors the select() column list) — this
+    // test fails loudly instead.
+    for (const field of HASHED_FIELDS) {
+      expect(ORDER_MERGE_COLUMNS).toContain(field);
+    }
+  });
+
+  test("real-shape regression: a pre-read row containing ONLY the ORDER_MERGE_COLUMNS fields (exactly what a real Supabase select() returns, not a bigger fixture object) still matches the customer's just-seen summary_hash — update proceeds, never summary_stale", async () => {
+    // Deliberately built to contain EXACTLY ORDER_MERGE_COLUMNS's fields and
+    // nothing else, so this test cannot pass by accident the way the
+    // existing queue-based mock's full-fixture passthrough could mask a
+    // missing column (the mock does not filter by the select() column
+    // list the way a real Supabase client does).
+    const realisticSelectShapedRow = {};
+    for (const col of ORDER_MERGE_COLUMNS) {
+      realisticSelectShapedRow[col] = CURRENT_ORDER[col];
+    }
+    expect(Object.keys(realisticSelectShapedRow).sort()).toEqual([...ORDER_MERGE_COLUMNS].sort());
+
+    // The hash the customer's prior get_booking_summary call actually
+    // showed them — computed from the FULL, correct order content
+    // (CURRENT_HASH, defined at the top of this file from CURRENT_ORDER
+    // directly), completely independent of whatever ORDER_MERGE_COLUMNS
+    // happens to select. This is the critical part: if ORDER_MERGE_COLUMNS
+    // were missing a HASHED_FIELDS column, `realisticSelectShapedRow`
+    // above would silently lack that field, the tool's internal
+    // computeSummaryHash(currentOrder) would diverge from CURRENT_HASH,
+    // and this test would correctly fail with summary_stale — exactly the
+    // real bug this regression test catches.
+    const expectedSummaryHash = CURRENT_HASH;
+
+    const supabase = createMockSupabase({
+      from: {
+        ...AVAILABLE_INVENTORY,
+        orders: [{ data: realisticSelectShapedRow, error: null }, { data: [updatedRowFixture({ remark: "updated" })], error: null }],
+      },
+      rpc: () => ({ data: 1600, error: null }),
+    });
+
+    const result = await updateBookingDraftTool({
+      supabase,
+      order_id: CURRENT_ORDER.order_id,
+      expected_summary_hash: expectedSummaryHash,
+      changes: { remark: "updated" },
+    });
+
+    expect(result.code).not.toBe(AGENT_ERROR_CODES.SUMMARY_STALE);
+    expect(result.ok).toBe(true);
+    expect(result.updated).toBe(true);
   });
 });
