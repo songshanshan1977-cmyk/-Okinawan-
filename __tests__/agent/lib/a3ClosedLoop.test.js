@@ -4,24 +4,28 @@
 // payment link before confirmation, must fail) -> confirm H1 -> update
 // (content changes to H2, confirmation cleared) -> (attempt payment link
 // with the now-cleared confirmation, must fail) -> confirm H2 -> payment
-// link succeeds (pending) -> simulated webhook payment -> get_payment_status
-// reports paid.
+// link succeeds (pending) -> a same-attempt retry recovers the same Stripe
+// session -> update/confirm now reject the pending order -> simulated
+// webhook payment -> get_payment_status reports paid.
 //
 // Same stateful in-memory fake `orders`/`inventory_rules_v2` "database"
 // approach as __tests__/agent/lib/a2ClosedLoop.test.js (the queue-based
 // createMockSupabase helper cannot represent state persisting/evolving
 // across a multi-tool-call flow). Zero real network I/O.
 //
-// IMPORTANT SCOPE NOTE (per the A3 instructions: "Mock不得冒充真实Postgres
-// 并发验证"): the fake `rpc("consume_payment_authorization_v1", ...)` below
-// re-implements the SAME WHERE-clause matching logic as
-// supabase/migrations/20260729120000_payment_authorization_v1.sql's real
-// SQL function, in plain synchronous JS, purely to exercise this file's
-// single-threaded, sequential closed-loop scenario end to end. It does NOT
-// demonstrate — and must never be read as demonstrating — that concurrent
-// callers holding the same token can only have one succeed; that atomicity
-// guarantee comes from Postgres's own MVCC/row-locking on a single UPDATE
-// statement and is verified only by the static SQL text assertions in
+// IMPORTANT SCOPE NOTE (per this round's instructions: "Mock不得冒充真实
+// Postgres并发验证"): the fake `rpc("issue_payment_authorization_v1", ...)`
+// and `rpc("consume_payment_authorization_v1", ...)` below re-implement the
+// SAME decision/WHERE-clause logic as
+// supabase/migrations/20260729120000_payment_authorization_v1.sql's real SQL
+// functions, in plain synchronous JS, purely to exercise this file's
+// single-threaded, sequential closed-loop scenario end to end (including a
+// same-order-same-summary retry converging on the same payment_attempt_id).
+// This does NOT demonstrate — and must never be read as demonstrating —
+// that two GENUINELY concurrent database transactions racing on the same
+// row can only have one decide the attempt id; that atomicity guarantee
+// comes from Postgres's own MVCC/row-locking on a single UPDATE statement
+// and is verified only by the static SQL text assertions in
 // __tests__/agent/sql/migrationPaymentAuthorizationStatic.test.js. Real
 // concurrent-access behavior remains DB INTEGRATION UNVERIFIED (see this
 // round's completion report) — this file, like every other test in this
@@ -41,14 +45,16 @@ const { updateBookingDraftTool } = require("../../../lib/agent/tools/updateBooki
 const { confirmBookingSummaryTool } = require("../../../lib/agent/tools/confirmBookingSummary");
 const { createPaymentLinkTool } = require("../../../lib/agent/tools/createPaymentLink");
 const { getPaymentStatusTool } = require("../../../lib/agent/tools/getPaymentStatus");
+const { issuePaymentAuthorization } = require("../../../lib/payment/paymentAuthorization");
 const { AGENT_ERROR_CODES } = require("../../../lib/agent/errorCodes");
 const { TEST_AGENT_BOOKING_TOKEN_SECRET } = require("../helpers/testSecrets");
 
 const CAR = "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca";
 
-function createFakeSupabase() {
+function createFakeSupabase({ failNthOrdersUpdate } = {}) {
   const orders = new Map();
   const inventory = [];
+  let ordersUpdateCallCount = 0;
 
   function matchOrders(filters) {
     return [...orders.values()].filter((r) => filters.every((f) => r[f.col] === f.val));
@@ -95,6 +101,10 @@ function createFakeSupabase() {
         return { data: matchOrders(filters).map((r) => ({ ...r })), error: null };
       }
       if (mode === "update") {
+        ordersUpdateCallCount += 1;
+        if (failNthOrdersUpdate && ordersUpdateCallCount === failNthOrdersUpdate) {
+          return { data: null, error: { message: "simulated db down" } };
+        }
         const matches = matchOrders(filters);
         matches.forEach((r) => Object.assign(r, payload));
         return { data: matches.map((r) => ({ ...r })), error: null };
@@ -139,10 +149,35 @@ function createFakeSupabase() {
     return api;
   }
 
-  // See file header: re-implements the consume RPC's WHERE-clause matching
-  // logic in plain JS for THIS file's single-threaded scenario only — never
-  // a stand-in for real Postgres atomicity/concurrency guarantees.
-  function consumePaymentAuthorization({ p_order_id, p_token_hash }) {
+  // See file header: re-implements issue_payment_authorization_v1's decision
+  // rule in plain JS for THIS file's single-threaded scenario only — never a
+  // stand-in for real Postgres atomicity/concurrency guarantees.
+  function issuePaymentAuthorizationRpc({ p_order_id, p_token_hash, p_candidate_attempt_id, p_summary_hash, p_deposit_amount, p_expires_at }) {
+    const order = orders.get(p_order_id);
+    if (!order) return Promise.resolve({ data: [], error: null });
+
+    const keepExisting =
+      Boolean(order.payment_attempt_id) &&
+      order.payment_authorization_summary_hash === p_summary_hash &&
+      (order.payment_status === "draft" || order.payment_status === "pending");
+
+    const attemptId = keepExisting ? order.payment_attempt_id : p_candidate_attempt_id;
+
+    Object.assign(order, {
+      payment_authorization_token_hash: p_token_hash,
+      payment_authorization_summary_hash: p_summary_hash,
+      payment_authorization_deposit_amount: p_deposit_amount,
+      payment_authorization_expires_at: p_expires_at,
+      payment_authorization_consumed_at: null,
+      payment_attempt_id: attemptId,
+    });
+
+    return Promise.resolve({ data: [{ order_id: order.order_id, payment_attempt_id: attemptId }], error: null });
+  }
+
+  // See file header: re-implements consume_payment_authorization_v1's
+  // WHERE-clause matching logic in plain JS.
+  function consumePaymentAuthorizationRpc({ p_order_id, p_token_hash }) {
     const order = orders.get(p_order_id);
     const isMatch =
       order &&
@@ -177,6 +212,8 @@ function createFakeSupabase() {
           inventory_status: order.inventory_status,
           payment_authorization_summary_hash: order.payment_authorization_summary_hash,
           payment_authorization_deposit_amount: order.payment_authorization_deposit_amount,
+          payment_attempt_id: order.payment_attempt_id,
+          stripe_session_id: order.stripe_session_id,
         },
       ],
       error: null,
@@ -191,7 +228,8 @@ function createFakeSupabase() {
     }),
     rpc: jest.fn((name, args) => {
       if (name === "get_car_price") return Promise.resolve({ data: 1600, error: null });
-      if (name === "consume_payment_authorization_v1") return consumePaymentAuthorization(args);
+      if (name === "issue_payment_authorization_v1") return issuePaymentAuthorizationRpc(args);
+      if (name === "consume_payment_authorization_v1") return consumePaymentAuthorizationRpc(args);
       return Promise.resolve({ data: null, error: { message: "unknown rpc" } });
     }),
   };
@@ -199,11 +237,38 @@ function createFakeSupabase() {
   return { supabase, orders, inventory };
 }
 
+// Fake Stripe that always returns the SAME id/url regardless of call count —
+// this simulates what real Stripe guarantees for two calls sharing the same
+// idempotencyKey+params (the customer's card is never charged twice, the
+// SAME Checkout Session object is returned both times).
 function fakeStripe() {
   return { checkout: { sessions: { create: jest.fn(() => Promise.resolve({ id: "cs_a3_loop_1", url: "https://stripe.invalid/pay/cs_a3_loop_1" })) } } };
 }
 
-describe("A3 closed loop: unconfirmed -> fail, confirm H1 -> content changes to H2 -> fail, confirm H2 -> payment link (pending), webhook paid -> get_payment_status", () => {
+async function seedConfirmedDraft(supabase, inventory, idempotencyKey) {
+  inventory.push({ car_model_id: CAR, driver_lang: "ZH", date: "2099-09-01", remaining_qty_calc: 5 });
+  const draftInput = {
+    car_model_id: CAR,
+    driver_lang: "zh",
+    duration: 8,
+    start_date: "2099-09-01",
+    end_date: "2099-09-01",
+    departure_hotel: "Hotel A",
+    end_hotel: "Hotel B",
+    pax: 2,
+    luggage: 1,
+    name: "Zhang San",
+    phone: "13800000000",
+    email: "zhangsan@example.com",
+  };
+  const draftResult = await createBookingDraftTool({ supabase, data: draftInput, idempotencyKey });
+  const order_id = draftResult.order_id;
+  const summary = await getBookingSummaryTool({ supabase, order_id });
+  await confirmBookingSummaryTool({ supabase, order_id, summary_hash: summary.summary_hash });
+  return order_id;
+}
+
+describe("A3 closed loop: unconfirmed -> fail, confirm H1 -> content changes to H2 -> fail, confirm H2 -> payment link (pending), retry idempotency, pending rejects update/confirm, webhook paid -> get_payment_status", () => {
   beforeEach(() => {
     process.env.AGENT_BOOKING_TOKEN_SECRET = TEST_AGENT_BOOKING_TOKEN_SECRET;
     process.env.NEXT_PUBLIC_SITE_URL = "https://sandbox.invalid";
@@ -282,6 +347,17 @@ describe("A3 closed loop: unconfirmed -> fail, confirm H1 -> content changes to 
     expect(orders.get(order_id).payment_status).toBe("pending");
     expect(orders.get(order_id).payment_authorization_consumed_at).not.toBeNull();
 
+    // 7b. update_booking_draft / confirm_booking_summary 遇到 pending 拒绝
+    // （A3 修订：不再像 draft 一样"仍可编辑"——已有真实付款尝试的订单内容必须
+    // 冻结）。
+    const updateOnPending = await updateBookingDraftTool({ supabase, order_id, expected_summary_hash: H2, changes: { remark: "should not land" } });
+    expect(updateOnPending.ok).toBe(false);
+    expect(updateOnPending.code).toBe(AGENT_ERROR_CODES.PAID_ORDER_IMMUTABLE);
+
+    const confirmOnPending = await confirmBookingSummaryTool({ supabase, order_id, summary_hash: H2 });
+    expect(confirmOnPending.ok).toBe(false);
+    expect(confirmOnPending.code).toBe(AGENT_ERROR_CODES.PAID_ORDER_IMMUTABLE);
+
     // get_payment_status 在 webhook 之前必须是 paid:false.
     const statusBeforeWebhook = await getPaymentStatusTool({ supabase, order_id });
     expect(statusBeforeWebhook.ok).toBe(true);
@@ -299,64 +375,80 @@ describe("A3 closed loop: unconfirmed -> fail, confirm H1 -> content changes to 
     expect(statusAfterWebhook.paid).toBe(true);
   });
 
-  test("同一个已消费的授权不能被 create_payment_link 再次消费（重新签发前，第二次调用必须走全新授权而不是复用旧 token）", async () => {
-    const { supabase, inventory } = createFakeSupabase();
-    inventory.push({ car_model_id: CAR, driver_lang: "ZH", date: "2099-09-01", remaining_qty_calc: 5 });
+  test("两次新 Token、同一订单和摘要 -> 权威 payment_attempt_id 相同，Stripe idempotencyKey 相同，Session id/url 相同（Agent 超时重试不创建第二个 Session）", async () => {
+    const { supabase, inventory, orders } = createFakeSupabase();
+    const order_id = await seedConfirmedDraft(supabase, inventory, "a3-e2e-retry-key");
 
-    const draftInput = {
-      car_model_id: CAR,
-      driver_lang: "zh",
-      duration: 8,
-      start_date: "2099-09-01",
-      end_date: "2099-09-01",
-      departure_hotel: "Hotel A",
-      end_hotel: "Hotel B",
-      pax: 2,
-      luggage: 1,
-      name: "Zhang San",
-      phone: "13800000000",
-      email: "zhangsan@example.com",
-    };
-    const draftResult = await createBookingDraftTool({ supabase, data: draftInput, idempotencyKey: "a3-e2e-key-2" });
-    const order_id = draftResult.order_id;
+    const stripe = fakeStripe();
+    const first = await createPaymentLinkTool({ supabase, stripe, order_id });
+    const attemptIdAfterFirst = orders.get(order_id).payment_attempt_id;
 
-    const summary1 = await getBookingSummaryTool({ supabase, order_id });
-    await confirmBookingSummaryTool({ supabase, order_id, summary_hash: summary1.summary_hash });
+    // 模拟 Agent 超时后重试：同一订单、同一（此刻仍然当前的）摘要，再次调用。
+    const second = await createPaymentLinkTool({ supabase, stripe, order_id });
+    const attemptIdAfterSecond = orders.get(order_id).payment_attempt_id;
 
-    const first = await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id });
     expect(first.ok).toBe(true);
-
-    // 未经过任何新的 confirm_booking_summary 就再次调用：订单已是 pending，
-    // update_booking_draft/confirm_booking_summary 的 isOrderEditable 语义
-    // 仍允许 pending 状态，但重点是——create_payment_link 每次都会重新签发
-    // 一份新授权（而不是复用旧 token），所以第二次调用不会复用第一次已消费的
-    // token 却仍能成功；它是靠"新签发的授权"成功，不是"旧 token 被重复消费"。
-    const second = await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id });
     expect(second.ok).toBe(true);
-    expect(second.url).toBe("https://stripe.invalid/pay/cs_a3_loop_1");
+    expect(attemptIdAfterFirst).toBeTruthy();
+    expect(attemptIdAfterFirst).toBe(attemptIdAfterSecond); // 权威 attempt id 相同
+
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(2);
+    const key1 = stripe.checkout.sessions.create.mock.calls[0][1].idempotencyKey;
+    const key2 = stripe.checkout.sessions.create.mock.calls[1][1].idempotencyKey;
+    expect(key1).toBe(key2); // Stripe idempotencyKey 相同
+    expect(key1).toBe(`checkout:${attemptIdAfterFirst}`);
+
+    expect(first.url).toBe(second.url); // Session id/url 相同（fake Stripe 模拟真实 Stripe 的幂等返回）
+  });
+
+  test("并发签发（Promise.all 两个 issuePaymentAuthorization 调用，同一订单同一摘要）由 RPC 返回同一权威 payment_attempt_id", async () => {
+    const { supabase, inventory, orders } = createFakeSupabase();
+    const order_id = await seedConfirmedDraft(supabase, inventory, "a3-e2e-concurrent-key");
+    const currentOrder = orders.get(order_id);
+
+    // 注意（见文件头）：Promise.all 在单线程 JS 事件循环里不构成真正的数据库级
+    // 并发——这里验证的是"两次几乎同时发起的签发调用，只要摘要相同，就必须
+    // 收敛到同一个权威 attempt id"这条应用层契约本身，而不是 Postgres 行锁的
+    // 真实并发保证（那部分只能由静态 SQL 断言验证）。
+    const [r1, r2] = await Promise.all([issuePaymentAuthorization({ supabase, order: currentOrder }), issuePaymentAuthorization({ supabase, order: currentOrder })]);
+
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    expect(r1.payment_attempt_id).toBe(r2.payment_attempt_id);
+    expect(r1.token).not.toBe(r2.token); // Token 每次都不同，attempt id 相同
+  });
+
+    // failNthOrdersUpdate 计数覆盖整个场景里所有 .from("orders").update() 调用
+    // （createBookingDraftTool 用的是 .upsert()，不计入）：
+    //   第 1 次 update() = seedConfirmedDraft 里 confirm_booking_summary 写入确认字段（必须成功，否则后面直接卡在 summary_not_confirmed）
+    //   第 2 次 update() = 第一次 createPaymentLinkTool 调用里 createCheckoutSession 的写回（本测试要让它失败）
+    //   第 3 次 update() = 第二次 createPaymentLinkTool 调用（重试）的写回（应当成功）
+  test("Stripe 成功但数据库写回失败后重试：同一 idempotencyKey 恢复同一 Session，第二次写回成功", async () => {
+    const { supabase, inventory, orders } = createFakeSupabase({ failNthOrdersUpdate: 2 });
+    const order_id = await seedConfirmedDraft(supabase, inventory, "a3-e2e-writeback-key");
+
+    const stripe = fakeStripe();
+    const first = await createPaymentLinkTool({ supabase, stripe, order_id });
+    expect(first.ok).toBe(false);
+    expect(first.code).toBe(AGENT_ERROR_CODES.PAYMENT_SESSION_WRITE_FAILED);
+    // 写回失败不恢复 Token，但 attempt id 已经落库（由签发阶段决定），订单本身仍是可继续使用的状态
+    const attemptIdAfterFirst = orders.get(order_id).payment_attempt_id;
+    expect(attemptIdAfterFirst).toBeTruthy();
+
+    const second = await createPaymentLinkTool({ supabase, stripe, order_id });
+    expect(second.ok).toBe(true);
+    expect(orders.get(order_id).payment_attempt_id).toBe(attemptIdAfterFirst); // 同一 attempt，未产生第二个
+    expect(orders.get(order_id).payment_status).toBe("pending");
+
+    const key1 = stripe.checkout.sessions.create.mock.calls[0][1].idempotencyKey;
+    const key2 = stripe.checkout.sessions.create.mock.calls[1][1].idempotencyKey;
+    expect(key1).toBe(key2);
   });
 
   test("zero real network requests occur anywhere in the loop (fetch is guarded globally by jest.setup.js)", async () => {
     const { supabase, inventory } = createFakeSupabase();
-    inventory.push({ car_model_id: CAR, driver_lang: "ZH", date: "2099-09-01", remaining_qty_calc: 5 });
-    const draftInput = {
-      car_model_id: CAR,
-      driver_lang: "zh",
-      duration: 8,
-      start_date: "2099-09-01",
-      end_date: "2099-09-01",
-      departure_hotel: "Hotel A",
-      end_hotel: "Hotel B",
-      pax: 2,
-      luggage: 1,
-      name: "Zhang San",
-      phone: "13800000000",
-      email: "zhangsan@example.com",
-    };
-    const draftResult = await createBookingDraftTool({ supabase, data: draftInput, idempotencyKey: "a3-e2e-key-3" });
-    const summary = await getBookingSummaryTool({ supabase, order_id: draftResult.order_id });
-    await confirmBookingSummaryTool({ supabase, order_id: draftResult.order_id, summary_hash: summary.summary_hash });
-    await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id: draftResult.order_id });
+    const order_id = await seedConfirmedDraft(supabase, inventory, "a3-e2e-key-3");
+    await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id });
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });

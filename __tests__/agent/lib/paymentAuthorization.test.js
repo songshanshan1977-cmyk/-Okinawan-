@@ -1,4 +1,4 @@
-const { issuePaymentAuthorization, hashPaymentToken, DEFAULT_TTL_MS, TOKEN_BYTES } = require("../../../lib/payment/paymentAuthorization");
+const { issuePaymentAuthorization, hashPaymentToken, DEFAULT_TTL_MS, TOKEN_BYTES, ISSUE_RPC_NAME } = require("../../../lib/payment/paymentAuthorization");
 const { computeSummaryHash } = require("../../../lib/agent/bookingSummary");
 const { createMockSupabase } = require("../../helpers/mockSupabase");
 const { AGENT_ERROR_CODES } = require("../../../lib/agent/errorCodes");
@@ -20,6 +20,18 @@ const ORDER = {
   deposit_amount: 500,
 };
 
+// Simulates the RPC always minting/keeping p_candidate_attempt_id as-is —
+// good enough for THIS file's unit tests (the "same summary -> same
+// attempt id" decision itself is exercised by
+// __tests__/agent/lib/a3ClosedLoop.test.js and the static SQL assertions in
+// __tests__/agent/sql/migrationPaymentAuthorizationStatic.test.js, not here).
+function acceptCandidateRpc() {
+  return (name, args) => {
+    if (name !== ISSUE_RPC_NAME) return { data: null, error: { message: "unknown rpc" } };
+    return { data: [{ order_id: args.p_order_id, payment_attempt_id: args.p_candidate_attempt_id }], error: null };
+  };
+}
+
 describe("hashPaymentToken", () => {
   test("deterministic sha256 hex digest", () => {
     const h1 = hashPaymentToken("same-raw-token");
@@ -35,15 +47,23 @@ describe("hashPaymentToken", () => {
 
 describe("issuePaymentAuthorization", () => {
   test("missing order/order_id -> invalid_request, zero database calls", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [{ order_id: ORDER.order_id }], error: null } } });
+    const supabase = createMockSupabase({ rpc: acceptCandidateRpc() });
     const result = await issuePaymentAuthorization({ supabase, order: null });
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.INVALID_REQUEST);
+    expect(supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  test("calls the atomic issue_payment_authorization_v1 RPC, never a plain .from(orders).update()", async () => {
+    const supabase = createMockSupabase({ rpc: acceptCandidateRpc() });
+    await issuePaymentAuthorization({ supabase, order: ORDER });
+    expect(supabase.__calls.rpc.length).toBe(1);
+    expect(supabase.__calls.rpc[0].name).toBe(ISSUE_RPC_NAME);
     expect(supabase.from).not.toHaveBeenCalled();
   });
 
   test("raw token is >= 32 random bytes (>= 64 hex chars), never all-zero", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [{ order_id: ORDER.order_id }], error: null } } });
+    const supabase = createMockSupabase({ rpc: acceptCandidateRpc() });
     const result = await issuePaymentAuthorization({ supabase, order: ORDER });
     expect(result.ok).toBe(true);
     expect(typeof result.token).toBe("string");
@@ -51,49 +71,42 @@ describe("issuePaymentAuthorization", () => {
     expect(result.token).not.toMatch(/^0+$/);
   });
 
-  test("two consecutive issuances produce two different raw tokens", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [{ order_id: ORDER.order_id }], error: null } } });
+  test("two consecutive issuances produce two different raw tokens and two different candidate attempt ids", async () => {
+    const supabase = createMockSupabase({ rpc: acceptCandidateRpc() });
     const r1 = await issuePaymentAuthorization({ supabase, order: ORDER });
     const r2 = await issuePaymentAuthorization({ supabase, order: ORDER });
     expect(r1.token).not.toBe(r2.token);
+    expect(supabase.__calls.rpc[0].args.p_candidate_attempt_id).not.toBe(supabase.__calls.rpc[1].args.p_candidate_attempt_id);
   });
 
-  test("writes ONLY the token HASH to the database, never the raw token", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [{ order_id: ORDER.order_id }], error: null } } });
+  test("sends ONLY the token HASH to the RPC, never the raw token", async () => {
+    const supabase = createMockSupabase({ rpc: acceptCandidateRpc() });
     const result = await issuePaymentAuthorization({ supabase, order: ORDER });
 
-    const updatePayload = supabase.__tableCalls.orders.update.mock.calls[0][0];
-    expect(updatePayload.payment_authorization_token_hash).toBe(hashPaymentToken(result.token));
-    expect(JSON.stringify(updatePayload)).not.toContain(result.token);
+    const rpcArgs = supabase.__calls.rpc[0].args;
+    expect(rpcArgs.p_token_hash).toBe(hashPaymentToken(result.token));
+    expect(JSON.stringify(rpcArgs)).not.toContain(result.token);
   });
 
-  test("binds the current summary_hash (lib/agent/bookingSummary.js's shared algorithm) and the fixed 500 deposit", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [{ order_id: ORDER.order_id }], error: null } } });
+  test("sends the current summary_hash (lib/agent/bookingSummary.js's shared algorithm) and the fixed 500 deposit", async () => {
+    const supabase = createMockSupabase({ rpc: acceptCandidateRpc() });
     await issuePaymentAuthorization({ supabase, order: ORDER });
 
-    const updatePayload = supabase.__tableCalls.orders.update.mock.calls[0][0];
-    expect(updatePayload.payment_authorization_summary_hash).toBe(computeSummaryHash(ORDER));
-    expect(updatePayload.payment_authorization_deposit_amount).toBe(500);
+    const rpcArgs = supabase.__calls.rpc[0].args;
+    expect(rpcArgs.p_summary_hash).toBe(computeSummaryHash(ORDER));
+    expect(rpcArgs.p_deposit_amount).toBe(500);
   });
 
-  test("always binds the fixed 500 deposit even if the order's own deposit_amount was tampered with", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [{ order_id: ORDER.order_id }], error: null } } });
+  test("always sends the fixed 500 deposit even if the order's own deposit_amount was tampered with", async () => {
+    const supabase = createMockSupabase({ rpc: acceptCandidateRpc() });
     await issuePaymentAuthorization({ supabase, order: { ...ORDER, deposit_amount: 1 } });
 
-    const updatePayload = supabase.__tableCalls.orders.update.mock.calls[0][0];
-    expect(updatePayload.payment_authorization_deposit_amount).toBe(500);
-  });
-
-  test("resets consumed_at to null on every issuance (a fresh authorization is always unconsumed)", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [{ order_id: ORDER.order_id }], error: null } } });
-    await issuePaymentAuthorization({ supabase, order: ORDER });
-
-    const updatePayload = supabase.__tableCalls.orders.update.mock.calls[0][0];
-    expect(updatePayload.payment_authorization_consumed_at).toBeNull();
+    const rpcArgs = supabase.__calls.rpc[0].args;
+    expect(rpcArgs.p_deposit_amount).toBe(500);
   });
 
   test("default TTL is 10 minutes", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [{ order_id: ORDER.order_id }], error: null } } });
+    const supabase = createMockSupabase({ rpc: acceptCandidateRpc() });
     const before = Date.now();
     const result = await issuePaymentAuthorization({ supabase, order: ORDER });
     const after = Date.now();
@@ -102,28 +115,37 @@ describe("issuePaymentAuthorization", () => {
     const expiresAtMs = new Date(result.expires_at).getTime();
     expect(expiresAtMs).toBeGreaterThanOrEqual(before + DEFAULT_TTL_MS - 1000);
     expect(expiresAtMs).toBeLessThanOrEqual(after + DEFAULT_TTL_MS + 1000);
+
+    const rpcArgs = supabase.__calls.rpc[0].args;
+    expect(rpcArgs.p_expires_at).toBe(result.expires_at);
   });
 
-  test("re-issuing overwrites the previous authorization in a single UPDATE targeted at this order_id", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [{ order_id: ORDER.order_id }], error: null } } });
-    await issuePaymentAuthorization({ supabase, order: ORDER });
-    await issuePaymentAuthorization({ supabase, order: ORDER });
-
-    expect(supabase.__tableCalls.orders.update.mock.calls.length).toBe(2);
-    for (const call of supabase.__tableCalls.orders.eq.mock.calls) {
-      expect(call).toEqual(["order_id", ORDER.order_id]);
-    }
+  test("returns the RPC's authoritative payment_attempt_id, not necessarily the candidate it sent", async () => {
+    const AUTHORITATIVE_ATTEMPT_ID = "authoritative-attempt-id-from-rpc";
+    const supabase = createMockSupabase({
+      rpc: (name) => (name === ISSUE_RPC_NAME ? { data: [{ order_id: ORDER.order_id, payment_attempt_id: AUTHORITATIVE_ATTEMPT_ID }], error: null } : { data: null, error: { message: "unknown rpc" } }),
+    });
+    const result = await issuePaymentAuthorization({ supabase, order: ORDER });
+    expect(result.ok).toBe(true);
+    expect(result.payment_attempt_id).toBe(AUTHORITATIVE_ATTEMPT_ID);
   });
 
-  test("database error on write -> payment_authorization_failed", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: null, error: { message: "db down" } } } });
+  test("database error on RPC -> payment_authorization_failed", async () => {
+    const supabase = createMockSupabase({ rpc: () => ({ data: null, error: { message: "db down" } }) });
     const result = await issuePaymentAuthorization({ supabase, order: ORDER });
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.PAYMENT_AUTHORIZATION_FAILED);
   });
 
   test("unexpected response shape (not a 1-row array) -> payment_authorization_failed, never hands back a token", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: [], error: null } } });
+    const supabase = createMockSupabase({ rpc: () => ({ data: [], error: null }) });
+    const result = await issuePaymentAuthorization({ supabase, order: ORDER });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe(AGENT_ERROR_CODES.PAYMENT_AUTHORIZATION_FAILED);
+  });
+
+  test("RPC row missing payment_attempt_id -> payment_authorization_failed, never hands back a token", async () => {
+    const supabase = createMockSupabase({ rpc: () => ({ data: [{ order_id: ORDER.order_id, payment_attempt_id: null }], error: null }) });
     const result = await issuePaymentAuthorization({ supabase, order: ORDER });
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.PAYMENT_AUTHORIZATION_FAILED);

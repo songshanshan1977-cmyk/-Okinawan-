@@ -49,6 +49,8 @@ function consumedRowFor(order) {
     ...order,
     payment_authorization_summary_hash: computeSummaryHash(order),
     payment_authorization_deposit_amount: 500,
+    payment_attempt_id: "attempt-id-fixed-for-tests",
+    stripe_session_id: null,
   };
 }
 
@@ -121,12 +123,15 @@ describe("pages/api/agent/create-payment-link", () => {
       from: {
         orders: [
           { data: row, error: null }, // lookup
-          { data: [{ order_id: row.order_id }], error: null }, // issuePaymentAuthorization update
-          { data: null, error: null }, // createCheckoutSession write-back
+          { data: [{ order_id: row.order_id, stripe_session_id: "cs_api_1", payment_status: "pending" }], error: null }, // createCheckoutSession write-back
         ],
         inventory_rules_v2: { data: [{ date: "2099-09-01", remaining_qty_calc: 3 }], error: null },
       },
-      rpc: (name) => (name === "consume_payment_authorization_v1" ? { data: [consumedRowFor(row)], error: null } : { data: null, error: null }),
+      rpc: (name, args) => {
+        if (name === "issue_payment_authorization_v1") return { data: [{ order_id: args.p_order_id, payment_attempt_id: "attempt-id-fixed-for-tests" }], error: null };
+        if (name === "consume_payment_authorization_v1") return { data: [consumedRowFor(row)], error: null };
+        return { data: null, error: { message: "unknown rpc" } };
+      },
     });
     const stripeSessionsCreate = jest.fn(() => Promise.resolve({ id: "cs_api_1", url: "https://stripe.invalid/pay/cs_api_1" }));
     const handler = loadHandler(supabase, stripeSessionsCreate);
@@ -140,6 +145,32 @@ describe("pages/api/agent/create-payment-link", () => {
     expect(res.body.payment_status).toBe("pending");
     expect(res.body.url).toBe("https://stripe.invalid/pay/cs_api_1");
     expect(Object.keys(res.body).sort()).toEqual(["ok", "order_id", "payment_status", "url", "expires_at"].sort());
+  });
+
+  test("A3 revision: pending order (existing payment attempt) is still attemptable -> 200", async () => {
+    const row = { ...orderRow(true), payment_status: "pending" };
+    const supabase = createMockSupabase({
+      from: {
+        orders: [
+          { data: row, error: null },
+          { data: [{ order_id: row.order_id, stripe_session_id: "cs_api_pending_1", payment_status: "pending" }], error: null },
+        ],
+        inventory_rules_v2: { data: [{ date: "2099-09-01", remaining_qty_calc: 3 }], error: null },
+      },
+      rpc: (name, args) => {
+        if (name === "issue_payment_authorization_v1") return { data: [{ order_id: args.p_order_id, payment_attempt_id: "attempt-id-fixed-for-tests" }], error: null };
+        if (name === "consume_payment_authorization_v1") return { data: [consumedRowFor(row)], error: null };
+        return { data: null, error: { message: "unknown rpc" } };
+      },
+    });
+    const stripeSessionsCreate = jest.fn(() => Promise.resolve({ id: "cs_api_pending_1", url: "https://stripe.invalid/pay/cs_api_pending_1" }));
+    const handler = loadHandler(supabase, stripeSessionsCreate);
+    const token = issueToken(ORDER_CONTENT.order_id);
+    const req = { method: "POST", headers: { authorization: AUTH_HEADER, "x-booking-access-token": token }, body: { order_id: ORDER_CONTENT.order_id } };
+    const res = createMockRes();
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.ok).toBe(true);
   });
 
   test("already-paid order -> 409 paid_order_immutable", async () => {

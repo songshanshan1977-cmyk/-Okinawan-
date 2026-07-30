@@ -2,8 +2,11 @@ const { createPaymentLinkTool, PAYMENT_LINK_LOOKUP_COLUMNS } = require("../../..
 const { computeSummaryHash, HASHED_FIELDS } = require("../../../lib/agent/bookingSummary");
 const { createMockSupabase } = require("../../helpers/mockSupabase");
 const { AGENT_ERROR_CODES } = require("../../../lib/agent/errorCodes");
+const { ISSUE_RPC_NAME } = require("../../../lib/payment/paymentAuthorization");
+const { RPC_NAME: CONSUME_RPC_NAME } = require("../../../lib/payment/createCheckoutSession");
 
 const CAR = "5fdce9d4-2ef3-42ca-9d0c-a06446b0d9ca";
+const ATTEMPT_ID = "attempt-id-fixed-for-tests";
 
 const ORDER_CONTENT = {
   order_id: "ORD-20990901-99999",
@@ -51,6 +54,8 @@ function consumedRowFor(order) {
     inventory_status: order.inventory_status,
     payment_authorization_summary_hash: computeSummaryHash(order),
     payment_authorization_deposit_amount: 500,
+    payment_attempt_id: ATTEMPT_ID,
+    stripe_session_id: null,
   };
 }
 
@@ -58,6 +63,14 @@ const AVAILABLE_INVENTORY = { inventory_rules_v2: { data: [{ date: "2099-09-01",
 
 function fakeStripe() {
   return { checkout: { sessions: { create: jest.fn(() => Promise.resolve({ id: "cs_pl_1", url: "https://stripe.invalid/pay/cs_pl_1" })) } } };
+}
+
+function rpcRouter(row) {
+  return (name, args) => {
+    if (name === ISSUE_RPC_NAME) return { data: [{ order_id: args.p_order_id, payment_attempt_id: ATTEMPT_ID }], error: null };
+    if (name === CONSUME_RPC_NAME) return { data: [row], error: null };
+    return { data: null, error: { message: "unknown rpc" } };
+  };
 }
 
 beforeEach(() => {
@@ -98,7 +111,17 @@ describe("createPaymentLinkTool — request shape / lookup", () => {
     const result = await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id: ORDER_CONTENT.order_id });
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.PAID_ORDER_IMMUTABLE);
-    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    expect(supabase.__calls.rpc.length).toBe(0);
+  });
+
+  test("A3 revision: 'pending' order (an existing payment attempt) is still attemptable, not rejected like update/confirm now reject it", async () => {
+    const row = orderRow({ confirmedHash: LIVE_HASH, confirmedAt: "2099-01-01T00:00:00.000Z", overrides: { payment_status: "pending" } });
+    const supabase = createMockSupabase({
+      from: { orders: [{ data: row, error: null }, { data: [{ order_id: row.order_id, stripe_session_id: "cs_pl_1", payment_status: "pending" }], error: null }], ...AVAILABLE_INVENTORY },
+      rpc: rpcRouter(consumedRowFor(row)),
+    });
+    const result = await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id: ORDER_CONTENT.order_id });
+    expect(result.ok).toBe(true);
   });
 });
 
@@ -108,7 +131,7 @@ describe("createPaymentLinkTool — A2 confirmation gate", () => {
     const result = await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id: ORDER_CONTENT.order_id });
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.SUMMARY_NOT_CONFIRMED);
-    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    expect(supabase.__calls.rpc.length).toBe(0);
   });
 
   test("confirmed a PRIOR hash (H1), order content since changed to H2 -> 409 summary_not_confirmed", async () => {
@@ -117,7 +140,7 @@ describe("createPaymentLinkTool — A2 confirmation gate", () => {
     const result = await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id: ORDER_CONTENT.order_id });
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.SUMMARY_NOT_CONFIRMED);
-    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    expect(supabase.__calls.rpc.length).toBe(0);
   });
 
   test("confirmed_hash matches live hash but confirmed_at is missing -> 409 summary_not_confirmed", async () => {
@@ -135,12 +158,11 @@ describe("createPaymentLinkTool — confirmed and current -> issues + consumes +
       from: {
         orders: [
           { data: row, error: null }, // lookup
-          { data: [{ order_id: row.order_id }], error: null }, // issuePaymentAuthorization update
-          { data: null, error: null }, // createCheckoutSession write-back update
+          { data: [{ order_id: row.order_id, stripe_session_id: "cs_pl_1", payment_status: "pending" }], error: null }, // createCheckoutSession write-back
         ],
         ...AVAILABLE_INVENTORY,
       },
-      rpc: (name) => (name === "consume_payment_authorization_v1" ? { data: [consumedRowFor(row)], error: null } : { data: null, error: null }),
+      rpc: rpcRouter(consumedRowFor(row)),
     });
   }
 
@@ -157,40 +179,68 @@ describe("createPaymentLinkTool — confirmed and current -> issues + consumes +
     expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(1);
   });
 
-  test("never returns PII, token hash, summary_hash, or the raw stripe_session_id", async () => {
+  test("never returns PII, token hash, summary_hash, attempt id, or the raw stripe_session_id", async () => {
     const supabase = buildSupabaseForSuccess();
     const result = await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id: ORDER_CONTENT.order_id });
 
     expect(Object.keys(result).sort()).toEqual(["ok", "order_id", "payment_status", "url", "expires_at"].sort());
     expect(result.stripe_session_id).toBeUndefined();
     expect(result.summary_hash).toBeUndefined();
+    expect(result.payment_attempt_id).toBeUndefined();
     expect(result.name).toBeUndefined();
     expect(result.phone).toBeUndefined();
     expect(result.email).toBeUndefined();
   });
 
-  test("Agent never sees the raw payment_token — it is only used internally against the consume RPC", async () => {
+  test("Agent never sees the raw payment_token or the attempt id — only used internally", async () => {
     const supabase = buildSupabaseForSuccess();
     const result = await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id: ORDER_CONTENT.order_id });
-    expect(JSON.stringify(result)).not.toMatch(/payment_token/);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toMatch(/payment_token/);
+    expect(serialized).not.toContain(ATTEMPT_ID);
   });
 
   test("inventory becomes unavailable between authorization and consumption -> inventory_unavailable propagated with dates", async () => {
     const row = orderRow({ confirmedHash: LIVE_HASH, confirmedAt: "2099-01-01T00:00:00.000Z" });
     const supabase = createMockSupabase({
       from: {
-        orders: [
-          { data: row, error: null },
-          { data: [{ order_id: row.order_id }], error: null },
-        ],
+        orders: { data: row, error: null },
         inventory_rules_v2: { data: [{ date: "2099-09-01", remaining_qty_calc: 0 }], error: null },
       },
-      rpc: (name) => (name === "consume_payment_authorization_v1" ? { data: [consumedRowFor(row)], error: null } : { data: null, error: null }),
+      rpc: rpcRouter(consumedRowFor(row)),
     });
 
     const result = await createPaymentLinkTool({ supabase, stripe: fakeStripe(), order_id: ORDER_CONTENT.order_id });
     expect(result.ok).toBe(false);
     expect(result.code).toBe(AGENT_ERROR_CODES.INVENTORY_UNAVAILABLE);
     expect(result.unavailable_dates).toEqual([{ date: "2099-09-01", reason: "sold_out" }]);
+  });
+
+  test("calling create_payment_link twice for the same confirmed order (Agent timeout retry) does not create a second Stripe session — same idempotencyKey both times", async () => {
+    const row = orderRow({ confirmedHash: LIVE_HASH, confirmedAt: "2099-01-01T00:00:00.000Z" });
+    const supabase = createMockSupabase({
+      from: {
+        orders: [
+          { data: row, error: null },
+          { data: [{ order_id: row.order_id, stripe_session_id: "cs_pl_1", payment_status: "pending" }], error: null },
+          { data: row, error: null },
+          { data: [{ order_id: row.order_id, stripe_session_id: "cs_pl_1", payment_status: "pending" }], error: null },
+        ],
+        ...AVAILABLE_INVENTORY,
+      },
+      rpc: rpcRouter(consumedRowFor(row)),
+    });
+    const stripe = fakeStripe();
+
+    const first = await createPaymentLinkTool({ supabase, stripe, order_id: ORDER_CONTENT.order_id });
+    const second = await createPaymentLinkTool({ supabase, stripe, order_id: ORDER_CONTENT.order_id });
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(2);
+    const key1 = stripe.checkout.sessions.create.mock.calls[0][1].idempotencyKey;
+    const key2 = stripe.checkout.sessions.create.mock.calls[1][1].idempotencyKey;
+    expect(key1).toBe(key2);
+    expect(first.url).toBe(second.url);
   });
 });

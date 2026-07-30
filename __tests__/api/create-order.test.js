@@ -17,6 +17,21 @@ function loadHandler(supabase) {
   return handler;
 }
 
+// A3 revision: issuePaymentAuthorization now calls the atomic
+// issue_payment_authorization_v1 RPC instead of a plain .from("orders").update()
+// — every test that reaches "issue a payable result" needs an rpc() mock
+// routed by name (get_car_price for pricing, issue_payment_authorization_v1
+// for the authorization), never a queued "orders" update fixture.
+function rpcRouter({ price = 1600 } = {}) {
+  return (name, args) => {
+    if (name === "get_car_price") return { data: price, error: null };
+    if (name === "issue_payment_authorization_v1") {
+      return { data: [{ order_id: args.p_order_id, payment_attempt_id: `attempt-for-${args.p_order_id}` }], error: null };
+    }
+    return { data: null, error: { message: "unknown rpc" } };
+  };
+}
+
 const BASE_ORDER_INPUT = {
   order_id: "ORD-20260802-22222",
   car_model_id: ECONOMY,
@@ -57,6 +72,8 @@ const EXISTING_DRAFT_A = {
   deposit_amount: 500,
 };
 
+const EXISTING_PENDING_A = { ...EXISTING_DRAFT_A, order_id: "ORD-20260802-PPPPP", payment_status: "pending" };
+
 describe("POST /api/create-order — 新订单：服务端重算价格", () => {
   test("新订单：服务端重新计算 total_price，不采用客户端伪造值", async () => {
     const supabase = createMockSupabase({
@@ -64,10 +81,9 @@ describe("POST /api/create-order — 新订单：服务端重算价格", () => {
         orders: [
           { data: null, error: null }, // 查询已存在订单：不存在
           { data: { ...BASE_ORDER_INPUT, total_price: 6400, payment_status: "draft" }, error: null }, // insert 返回
-          { data: [{ order_id: BASE_ORDER_INPUT.order_id }], error: null }, // A3: issuePaymentAuthorization 的 update 返回
         ],
       },
-      rpc: () => ({ data: 1600, error: null }),
+      rpc: rpcRouter(),
     });
     const handler = loadHandler(supabase);
 
@@ -85,6 +101,11 @@ describe("POST /api/create-order — 新订单：服务端重算价格", () => {
     expect(res.body.payment_authorization_token.length).toBeGreaterThanOrEqual(32);
     expect(res.body.order.payment_authorization_token).toBeUndefined();
 
+    // A3 revision: 授权通过原子 RPC 签发，never .from("orders").update()
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    const issueCall = supabase.__calls.rpc.find((c) => c.name === "issue_payment_authorization_v1");
+    expect(issueCall.args.p_order_id).toBe(BASE_ORDER_INPUT.order_id);
+
     const insertPayload = supabase.__tableCalls.orders.insert.mock.calls[0][0][0];
     expect(insertPayload.total_price).toBe(6400);
     expect(insertPayload.total_price).not.toBe(999999);
@@ -97,10 +118,9 @@ describe("POST /api/create-order — 新订单：服务端重算价格", () => {
         orders: [
           { data: null, error: null },
           { data: { ...BASE_ORDER_INPUT }, error: null },
-          { data: [{ order_id: BASE_ORDER_INPUT.order_id }], error: null }, // A3: 授权签发 update 返回
         ],
       },
-      rpc: () => ({ data: 1600, error: null }),
+      rpc: rpcRouter(),
     });
     const handler = loadHandler(supabase);
 
@@ -122,10 +142,9 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
         orders: [
           { data: EXISTING_DRAFT_A, error: null }, // 查询：命中 A
           { data: newB, error: null }, // insertNewDraftWithRetry 的 insert 返回
-          { data: [{ order_id: newB.order_id }], error: null }, // A3: 授权签发 update 返回（针对 B，绝不触碰 A）
         ],
       },
-      rpc: () => ({ data: 1600, error: null }),
+      rpc: rpcRouter(),
     });
     const handler = loadHandler(supabase);
 
@@ -147,11 +166,12 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(res.body.previous_order_id).toBe(EXISTING_DRAFT_A.order_id);
     expect(res.body.order.order_id).not.toBe(EXISTING_DRAFT_A.order_id); // B != A
 
-    // 关键断言：orders 表唯一的一次 update 是 A3 授权签发（针对 B），绝不是 A 的业务
-    // 字段——A 不可能被这条请求改动。
-    expect(supabase.__tableCalls.orders.update.mock.calls.length).toBe(1);
-    const authorizationEqArgs = supabase.__tableCalls.orders.eq.mock.calls[supabase.__tableCalls.orders.eq.mock.calls.length - 1];
-    expect(authorizationEqArgs).toEqual(["order_id", newB.order_id]);
+    // 关键断言：orders 表从未被 update 过（A3 授权通过 RPC 签发，不是
+    // .from("orders").update()）——A 不可能被这条请求以任何形式改动。
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    // 授权 RPC 面向的是新草稿 B，绝不是 A。
+    const issueCall = supabase.__calls.rpc.find((c) => c.name === "issue_payment_authorization_v1");
+    expect(issueCall.args.p_order_id).toBe(newB.order_id);
 
     // insert 时使用的是攻击者提交的新内容，而不是 A 的原内容
     const insertPayload = supabase.__tableCalls.orders.insert.mock.calls[0][0][0];
@@ -159,15 +179,10 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(insertPayload.order_id).not.toBe(EXISTING_DRAFT_A.order_id);
   });
 
-  test("7.2 相同规范化内容重复提交：返回原 A，insert 0 次，业务字段 update 0 次（仅 A3 授权 update 1 次）", async () => {
+  test("7.2 相同规范化内容重复提交：返回原 A，insert 0 次，update 0 次（授权走 RPC）", async () => {
     const supabase = createMockSupabase({
-      from: {
-        orders: [
-          { data: EXISTING_DRAFT_A, error: null },
-          { data: [{ order_id: EXISTING_DRAFT_A.order_id }], error: null }, // A3: 授权签发 update 返回
-        ],
-      },
-      rpc: () => ({ data: 1600, error: null }), // 1600*4=6400，与 A 的 total_price 一致
+      from: { orders: { data: EXISTING_DRAFT_A, error: null } },
+      rpc: rpcRouter(), // 1600*4=6400，与 A 的 total_price 一致
     });
     const handler = loadHandler(supabase);
 
@@ -198,20 +213,15 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(res.body.order.order_id).toBe(EXISTING_DRAFT_A.order_id);
 
     expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
-    // 唯一一次 update 是 A3 授权签发，绝不是旧的多字段草稿更新
-    expect(supabase.__tableCalls.orders.update.mock.calls.length).toBe(1);
-    expect(supabase.__tableCalls.orders.update.mock.calls[0][0]).not.toHaveProperty("start_date");
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    const issueCall = supabase.__calls.rpc.find((c) => c.name === "issue_payment_authorization_v1");
+    expect(issueCall.args.p_order_id).toBe(EXISTING_DRAFT_A.order_id);
   });
 
   test("7.3 仅客户端 total_price 变化（其余业务字段相同）：视为相同内容，不新建订单", async () => {
     const supabase = createMockSupabase({
-      from: {
-        orders: [
-          { data: EXISTING_DRAFT_A, error: null },
-          { data: [{ order_id: EXISTING_DRAFT_A.order_id }], error: null }, // A3: 授权签发 update 返回
-        ],
-      },
-      rpc: () => ({ data: 1600, error: null }),
+      from: { orders: { data: EXISTING_DRAFT_A, error: null } },
+      rpc: rpcRouter(),
     });
     const handler = loadHandler(supabase);
 
@@ -241,12 +251,10 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(res.body.created_new_order).toBe(false);
     expect(res.body.order.total_price).toBe(6400); // 仍是 A 的服务端原值，不是 1
     expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
-    // 唯一一次 update 是 A3 授权签发，绝不是把伪造的 total_price=1 写回业务字段
-    expect(supabase.__tableCalls.orders.update.mock.calls.length).toBe(1);
-    expect(supabase.__tableCalls.orders.update.mock.calls[0][0]).not.toHaveProperty("total_price");
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
   });
 
-  test("7.4a 已付款订单收到相同内容 -> 409，不 insert 不 update", async () => {
+  test("7.4a 已付款订单收到相同内容 -> 409，不 insert 不 update，不签发授权", async () => {
     const paidOrder = { ...EXISTING_DRAFT_A, payment_status: "paid" };
     const supabase = createMockSupabase({ from: { orders: { data: paidOrder, error: null } } });
     const handler = loadHandler(supabase);
@@ -259,6 +267,7 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(res.body.error).toBe("paid_order_immutable");
     expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
     expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    expect(supabase.__calls.rpc.length).toBe(0);
   });
 
   test("7.4b 已付款订单收到不同内容 -> 同样 409，不会静默创建新单替代", async () => {
@@ -289,10 +298,9 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
           { data: EXISTING_DRAFT_A, error: null }, // 查询命中 A
           conflict, // 第一次新 draft insert：唯一冲突
           { data: newC, error: null }, // 第二次新 draft insert：成功
-          { data: [{ order_id: newC.order_id }], error: null }, // A3: 授权签发 update 返回（针对 C）
         ],
       },
-      rpc: () => ({ data: 1600, error: null }),
+      rpc: rpcRouter(),
     });
     const handler = loadHandler(supabase);
 
@@ -305,12 +313,70 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(res.statusCode).toBe(200);
     expect(res.body.created_new_order).toBe(true);
     expect(res.body.order.order_id).toBe("ORD-20260802-CCCCC");
-    // 唯一一次 update 是 A3 授权签发（针对 C），A 不受影响
-    expect(supabase.__tableCalls.orders.update.mock.calls.length).toBe(1);
-    const lastEqCall = supabase.__tableCalls.orders.eq.mock.calls[supabase.__tableCalls.orders.eq.mock.calls.length - 1];
-    expect(lastEqCall).toEqual(["order_id", newC.order_id]);
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    const issueCall = supabase.__calls.rpc.find((c) => c.name === "issue_payment_authorization_v1");
+    expect(issueCall.args.p_order_id).toBe("ORD-20260802-CCCCC");
     // insert 恰好被调用 2 次（第一次冲突 + 第二次成功），重试次数受限
     expect(supabase.__tableCalls.orders.insert.mock.calls.length).toBe(2);
+  });
+});
+
+describe("A3 payment-attempt idempotency: pending 状态分支", () => {
+  test("pending + 内容相同 -> 200，允许重新签发 Token（保留同一 payment_attempt_id，由 issue_payment_authorization_v1 决定），不 insert", async () => {
+    const supabase = createMockSupabase({
+      from: { orders: { data: EXISTING_PENDING_A, error: null } },
+      rpc: rpcRouter(),
+    });
+    const handler = loadHandler(supabase);
+
+    const req = createMockReq({
+      body: {
+        ...BASE_ORDER_INPUT,
+        order_id: EXISTING_PENDING_A.order_id,
+        start_date: EXISTING_PENDING_A.start_date,
+        end_date: EXISTING_PENDING_A.end_date,
+        departure_hotel: EXISTING_PENDING_A.departure_hotel,
+        end_hotel: EXISTING_PENDING_A.end_hotel,
+        car_model_id: EXISTING_PENDING_A.car_model_id,
+        driver_lang: "zh",
+        duration: EXISTING_PENDING_A.duration,
+        pax: EXISTING_PENDING_A.pax,
+        luggage: EXISTING_PENDING_A.luggage,
+        name: EXISTING_PENDING_A.name,
+        phone: EXISTING_PENDING_A.phone,
+        email: EXISTING_PENDING_A.email,
+      },
+    });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.reused).toBe(true);
+    expect(res.body.created_new_order).toBe(false);
+    expect(typeof res.body.payment_authorization_token).toBe("string");
+    expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
+    const issueCall = supabase.__calls.rpc.find((c) => c.name === "issue_payment_authorization_v1");
+    expect(issueCall.args.p_order_id).toBe(EXISTING_PENDING_A.order_id);
+  });
+
+  test("pending + 内容不同 -> 409 payment_pending_immutable，不 insert 新草稿（不得绕过已有付款尝试），不签发授权", async () => {
+    const supabase = createMockSupabase({
+      from: { orders: { data: EXISTING_PENDING_A, error: null } },
+      rpc: rpcRouter(),
+    });
+    const handler = loadHandler(supabase);
+
+    const req = createMockReq({
+      body: { ...BASE_ORDER_INPUT, order_id: EXISTING_PENDING_A.order_id, start_date: "2099-01-01", end_date: "2099-01-01" },
+    });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toBe("payment_pending_immutable");
+    expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    expect(supabase.__calls.rpc.filter((c) => c.name === "issue_payment_authorization_v1").length).toBe(0);
   });
 });
 
@@ -366,7 +432,7 @@ describe("回归：既有行为保持", () => {
   });
 
   test("车型/时长非法值仍被拒绝（新订单路径）", async () => {
-    const supabase = createMockSupabase({ from: { orders: { data: null, error: null } }, rpc: () => ({ data: 1600, error: null }) });
+    const supabase = createMockSupabase({ from: { orders: { data: null, error: null } }, rpc: rpcRouter() });
     const handler = loadHandler(supabase);
 
     const req = createMockReq({ body: { ...BASE_ORDER_INPUT, duration: 9 } });
@@ -377,7 +443,7 @@ describe("回归：既有行为保持", () => {
     expect(res.body.error).toBe("invalid_duration");
   });
 
-  test("代码级确认：整个文件从未对 orders 表调用过 .update()（旧的多字段草稿更新能力已彻底移除）", async () => {
+  test("代码级确认：整个文件从未对 orders 表调用过 .update()（旧的多字段草稿更新能力已彻底移除；A3 授权也不走 .update()，走原子 RPC）", async () => {
     const fs = require("fs");
     const source = fs.readFileSync(require.resolve("../../pages/api/create-order.js"), "utf8");
     expect(source).not.toMatch(/DRAFT_UPDATE_WHITELIST/);

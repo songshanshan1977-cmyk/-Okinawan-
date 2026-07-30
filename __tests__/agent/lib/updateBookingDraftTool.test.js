@@ -101,13 +101,14 @@ describe("updateBookingDraftTool — order lookup & staleness gates", () => {
     expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
   });
 
-  test("payment_status 'pending' is still editable", async () => {
+  test("A3 revision: payment_status 'pending' is no longer editable -> paid_order_immutable, no write (a payment attempt is already in flight; content must stay frozen)", async () => {
     const supabase = createMockSupabase({
-      from: { ...AVAILABLE_INVENTORY, orders: [{ data: { ...CURRENT_ORDER, payment_status: "pending" }, error: null }, { data: [updatedRowFixture({ payment_status: "pending" })], error: null }] },
-      rpc: () => ({ data: 1600, error: null }),
+      from: { ...AVAILABLE_INVENTORY, orders: { data: { ...CURRENT_ORDER, payment_status: "pending" }, error: null } },
     });
     const result = await updateBookingDraftTool({ supabase, order_id: CURRENT_ORDER.order_id, expected_summary_hash: CURRENT_HASH, changes: { remark: "note" } });
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe(AGENT_ERROR_CODES.PAID_ORDER_IMMUTABLE);
+    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
   });
 
   test("stale expected_summary_hash -> 409 summary_stale, no write", async () => {

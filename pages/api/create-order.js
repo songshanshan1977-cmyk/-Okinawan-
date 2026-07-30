@@ -30,10 +30,15 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-function isPaidOrImmutable(order) {
-  // payment_status 不是 draft/pending 视为不可再修改（含 paid 及任何非草稿态）
+// A3 revision：draft/pending/其他（含 paid）三态分开判断，而不是把
+// draft/pending 当成同一种"可继续处理"状态笼统对待——pending 意味着已经存在
+// 一次真实的付款尝试（可能已经创建过 Stripe Checkout Session），draft 则从未
+// 有过付款尝试。二者允许的后续动作不同（见 handler 里的分支）。
+function classifyExistingOrderStatus(order) {
   const status = String(order?.payment_status || "").toLowerCase();
-  return status !== "draft" && status !== "pending";
+  if (status === "draft") return "draft";
+  if (status === "pending") return "pending";
+  return "immutable"; // paid，或任何非 draft/pending 的其他状态
 }
 
 const REQUIRED_FIELDS = [
@@ -81,9 +86,11 @@ export default async function handler(req, res) {
     }
 
     if (existing) {
+      const statusClass = classifyExistingOrderStatus(existing);
+
       // ── 已付款/不可回退状态：任何请求一律拒绝，绝不做静默替代 ──
       // （不允许通过"内容不同就创建新单"的机制绕过已付款订单的不可变性）
-      if (isPaidOrImmutable(existing)) {
+      if (statusClass === "immutable") {
         return res.status(409).json({ error: "paid_order_immutable" });
       }
 
@@ -98,7 +105,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: newContentResult.error });
       }
 
-      // 现有 draft 的规范化内容（直接复用已存的 total_price，不用重新查价）
+      // 现有订单的规范化内容（直接复用已存的 total_price，不用重新查价）
       const existingContentResult = await buildNormalizedContent({
         supabase,
         raw: existing,
@@ -106,13 +113,22 @@ export default async function handler(req, res) {
       });
 
       // existingContentResult.ok 为 false 时（现有草稿的车型/时长/语言已不再合法，
-      // 理论上极少发生）短路为"内容不同"，走下方新建分支——这是安全默认值，
-      // 不需要单独分支处理。
+      // 理论上极少发生）短路为"内容不同"，走下方分支——这是安全默认值，不需要
+      // 单独分支处理。
       const sameContent =
         existingContentResult.ok && contentsEqual(newContentResult.content, existingContentResult.content);
 
+      // ── pending（已有一次真实付款尝试）+ 内容不同：拒绝，绝不允许创建一个
+      //    内容不同的新草稿来绕过已存在的付款尝试。 ──
+      if (statusClass === "pending" && !sameContent) {
+        return res.status(409).json({ error: "payment_pending_immutable" });
+      }
+
       if (sameContent) {
-        // ── 完全相同：不 insert、不 update业务字段，原样返回旧 draft ──
+        // ── 完全相同：不 insert、不 update业务字段，原样返回旧订单 ──
+        // pending + 相同内容：重新签发 Token 但保留同一 payment_attempt_id
+        // （见 issue_payment_authorization_v1），createCheckoutSession 用同一
+        // Stripe idempotencyKey 恢复同一个 Session，不创建第二个。
         return await issueAuthorizationOrFail({
           supabase,
           order: existing,
@@ -121,7 +137,8 @@ export default async function handler(req, res) {
         });
       }
 
-      // ── 内容不同：绝不修改旧 draft。服务端生成新 order_id，插入独立新草稿 ──
+      // ── draft + 内容不同：绝不修改旧 draft。服务端生成新 order_id，插入
+      //    独立新草稿 ── （pending 分支已在上面提前 return，不会走到这里）
       const insertResult = await insertNewDraftWithRetry({
         supabase,
         content: newContentResult.content,

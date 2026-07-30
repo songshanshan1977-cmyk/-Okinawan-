@@ -54,6 +54,8 @@ const CONSUMED_ORDER_BASE = {
 
 const VALID_BOUND_HASH = computeSummaryHash(CONSUMED_ORDER_BASE);
 
+const ATTEMPT_ID = "attempt-id-fixed-for-tests";
+
 // The row consume_payment_authorization_v1 would return for a still-valid,
 // just-consumed authorization bound to CONSUMED_ORDER_BASE's current content.
 function validConsumedRow(overrides = {}) {
@@ -61,16 +63,24 @@ function validConsumedRow(overrides = {}) {
     ...CONSUMED_ORDER_BASE,
     payment_authorization_summary_hash: VALID_BOUND_HASH,
     payment_authorization_deposit_amount: 500,
+    payment_attempt_id: ATTEMPT_ID,
+    stripe_session_id: null,
     ...overrides,
   };
 }
 
+// Write-back fixture "echoing" a specific session id, matching what a real
+// UPDATE ... SET stripe_session_id = <that value> ... SELECT would return.
+function writeBackFixture(sessionId) {
+  return { data: [{ order_id: CONSUMED_ORDER_BASE.order_id, stripe_session_id: sessionId, payment_status: "pending" }], error: null };
+}
+
 const FULL_INVENTORY = [row("2026-08-02", 3), row("2026-08-03", 2), row("2026-08-04", 1), row("2026-08-05", 5)];
 
-function mockSupabaseFor({ rpcResult, inventoryRows = FULL_INVENTORY }) {
+function mockSupabaseFor({ rpcResult, inventoryRows = FULL_INVENTORY, orderUpdateResult = writeBackFixture("cs_default") }) {
   return createMockSupabase({
     from: {
-      orders: { data: null, error: null }, // 只有 write-back update 会用到，值本身不影响断言
+      orders: orderUpdateResult,
       inventory_rules_v2: { data: inventoryRows, error: null },
     },
     rpc: () => rpcResult,
@@ -208,7 +218,7 @@ describe("POST /api/create-payment-intent — A3：orderId 不再足够，必须
     const stripeSessionsCreate = jest.fn(() =>
       Promise.resolve({ id: "cs_test_mock_123", url: "https://stripe.invalid/pay/cs_test_mock_123" })
     );
-    const supabase = mockSupabaseFor({ rpcResult: { data: [validConsumedRow()], error: null } });
+    const supabase = mockSupabaseFor({ rpcResult: { data: [validConsumedRow()], error: null }, orderUpdateResult: writeBackFixture("cs_test_mock_123") });
     const { handler } = loadHandler({ supabase, stripeSessionsCreate });
 
     const req = createMockReq({ body: { orderId: CONSUMED_ORDER_BASE.order_id, payment_token: "some-valid-token" } });
@@ -228,6 +238,86 @@ describe("POST /api/create-payment-intent — A3：orderId 不再足够，必须
     const updatePayload = supabase.__tableCalls.orders.update.mock.calls[0][0];
     expect(updatePayload.payment_status).toBe("pending");
     expect(updatePayload.stripe_session_id).toBe("cs_test_mock_123");
+
+    // Stripe 幂等键 = checkout:<payment_attempt_id>
+    const idempotencyOptions = stripeSessionsCreate.mock.calls[0][1];
+    expect(idempotencyOptions).toEqual({ idempotencyKey: `checkout:${ATTEMPT_ID}` });
+  });
+
+  test("Stripe 响应缺少 id -> 500 payment_session_failed，不写回", async () => {
+    const stripeSessionsCreate = jest.fn(() => Promise.resolve({ url: "https://stripe.invalid/pay/no-id" }));
+    const supabase = mockSupabaseFor({ rpcResult: { data: [validConsumedRow()], error: null } });
+    const { handler } = loadHandler({ supabase, stripeSessionsCreate });
+
+    const req = createMockReq({ body: { orderId: CONSUMED_ORDER_BASE.order_id, payment_token: "some-token" } });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(500);
+    expect(res.body.error).toBe("payment_session_failed");
+    expect(supabase.__calls.from.filter((t) => t === "orders").length).toBe(0);
+  });
+
+  test("Stripe 响应缺少 url -> 500 payment_session_failed，不写回", async () => {
+    const stripeSessionsCreate = jest.fn(() => Promise.resolve({ id: "cs_no_url" }));
+    const supabase = mockSupabaseFor({ rpcResult: { data: [validConsumedRow()], error: null } });
+    const { handler } = loadHandler({ supabase, stripeSessionsCreate });
+
+    const req = createMockReq({ body: { orderId: CONSUMED_ORDER_BASE.order_id, payment_token: "some-token" } });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(500);
+    expect(res.body.error).toBe("payment_session_failed");
+    expect(supabase.__calls.from.filter((t) => t === "orders").length).toBe(0);
+  });
+
+  test("Stripe 成功但数据库写回失败 -> 500 payment_session_write_failed，不返回成功 URL", async () => {
+    const stripeSessionsCreate = jest.fn(() => Promise.resolve({ id: "cs_wb_fail", url: "https://stripe.invalid/pay/cs_wb_fail" }));
+    const supabase = mockSupabaseFor({ rpcResult: { data: [validConsumedRow()], error: null }, orderUpdateResult: { data: null, error: { message: "db down" } } });
+    const { handler } = loadHandler({ supabase, stripeSessionsCreate });
+
+    const req = createMockReq({ body: { orderId: CONSUMED_ORDER_BASE.order_id, payment_token: "some-token" } });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(500);
+    expect(res.body.error).toBe("payment_session_write_failed");
+    expect(res.body.url).toBeUndefined();
+  });
+
+  test("重试：写回失败后用新签发的 Token 重试，携带同一个 idempotencyKey，恢复同一个 Session 并完成写回", async () => {
+    const stripeSessionsCreate = jest.fn(() => Promise.resolve({ id: "cs_recovered", url: "https://stripe.invalid/pay/cs_recovered" }));
+    const supabase = createMockSupabase({
+      from: {
+        orders: [
+          { data: null, error: { message: "db down" } }, // 第一次写回失败
+          writeBackFixture("cs_recovered"), // 第二次（重试）写回成功
+        ],
+        inventory_rules_v2: { data: FULL_INVENTORY, error: null },
+      },
+      // 两次调用都命中同一份有效授权（模拟：pending + 同内容重新签发，
+      // 保留同一 payment_attempt_id）
+      rpc: (name) => (name === "consume_payment_authorization_v1" ? { data: [validConsumedRow()], error: null } : { data: null, error: { message: "unknown rpc" } }),
+    });
+    const { handler } = loadHandler({ supabase, stripeSessionsCreate });
+
+    const req1 = createMockReq({ body: { orderId: CONSUMED_ORDER_BASE.order_id, payment_token: "attempt-token-1" } });
+    const res1 = createMockRes();
+    await handler(req1, res1);
+    expect(res1.statusCode).toBe(500);
+    expect(res1.body.error).toBe("payment_session_write_failed");
+
+    const req2 = createMockReq({ body: { orderId: CONSUMED_ORDER_BASE.order_id, payment_token: "attempt-token-2-after-reissue" } });
+    const res2 = createMockRes();
+    await handler(req2, res2);
+    expect(res2.statusCode).toBe(200);
+    expect(res2.body.url).toBe("https://stripe.invalid/pay/cs_recovered");
+
+    expect(stripeSessionsCreate).toHaveBeenCalledTimes(2);
+    const key1 = stripeSessionsCreate.mock.calls[0][1].idempotencyKey;
+    const key2 = stripeSessionsCreate.mock.calls[1][1].idempotencyKey;
+    expect(key1).toBe(key2); // 同一个 payment_attempt_id -> 同一个 Stripe 幂等键 -> 未创建第二个 Session
   });
 
   test("授权恰好被消费一次（RPC 只调用一次），即使库存检查在消费之后才失败", async () => {
