@@ -64,6 +64,7 @@ describe("POST /api/create-order — 新订单：服务端重算价格", () => {
         orders: [
           { data: null, error: null }, // 查询已存在订单：不存在
           { data: { ...BASE_ORDER_INPUT, total_price: 6400, payment_status: "draft" }, error: null }, // insert 返回
+          { data: [{ order_id: BASE_ORDER_INPUT.order_id }], error: null }, // A3: issuePaymentAuthorization 的 update 返回
         ],
       },
       rpc: () => ({ data: 1600, error: null }),
@@ -79,6 +80,11 @@ describe("POST /api/create-order — 新订单：服务端重算价格", () => {
     expect(res.body.reused).toBe(false);
     expect(res.body.created_new_order).toBe(false);
 
+    // A3: 顶层必须带一次性付款授权 Token，且 Token 绝不进入 order 对象内部
+    expect(typeof res.body.payment_authorization_token).toBe("string");
+    expect(res.body.payment_authorization_token.length).toBeGreaterThanOrEqual(32);
+    expect(res.body.order.payment_authorization_token).toBeUndefined();
+
     const insertPayload = supabase.__tableCalls.orders.insert.mock.calls[0][0][0];
     expect(insertPayload.total_price).toBe(6400);
     expect(insertPayload.total_price).not.toBe(999999);
@@ -87,7 +93,13 @@ describe("POST /api/create-order — 新订单：服务端重算价格", () => {
 
   test("回归：客户端提交 deposit_amount 也不会被采用（新订单路径）", async () => {
     const supabase = createMockSupabase({
-      from: { orders: [{ data: null, error: null }, { data: { ...BASE_ORDER_INPUT }, error: null }] },
+      from: {
+        orders: [
+          { data: null, error: null },
+          { data: { ...BASE_ORDER_INPUT }, error: null },
+          { data: [{ order_id: BASE_ORDER_INPUT.order_id }], error: null }, // A3: 授权签发 update 返回
+        ],
+      },
       rpc: () => ({ data: 1600, error: null }),
     });
     const handler = loadHandler(supabase);
@@ -110,6 +122,7 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
         orders: [
           { data: EXISTING_DRAFT_A, error: null }, // 查询：命中 A
           { data: newB, error: null }, // insertNewDraftWithRetry 的 insert 返回
+          { data: [{ order_id: newB.order_id }], error: null }, // A3: 授权签发 update 返回（针对 B，绝不触碰 A）
         ],
       },
       rpc: () => ({ data: 1600, error: null }),
@@ -134,8 +147,11 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(res.body.previous_order_id).toBe(EXISTING_DRAFT_A.order_id);
     expect(res.body.order.order_id).not.toBe(EXISTING_DRAFT_A.order_id); // B != A
 
-    // 关键断言：整个请求处理过程中，orders 表从未被 update 过——A 不可能被这条请求改动
-    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    // 关键断言：orders 表唯一的一次 update 是 A3 授权签发（针对 B），绝不是 A 的业务
+    // 字段——A 不可能被这条请求改动。
+    expect(supabase.__tableCalls.orders.update.mock.calls.length).toBe(1);
+    const authorizationEqArgs = supabase.__tableCalls.orders.eq.mock.calls[supabase.__tableCalls.orders.eq.mock.calls.length - 1];
+    expect(authorizationEqArgs).toEqual(["order_id", newB.order_id]);
 
     // insert 时使用的是攻击者提交的新内容，而不是 A 的原内容
     const insertPayload = supabase.__tableCalls.orders.insert.mock.calls[0][0][0];
@@ -143,9 +159,14 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(insertPayload.order_id).not.toBe(EXISTING_DRAFT_A.order_id);
   });
 
-  test("7.2 相同规范化内容重复提交：返回原 A，insert 0 次，update 0 次", async () => {
+  test("7.2 相同规范化内容重复提交：返回原 A，insert 0 次，业务字段 update 0 次（仅 A3 授权 update 1 次）", async () => {
     const supabase = createMockSupabase({
-      from: { orders: { data: EXISTING_DRAFT_A, error: null } },
+      from: {
+        orders: [
+          { data: EXISTING_DRAFT_A, error: null },
+          { data: [{ order_id: EXISTING_DRAFT_A.order_id }], error: null }, // A3: 授权签发 update 返回
+        ],
+      },
       rpc: () => ({ data: 1600, error: null }), // 1600*4=6400，与 A 的 total_price 一致
     });
     const handler = loadHandler(supabase);
@@ -177,12 +198,19 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(res.body.order.order_id).toBe(EXISTING_DRAFT_A.order_id);
 
     expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
-    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    // 唯一一次 update 是 A3 授权签发，绝不是旧的多字段草稿更新
+    expect(supabase.__tableCalls.orders.update.mock.calls.length).toBe(1);
+    expect(supabase.__tableCalls.orders.update.mock.calls[0][0]).not.toHaveProperty("start_date");
   });
 
   test("7.3 仅客户端 total_price 变化（其余业务字段相同）：视为相同内容，不新建订单", async () => {
     const supabase = createMockSupabase({
-      from: { orders: { data: EXISTING_DRAFT_A, error: null } },
+      from: {
+        orders: [
+          { data: EXISTING_DRAFT_A, error: null },
+          { data: [{ order_id: EXISTING_DRAFT_A.order_id }], error: null }, // A3: 授权签发 update 返回
+        ],
+      },
       rpc: () => ({ data: 1600, error: null }),
     });
     const handler = loadHandler(supabase);
@@ -213,7 +241,9 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(res.body.created_new_order).toBe(false);
     expect(res.body.order.total_price).toBe(6400); // 仍是 A 的服务端原值，不是 1
     expect(supabase.__tableCalls.orders.insert).not.toHaveBeenCalled();
-    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    // 唯一一次 update 是 A3 授权签发，绝不是把伪造的 total_price=1 写回业务字段
+    expect(supabase.__tableCalls.orders.update.mock.calls.length).toBe(1);
+    expect(supabase.__tableCalls.orders.update.mock.calls[0][0]).not.toHaveProperty("total_price");
   });
 
   test("7.4a 已付款订单收到相同内容 -> 409，不 insert 不 update", async () => {
@@ -259,6 +289,7 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
           { data: EXISTING_DRAFT_A, error: null }, // 查询命中 A
           conflict, // 第一次新 draft insert：唯一冲突
           { data: newC, error: null }, // 第二次新 draft insert：成功
+          { data: [{ order_id: newC.order_id }], error: null }, // A3: 授权签发 update 返回（针对 C）
         ],
       },
       rpc: () => ({ data: 1600, error: null }),
@@ -274,7 +305,10 @@ describe("BLOCKING-1 修复：不再允许多字段更新他人未付款草稿",
     expect(res.statusCode).toBe(200);
     expect(res.body.created_new_order).toBe(true);
     expect(res.body.order.order_id).toBe("ORD-20260802-CCCCC");
-    expect(supabase.__tableCalls.orders.update).not.toHaveBeenCalled();
+    // 唯一一次 update 是 A3 授权签发（针对 C），A 不受影响
+    expect(supabase.__tableCalls.orders.update.mock.calls.length).toBe(1);
+    const lastEqCall = supabase.__tableCalls.orders.eq.mock.calls[supabase.__tableCalls.orders.eq.mock.calls.length - 1];
+    expect(lastEqCall).toEqual(["order_id", newC.order_id]);
     // insert 恰好被调用 2 次（第一次冲突 + 第二次成功），重试次数受限
     expect(supabase.__tableCalls.orders.insert.mock.calls.length).toBe(2);
   });

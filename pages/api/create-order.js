@@ -4,6 +4,26 @@ import { createClient } from "@supabase/supabase-js";
 const { calcTotalPrice } = require("../../lib/pricing/calcTotalPrice");
 const { buildNormalizedContent, contentsEqual, normalizeDriverLang } = require("../../lib/orders/normalizeOrderContent");
 const { insertNewDraftWithRetry } = require("../../lib/orders/generateOrderId");
+const { issuePaymentAuthorization } = require("../../lib/payment/paymentAuthorization");
+
+// A3: 无论走哪条分支确定了权威订单（复用旧draft / 内容变化生成新draft / 全新插入），
+// 都必须在返回"可付款结果"之前签发一次性付款授权——网页 Step4 之后调用
+// create-payment-intent 必须携带这个 Token 才能创建 Stripe Session（见
+// lib/payment/paymentAuthorization.js / lib/payment/createCheckoutSession.js）。
+// 签发失败就不允许返回可付款结果：调用方拿不到 Token 也就无法完成支付，这是
+// 唯一安全的失败模式，不做"降级为不可用Token"之类的静默兜底。
+async function issueAuthorizationOrFail({ supabase, order, res, extra }) {
+  const authResult = await issuePaymentAuthorization({ supabase, order });
+  if (!authResult.ok) {
+    res.status(500).json({ error: "payment_authorization_failed" });
+    return null;
+  }
+  return res.status(200).json({
+    ...extra,
+    payment_authorization_token: authResult.token,
+    payment_authorization_expires_at: authResult.expires_at,
+  });
+}
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -92,12 +112,12 @@ export default async function handler(req, res) {
         existingContentResult.ok && contentsEqual(newContentResult.content, existingContentResult.content);
 
       if (sameContent) {
-        // ── 完全相同：不 insert、不 update，原样返回旧 draft ──
-        return res.status(200).json({
-          success: true,
+        // ── 完全相同：不 insert、不 update业务字段，原样返回旧 draft ──
+        return await issueAuthorizationOrFail({
+          supabase,
           order: existing,
-          reused: true,
-          created_new_order: false,
+          res,
+          extra: { success: true, order: existing, reused: true, created_new_order: false },
         });
       }
 
@@ -111,12 +131,17 @@ export default async function handler(req, res) {
         return res.status(500).json({ error: insertResult.error });
       }
 
-      return res.status(200).json({
-        success: true,
+      return await issueAuthorizationOrFail({
+        supabase,
         order: insertResult.order,
-        reused: false,
-        created_new_order: true,
-        previous_order_id: existing.order_id,
+        res,
+        extra: {
+          success: true,
+          order: insertResult.order,
+          reused: false,
+          created_new_order: true,
+          previous_order_id: existing.order_id,
+        },
       });
     }
 
@@ -186,11 +211,11 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "order_creation_failed" });
     }
 
-    return res.status(200).json({
-      success: true,
+    return await issueAuthorizationOrFail({
+      supabase,
       order,
-      reused: false,
-      created_new_order: false,
+      res,
+      extra: { success: true, order, reused: false, created_new_order: false },
     });
   } catch (err) {
     console.error("❌ create-order exception:", err);

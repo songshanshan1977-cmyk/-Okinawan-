@@ -42,7 +42,12 @@ export default function Step4Payment({ initialData, bookingUiLang, onBack, onOrd
       });
 
       const orderData = await orderRes.json();
-      console.log("🔵 create-order 返回：", orderData);
+      // ⚠️ A3: orderData 顶层带有一次性 payment_authorization_token —— 绝不能整体
+      // 打进 console（禁止 Token 进入 console/localStorage/URL query string），
+      // 这里打印的是去除 Token 后的副本。
+      const orderDataForLog = orderData ? { ...orderData } : orderData;
+      if (orderDataForLog) delete orderDataForLog.payment_authorization_token;
+      console.log("🔵 create-order 返回：", orderDataForLog);
 
       if (orderRes.status === 409 && orderData?.error === "paid_order_immutable") {
         // 订单已付款：不允许再修改，直接引导用户返回查看已有订单
@@ -62,6 +67,11 @@ export default function Step4Payment({ initialData, bookingUiLang, onBack, onOrd
       // ✅ 必须以数据库返回的 order_id 为准（无论是复用旧ID还是服务端新生成的ID）
       const orderId = orderData.order.order_id;
 
+      // A3: 一次性付款授权 Token 只存在于本地变量里，绝不进入 URL query string、
+      // localStorage 或 console —— 只在下面这一次 create-payment-intent 请求体
+      // 里使用一次即被消费。
+      const paymentToken = orderData.payment_authorization_token;
+
       // ⭐ 同步回父级 BookingFlow：Step4 之后的展示、重试、返回修改都必须用最新 order_id
       if (typeof onOrderIdResolved === "function") {
         onOrderIdResolved(orderId);
@@ -73,7 +83,7 @@ export default function Step4Payment({ initialData, bookingUiLang, onBack, onOrd
       const payRes = await fetch(CREATE_PAYMENT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId }),
+        body: JSON.stringify({ orderId, payment_token: paymentToken }),
       });
 
       const payData = await payRes.json();
