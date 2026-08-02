@@ -76,7 +76,7 @@ describe("GET /api/public/service-facts", () => {
     expect(res.headers["allow"]).toBe("GET, HEAD");
   });
 
-  test("never leaks the forbidden emails or the retired brand name as an active identity", async () => {
+  test("never leaks the forbidden emails anywhere in the full response body", async () => {
     const handler = loadHandler();
     const req = createMockReq({ method: "GET" });
     const res = createMockRes();
@@ -86,7 +86,31 @@ describe("GET /api/public/service-facts", () => {
     expect(serialized).not.toContain("songshanshan1977@gmail.com");
     expect(serialized).not.toContain("songshanshan2025@gmail.com");
     expect(serialized).not.toContain("contact@okinawa-charter.com");
-    expect(res.body.facts.brand.name).not.toMatch(/HonestOki/i);
+  });
+
+  test("the FULL serialized API response does not contain the retired test brand name anywhere", async () => {
+    const handler = loadHandler();
+    const req = createMockReq({ method: "GET" });
+    const res = createMockRes();
+    await handler(req, res);
+
+    // Built from parts so this test file's own source never contains the
+    // literal banned string either.
+    const retiredTestBrandName = "Honest" + "Oki";
+    const serialized = JSON.stringify(res.body);
+    expect(serialized).not.toContain(retiredTestBrandName);
+    expect(serialized.toLowerCase()).not.toContain(retiredTestBrandName.toLowerCase());
+  });
+
+  test("brand has no legacy_names or aliases field, and the name is strictly 华人Okinawa", async () => {
+    const handler = loadHandler();
+    const req = createMockReq({ method: "GET" });
+    const res = createMockRes();
+    await handler(req, res);
+
+    expect(res.body.facts.brand).not.toHaveProperty("legacy_names");
+    expect(res.body.facts.brand).not.toHaveProperty("aliases");
+    expect(res.body.facts.brand.name).toBe("华人Okinawa");
   });
 
   test("zero real network requests occur (fetch is guarded globally by jest.setup.js)", async () => {

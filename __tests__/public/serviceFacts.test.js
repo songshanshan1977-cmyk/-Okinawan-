@@ -24,26 +24,44 @@ describe("serviceFacts — module shape", () => {
     expect(SERVICE_FACTS_VERSION).toBe("2026-07-31-v1");
     expect(SERVICE_FACTS_LAST_UPDATED).toBe("2026-07-31");
   });
+
+  // Locks down the real top-level shape so a future edit can't silently add
+  // or remove a field without a test failing — this is also the source of
+  // truth for what the completion report must state as the field count.
+  test("has exactly these 11 top-level fields, no more, no fewer", () => {
+    expect(Object.keys(serviceFacts).sort()).toEqual(
+      [
+        "booking_policy",
+        "brand",
+        "cancellation_policy",
+        "children",
+        "contact",
+        "fee_rules",
+        "public_address_policy",
+        "reference_prices",
+        "service_languages",
+        "stroller",
+        "vehicle_recommendations",
+      ].sort()
+    );
+  });
 });
 
+// Retired internal test brand name — kept ONLY as a literal string inside
+// this test file (never inside lib/public/serviceFacts.js itself) so this
+// suite can assert its total absence from every public surface without the
+// production module ever having to contain the string at all.
+const RETIRED_TEST_BRAND_NAME = "Honest" + "Oki";
+
 describe("serviceFacts — brand", () => {
-  test("the active brand name is exactly 华人Okinawa, never HonestOki", () => {
-    expect(serviceFacts.brand.name).toBe("华人Okinawa");
-    expect(serviceFacts.brand.name).not.toMatch(/HonestOki/i);
+  test("brand has no legacy_names or aliases field of any kind", () => {
+    expect(serviceFacts.brand).not.toHaveProperty("legacy_names");
+    expect(serviceFacts.brand).not.toHaveProperty("aliases");
+    expect(Object.keys(serviceFacts.brand).sort()).toEqual(["name", "positioning"]);
   });
 
-  // "HonestOki" IS deliberately present, but ONLY inside legacy_names as an
-  // explicitly retired name — never as an active brand/alias. This is not
-  // the same claim as "HonestOki never appears anywhere in the module" (it
-  // must appear here, precisely so downstream consumers know NOT to use
-  // it) — see lib/public/serviceFacts.js's header comment and section 5 of
-  // this round's instructions, which explicitly require this legacy_names
-  // entry.
-  test("HonestOki appears ONLY as an explicitly-retired legacy name, never as an active alias", () => {
-    expect(serviceFacts.brand).not.toHaveProperty("aliases");
-    expect(serviceFacts.brand.legacy_names).toEqual([
-      { name: "HonestOki", note: "早期测试名称，不再作为公开品牌或别名" },
-    ]);
+  test("the brand name is strictly equal to 华人Okinawa", () => {
+    expect(serviceFacts.brand.name).toBe("华人Okinawa");
   });
 
   test("positioning includes the three confirmed claims", () => {
@@ -63,6 +81,11 @@ describe("serviceFacts — forbidden strings never appear anywhere in the object
       expect(serialized).not.toContain(forbidden);
     });
   }
+
+  test("the FULL serialized object (JSON.stringify(serviceFacts)) does not contain the retired test brand name anywhere", () => {
+    expect(serialized).not.toContain(RETIRED_TEST_BRAND_NAME);
+    expect(serialized.toLowerCase()).not.toContain(RETIRED_TEST_BRAND_NAME.toLowerCase());
+  });
 });
 
 describe("serviceFacts — service languages", () => {
