@@ -8,6 +8,7 @@ function createMockReq({ method = "POST", body = {}, query = {} } = {}) {
 function createMockRes() {
   const res = {};
   res.statusCode = 200;
+  res.headers = {};
   res.status = jest.fn((code) => {
     res.statusCode = code;
     return res;
@@ -16,6 +17,11 @@ function createMockRes() {
     res.body = payload;
     return res;
   });
+  res.setHeader = jest.fn((name, value) => {
+    res.headers[String(name).toLowerCase()] = value;
+    return res;
+  });
+  res.getHeader = jest.fn((name) => res.headers[String(name).toLowerCase()]);
   res.end = jest.fn(() => res);
   return res;
 }
