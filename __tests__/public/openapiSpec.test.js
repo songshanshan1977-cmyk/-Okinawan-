@@ -191,9 +191,16 @@ describe("openapiSpec — transactional paths", () => {
       const responses = ops[name].operation.responses;
       for (const [status, resp] of Object.entries(responses)) {
         if (status === "200") continue;
-        const enumValues = resp.content["application/json"].schema.properties.error.enum;
-        for (const code of enumValues) {
-          expect(validCodes.has(code)).toBe(true);
+        const schema = resp.content["application/json"].schema;
+        // Most error responses are a single flat {ok,error} schema, but a
+        // status can also be modeled as oneOf several shapes (see
+        // create_payment_link's 409 — paymentLink409Response()) — check
+        // every branch's error enum in that case.
+        const branches = schema.oneOf || [schema];
+        for (const branch of branches) {
+          for (const code of branch.properties.error.enum) {
+            expect(validCodes.has(code)).toBe(true);
+          }
         }
       }
     }
@@ -206,6 +213,140 @@ describe("openapiSpec — transactional paths", () => {
       expect(ext).toBeDefined();
       expect(stepNumbers.has(ext.step)).toBe(true);
     }
+  });
+});
+
+// Minimal, purpose-built validator for the flat/oneOf {ok,error[,...]}
+// object schemas this spec actually uses — not a general JSON Schema
+// engine, just enough to prove real API response payloads validate (or
+// don't) against paymentLink409Response()'s two branches the same way a
+// real OpenAPI/JSON-Schema validator would.
+function matchesObjectSchema(schema, value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const props = schema.properties || {};
+  if (schema.additionalProperties === false) {
+    for (const key of Object.keys(value)) {
+      if (!(key in props)) return false;
+    }
+  }
+  for (const req of schema.required || []) {
+    if (!(req in value)) return false;
+  }
+  for (const [key, val] of Object.entries(value)) {
+    const propSchema = props[key];
+    if (!propSchema) continue;
+    if (propSchema.enum && !propSchema.enum.includes(val)) return false;
+    if (propSchema.type === "boolean" && typeof val !== "boolean") return false;
+    if (propSchema.type === "string" && typeof val !== "string") return false;
+    if (propSchema.type === "array" && !Array.isArray(val)) return false;
+  }
+  return true;
+}
+
+function countOneOfMatches(schema, value) {
+  const branches = schema.oneOf || [schema];
+  return branches.filter((branch) => matchesObjectSchema(branch, value)).length;
+}
+
+describe("create_payment_link 409 — real inventory_unavailable payload vs. real plain-error payload", () => {
+  const ops = agentToolOperations();
+  const schema409 = ops.create_payment_link.operation.responses["409"].content["application/json"].schema;
+
+  test("the 409 schema is modeled as oneOf two branches (plain-error vs. inventory_unavailable+unavailable_dates)", () => {
+    expect(Array.isArray(schema409.oneOf)).toBe(true);
+    expect(schema409.oneOf).toHaveLength(2);
+  });
+
+  test("a real inventory_unavailable response — exactly what pages/api/agent/create-payment-link.js sends — validates against exactly one branch", () => {
+    // Mirrors pages/api/agent/create-payment-link.js:52-58 exactly: on
+    // AGENT_ERROR_CODES.INVENTORY_UNAVAILABLE the handler adds
+    // unavailable_dates straight off the tool result.
+    const realPayload = { ok: false, error: "inventory_unavailable", unavailable_dates: [] };
+    expect(countOneOfMatches(schema409, realPayload)).toBe(1);
+
+    const realPayloadWithDates = { ok: false, error: "inventory_unavailable", unavailable_dates: [{ date: "2026-09-01" }] };
+    expect(countOneOfMatches(schema409, realPayloadWithDates)).toBe(1);
+  });
+
+  test("additionalProperties:false does NOT wrongly reject the real inventory_unavailable response for carrying unavailable_dates", () => {
+    const realPayload = { ok: false, error: "inventory_unavailable", unavailable_dates: [] };
+    // The inventory_unavailable branch specifically must accept it.
+    const inventoryBranch = schema409.oneOf.find((b) => b.properties.error.enum.includes("inventory_unavailable"));
+    expect(matchesObjectSchema(inventoryBranch, realPayload)).toBe(true);
+  });
+
+  test("unavailable_dates is REQUIRED (not merely allowed) on the inventory_unavailable branch, and its items are un-invented generic objects", () => {
+    const inventoryBranch = schema409.oneOf.find((b) => b.properties.error.enum.includes("inventory_unavailable"));
+    expect(inventoryBranch.required).toContain("unavailable_dates");
+    expect(inventoryBranch.properties.unavailable_dates).toEqual({ type: "array", items: { type: "object" } });
+  });
+
+  test("the inventory_unavailable branch's error enum contains ONLY inventory_unavailable (not the other 4 codes)", () => {
+    const inventoryBranch = schema409.oneOf.find((b) => b.properties.error.enum.includes("inventory_unavailable"));
+    expect(inventoryBranch.properties.error.enum).toEqual(["inventory_unavailable"]);
+  });
+
+  test.each(["paid_order_immutable", "summary_not_confirmed", "payment_authorization_expired_or_used", "payment_summary_stale"])(
+    "a plain 409 error (%s) — {ok,error} only, no unavailable_dates — still validates against exactly one branch",
+    (code) => {
+      const realPayload = { ok: false, error: code };
+      expect(countOneOfMatches(schema409, realPayload)).toBe(1);
+    }
+  );
+
+  test("a plain 409 code carrying unavailable_dates (a combination the real API never produces) matches neither branch", () => {
+    const wronglyShapedPayload = { ok: false, error: "paid_order_immutable", unavailable_dates: [] };
+    // Rejected by the plain branch (additionalProperties:false, unavailable_dates
+    // not in its properties) AND by the inventory_unavailable branch (error
+    // enum mismatch) — correctly invalid under oneOf.
+    expect(countOneOfMatches(schema409, wronglyShapedPayload)).toBe(0);
+  });
+
+  test("the plain branch alone (ignoring inventory_unavailable) is unaffected: still {ok,error} only, additionalProperties:false", () => {
+    const plainBranch = schema409.oneOf.find((b) => !b.properties.error.enum.includes("inventory_unavailable"));
+    expect(plainBranch.additionalProperties).toBe(false);
+    expect(Object.keys(plainBranch.properties).sort()).toEqual(["error", "ok"]);
+    expect([...plainBranch.required].sort()).toEqual(["error", "ok"]);
+  });
+});
+
+describe("openapiSpec — the create_payment_link contract fix does not change the other 7 tools", () => {
+  const ops = agentToolOperations();
+  const OTHER_TOOLS = TOOL_NAMES.filter((name) => name !== "create_payment_link");
+
+  test("no other tool's 409 (or any other status) response schema uses oneOf", () => {
+    for (const name of OTHER_TOOLS) {
+      for (const [status, resp] of Object.entries(ops[name].operation.responses)) {
+        if (status === "200") continue;
+        expect(resp.content["application/json"].schema.oneOf).toBeUndefined();
+      }
+    }
+  });
+
+  test("no other tool's ERROR response gained an unavailable_dates field (check_availability's own 200 success response already legitimately has one, unrelated to this fix)", () => {
+    for (const name of OTHER_TOOLS) {
+      for (const [status, resp] of Object.entries(ops[name].operation.responses)) {
+        if (status === "200") continue;
+        const schema = resp.content["application/json"].schema;
+        expect(Object.keys(schema.properties || {})).not.toContain("unavailable_dates");
+      }
+    }
+  });
+
+  test("create_payment_link's non-409 statuses (200/401/400/404/500) are unchanged: flat {ok,error} shape, no oneOf", () => {
+    const responses = ops.create_payment_link.operation.responses;
+    for (const status of ["401", "400", "404", "500"]) {
+      const schema = responses[status].content["application/json"].schema;
+      expect(schema.oneOf).toBeUndefined();
+      expect(schema.additionalProperties).toBe(false);
+      expect(Object.keys(schema.properties).sort()).toEqual(["error", "ok"]);
+    }
+  });
+
+  test("Capabilities <-> OpenAPI 8-tool consistency still holds after the fix", () => {
+    const capTools = agentCapabilities.tools.map((t) => t.name).sort();
+    expect(Object.keys(ops).sort()).toEqual(capTools);
+    expect(capTools).toHaveLength(8);
   });
 });
 
