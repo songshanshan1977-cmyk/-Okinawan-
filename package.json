@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "jest"
   },
   "dependencies": {
     "next": "13.4.19",
@@ -16,5 +17,8 @@
     "resend": "^3.5.0",
     "react-day-picker": "^8.10.1",
     "date-fns": "^2.30.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
   }
 }
